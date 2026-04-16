@@ -35,5 +35,11 @@ eventsource-stream = { workspace = true }
 tower_governor = { workspace = true }
 figment = { workspace = true }
 subtle = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+instant-acme = { workspace = true }
+rcgen = { workspace = true }
+arc-swap = { workspace = true }
 
 [dev-dependencies]

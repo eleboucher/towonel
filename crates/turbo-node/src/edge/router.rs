@@ -7,6 +7,10 @@ use tracing::warn;
 
 use turbo_common::identity::AgentId;
 use turbo_common::routing::RouteTable;
+use turbo_common::tls_policy::{TlsMode, TlsPolicyTable};
+
+// Static TOML tenants only carry hostname ownership; TLS mode is published
+// by the agent via `SetHostnameTls` and arrives through the route broadcast.
 
 use crate::config::TenantEntry;
 
@@ -14,6 +18,7 @@ use crate::config::TenantEntry;
 /// converts between domain types ([`AgentId`]) and transport types ([`EndpointId`]).
 pub struct Router {
     table: RwLock<RouteTable>,
+    tls_policies: RwLock<TlsPolicyTable>,
     /// Optional direct socket addresses per agent EndpointId, used when relay
     /// discovery is unavailable (e.g. Docker e2e tests).
     direct_addrs: HashMap<AgentId, Vec<SocketAddr>>,
@@ -28,6 +33,7 @@ impl Router {
     pub fn load_from_config(tenants: &[TenantEntry]) -> anyhow::Result<Self> {
         let mut routes: HashMap<String, HashSet<AgentId>> = HashMap::new();
         let mut direct_addrs: HashMap<AgentId, Vec<SocketAddr>> = HashMap::new();
+        let tls_policies = TlsPolicyTable::new();
 
         for tenant in tenants {
             let mut agent_ids = Vec::with_capacity(tenant.agent_node_ids.len());
@@ -76,17 +82,26 @@ impl Router {
         let table = RouteTable::from_raw(routes);
         Ok(Self {
             table: RwLock::new(table),
+            tls_policies: RwLock::new(tls_policies),
             direct_addrs,
         })
     }
 
-    /// Replace the entire routing table.
+    /// Replace the entire routing table and the derived TLS policies.
     ///
     /// Used by the dynamic config sync: the hub builds a [`RouteTable`] from
-    /// signed config entries and broadcasts it to the edge.
+    /// signed config entries (including `SetHostnameTls` ops) and broadcasts
+    /// it to the edge.
     pub async fn replace(&self, new_table: RouteTable) {
-        let mut table = self.table.write().await;
-        *table = new_table;
+        let new_policies = new_table.tls_policies().clone();
+        *self.table.write().await = new_table;
+        *self.tls_policies.write().await = new_policies;
+    }
+
+    /// Look up the TLS policy for a hostname. Missing entries return
+    /// `Passthrough`.
+    pub async fn tls_policy(&self, hostname: &str) -> TlsMode {
+        self.tls_policies.read().await.lookup(hostname)
     }
 
     /// Look up which agents serve a given hostname.

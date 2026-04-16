@@ -23,3 +23,6 @@ base64 = { workspace = true }
 reqwest = { workspace = true }
 ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }

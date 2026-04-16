@@ -5,17 +5,21 @@ use serde::{Deserialize, Serialize};
 use crate::config_entry::{ConfigOp, SignedConfigEntry};
 use crate::identity::AgentId;
 use crate::ownership::OwnershipPolicy;
+use crate::tls_policy::{TlsMode, TlsPolicyTable};
 
-/// A materialized routing table: hostname -> set of agent IDs that serve it.
-///
-/// This is the domain-level route table. Adapters (iroh, etc.) convert
-/// `AgentId` to their transport-specific peer identifiers.
+/// A materialized routing table: hostname -> set of agent IDs that serve it,
+/// plus a parallel TLS policy table so edges can look up termination mode
+/// on the hot path.
 ///
 /// Serializes as canonical CBOR on the hub's `/v1/routes/subscribe` SSE
 /// stream, so an edge-only node can apply snapshots pushed by a remote hub.
+/// `tls_policies` is `#[serde(default)]` for wire compatibility with older
+/// hubs/edges that predate per-hostname TLS config.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RouteTable {
     routes: HashMap<String, HashSet<AgentId>>,
+    #[serde(default, skip_serializing_if = "TlsPolicyTable::is_empty")]
+    tls_policies: TlsPolicyTable,
 }
 
 impl RouteTable {
@@ -65,7 +69,9 @@ impl RouteTable {
                     }
                 }
                 ConfigOp::DeleteHostname { hostname } => {
-                    state.hostnames.remove(&hostname.to_lowercase());
+                    let key = hostname.to_lowercase();
+                    state.hostnames.remove(&key);
+                    state.tls.remove(&key);
                 }
                 ConfigOp::UpsertAgent { agent_id } => {
                     state.agents.insert(agent_id.clone());
@@ -73,20 +79,49 @@ impl RouteTable {
                 ConfigOp::RevokeAgent { agent_id } => {
                     state.agents.remove(agent_id);
                 }
+                ConfigOp::SetHostnameTls { hostname, mode } => {
+                    if policy.is_hostname_allowed(&payload.tenant_id, hostname) {
+                        state.tls.insert(hostname.to_lowercase(), mode.clone());
+                    } else {
+                        tracing::warn!(
+                            tenant = %payload.tenant_id,
+                            %hostname,
+                            "skipping unauthorized TLS policy"
+                        );
+                    }
+                }
             }
         }
 
         let mut routes: HashMap<String, HashSet<AgentId>> = HashMap::new();
+        let mut tls_policies = TlsPolicyTable::new();
         for state in tenant_state.values() {
             if state.agents.is_empty() {
                 continue;
             }
             for hostname in &state.hostnames {
                 routes.insert(hostname.clone(), state.agents.clone());
+                if let Some(mode) = state.tls.get(hostname) {
+                    tls_policies.insert(hostname.clone(), mode.clone());
+                }
             }
         }
 
-        Self { routes }
+        Self {
+            routes,
+            tls_policies,
+        }
+    }
+
+    /// Borrow the TLS policy table for in-process lookups on the edge.
+    pub fn tls_policies(&self) -> &TlsPolicyTable {
+        &self.tls_policies
+    }
+
+    /// Look up the TLS mode for a hostname (exact or wildcard); missing
+    /// entries default to `Passthrough`.
+    pub fn tls_mode(&self, hostname: &str) -> TlsMode {
+        self.tls_policies.lookup(hostname)
     }
 
     /// Look up which agents serve a hostname.
@@ -117,7 +152,10 @@ impl RouteTable {
     /// don't need to replay signed config entries. Ownership is already
     /// enforced by the TOML structure itself.
     pub fn from_raw(routes: HashMap<String, HashSet<AgentId>>) -> Self {
-        Self { routes }
+        Self {
+            routes,
+            tls_policies: TlsPolicyTable::new(),
+        }
     }
 
     /// Check if the table is empty.
@@ -147,6 +185,7 @@ impl RouteTable {
 struct TenantState {
     hostnames: HashSet<String>,
     agents: HashSet<AgentId>,
+    tls: HashMap<String, TlsMode>,
 }
 
 #[cfg(test)]
@@ -545,6 +584,128 @@ mod tests {
             table.lookup("deep.app.example.eu").is_none(),
             "wildcards are single-level"
         );
+    }
+
+    #[test]
+    fn set_hostname_tls_populates_policy() {
+        use crate::tls_policy::TlsMode;
+
+        let kp = TenantKeypair::generate();
+        let agent = AgentKeypair::generate();
+        let policy = policy_for(&kp, &["*.bob.example"]);
+        let entries = vec![
+            sign_entry(
+                &kp,
+                1,
+                ConfigOp::UpsertHostname {
+                    hostname: "*.bob.example".into(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                2,
+                ConfigOp::UpsertAgent {
+                    agent_id: agent.id(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                3,
+                ConfigOp::SetHostnameTls {
+                    hostname: "*.bob.example".into(),
+                    mode: TlsMode::Terminate,
+                },
+            ),
+        ];
+        let table = RouteTable::from_entries(&entries, &policy);
+        assert!(matches!(
+            table.tls_mode("foo.bob.example"),
+            TlsMode::Terminate
+        ));
+        // Routes remain intact.
+        assert!(table.lookup("foo.bob.example").is_some());
+    }
+
+    #[test]
+    fn set_hostname_tls_rejected_for_unowned_hostname() {
+        use crate::tls_policy::TlsMode;
+
+        let kp = TenantKeypair::generate();
+        let agent = AgentKeypair::generate();
+        let policy = policy_for(&kp, &["allowed.example.eu"]);
+        let entries = vec![
+            sign_entry(
+                &kp,
+                1,
+                ConfigOp::UpsertHostname {
+                    hostname: "allowed.example.eu".into(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                2,
+                ConfigOp::UpsertAgent {
+                    agent_id: agent.id(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                3,
+                ConfigOp::SetHostnameTls {
+                    hostname: "not-mine.example.eu".into(),
+                    mode: TlsMode::Terminate,
+                },
+            ),
+        ];
+        let table = RouteTable::from_entries(&entries, &policy);
+        assert_eq!(
+            table.tls_mode("not-mine.example.eu"),
+            TlsMode::Passthrough,
+            "TLS policy for unowned hostname must be ignored"
+        );
+    }
+
+    #[test]
+    fn delete_hostname_clears_tls_policy() {
+        use crate::tls_policy::TlsMode;
+
+        let kp = TenantKeypair::generate();
+        let agent = AgentKeypair::generate();
+        let policy = policy_for(&kp, &["app.example.eu"]);
+        let entries = vec![
+            sign_entry(
+                &kp,
+                1,
+                ConfigOp::UpsertHostname {
+                    hostname: "app.example.eu".into(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                2,
+                ConfigOp::UpsertAgent {
+                    agent_id: agent.id(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                3,
+                ConfigOp::SetHostnameTls {
+                    hostname: "app.example.eu".into(),
+                    mode: TlsMode::Terminate,
+                },
+            ),
+            sign_entry(
+                &kp,
+                4,
+                ConfigOp::DeleteHostname {
+                    hostname: "app.example.eu".into(),
+                },
+            ),
+        ];
+        let table = RouteTable::from_entries(&entries, &policy);
+        assert!(table.is_empty());
+        assert_eq!(table.tls_mode("app.example.eu"), TlsMode::Passthrough);
     }
 
     #[test]

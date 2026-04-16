@@ -2,7 +2,7 @@
 
 > **Status: Alpha** -- Functional and tested, but APIs and wire format may change between versions.
 
-Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbound ports. The edge never holds TLS keys, never decrypts traffic, and never sees request content.
+Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbound ports. Per hostname, the edge either passes raw TLS through to your origin (default — it never sees keys or request content) **or** terminates TLS with an on-demand Let's Encrypt cert. The agent picks.
 
 **How it compares:** Like Cloudflare Tunnel but self-hosted, decentralized, and post-quantum signed. No accounts, no SaaS — just cryptographic keypairs and a VPS you control.
 
@@ -13,19 +13,18 @@ Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbou
  Client               turbo-node                    turbo-agent
    |                  ┌──────────┐                       |
    | TLS ClientHello  │ hub  API │◄─── turbo-cli         |
-   | ──────────────►  │ (SQLite) │     (invites,         |
-   |  (SNI: app.eu)   │          │      entries)         |
-   |                  │ edge     │                       |
-   |                  │ :443     │   iroh QUIC stream    |
-   |                  │  [SNI]───┼──────────────────►    |
-   |                  │          │  (hostname header     |
-   |                  └──────────┘   + raw TLS bytes)    |
-   |                      |                         [local origin]
-   |                      |                              |
-   | ◄──────── bidirectional encrypted bytes ──────────► |
-   |                      |                              |
-   | TLS terminated here  | never decrypted              | TLS terminated here
-   | (by origin cert)     | (passthrough only)           | (origin holds key)
+   | ──────────────►  │ (SQLite) │     (invites)         |
+   |  (SNI: app.eu)   │          │                       |
+   |                  │ edge :443│◄─ SetHostnameTls ──── + (signed, on agent start)
+   |                  │  (peek   │                       |
+   |                  │   SNI)   │   iroh QUIC stream    |
+   |                  │    │     │                       |
+   |                  │    ▼     │                       |
+   |                  │ Passthru?├──► raw TLS ──────────►|  [origin holds cert]
+   |                  │    │     │                       |
+   |                  │  Terminate                       |
+   |                  │ (ACME)   ├──► plaintext ────────►|  [origin HTTP]
+   |                  └──────────┘                       |
 
  Federation (optional):
 
@@ -62,27 +61,11 @@ docker build -f Dockerfile.agent -t turbo-agent:latest .
 
 ### 1. Start the node (operator, on a VPS)
 
-```bash
-turbo-node -c node.toml
-```
 
-Minimal `node.toml`:
 
-```toml
-[identity]
-key_path = "node.key"
-
-[hub]
-enabled = true
-
-[edge]
-enabled = true
-```
-
-Or skip the file entirely and use env vars:
 
 ```bash
-TURBO_IDENTITY__KEY_PATH=node.key turbo-node -c /dev/null
+  turbo-node
 ```
 
 On first run, `node.key` and `operator.key` are auto-generated. Save the operator key — you'll need it to create invites. To generate keys ahead of time, any tool that writes 32 random bytes works:
@@ -111,17 +94,19 @@ Send the token to Alice through a trusted channel.
 turbo-agent init --invite tt_inv_1_...
 ```
 
-This generates keypairs, registers with the hub, and writes `~/.turbo-tunnel/state.toml`. Then edit `~/.turbo-tunnel/agent.toml`:
-
-```toml
-[[services]]
-hostname = "app.alice.example.eu"
-origin = "127.0.0.1:8443"
-```
 
 ```bash
-turbo-agent
+TURBO_AGENT_SERVICES='[
+  {"hostname":"app.alice.example.eu","origin":"127.0.0.1:8443"},
+  {"hostname":"*.alice.example.eu","origin":"127.0.0.1:8080",
+   "tls_mode":{"mode":"terminate"}}
+]' turbo-agent
 ```
+
+- First service: passthrough (default). The origin terminates TLS.
+- Second service: the edge terminates TLS using an on-demand Let's Encrypt cert, forwards plaintext to the origin. Useful when the origin can't hold a cert itself.
+
+On startup the agent publishes each hostname's `tls_mode` to the hub as a signed `SetHostnameTls` entry. Edges pick it up via the existing route subscription.
 
 ### 4. Point DNS and test
 
@@ -207,15 +192,41 @@ turbo-cli entry submit --op revoke-agent --agent-id <hex-agent-id>
 turbo-cli entry list
 ```
 
-## TLS at the origin
+## TLS handling
 
-turbo-tunnel is SNI passthrough — your origin terminates TLS, not the edge. Common setups:
+Per-hostname, the agent picks one of two modes:
 
-- **Caddy** (simplest): `app.your.eu { reverse_proxy myapp:8080 }` — auto-renews via ACME
+### Passthrough (default)
+
+The edge extracts SNI and forwards raw TLS bytes to the origin. Your origin holds the cert and handles the handshake. The edge never sees keys or request content. ACME challenges (Let's Encrypt) resolve through the tunnel automatically.
+
+Common origin setups:
+
 - **nginx**: standard TLS termination config
 - **Kubernetes**: cert-manager + Ingress, agent points at the cluster-internal HTTPS port
 
-ACME challenges (Let's Encrypt) resolve through the tunnel automatically.
+Alternatively, have the agent re-wrap the TCP connection with TLS before sending it to an HTTPS origin (like Cloudflare Tunnel's `originServerName`):
+
+```json
+{"hostname":"*.alice.example.eu","origin":"envoy.ns:443",
+ "origin_server_name":"edge.alice.example.eu"}
+```
+
+### Edge termination
+
+Set `tls_mode` on the service and the edge terminates TLS using an on-demand Let's Encrypt cert, then forwards plaintext to the agent which forwards to the origin over plain TCP.
+
+```json
+{"hostname":"*.bob.example","origin":"127.0.0.1:8080",
+ "tls_mode":{"mode":"terminate"}}
+```
+
+Cert lifecycle:
+
+- First request for a hostname triggers HTTP-01 issuance against Let's Encrypt. Subsequent requests reuse the cached cert. Renewed lazily.
+- Requires `TURBO_EDGE__TLS__ACME_EMAIL` on the node and inbound :80 reachable for ACME challenges.
+- Wildcards (`*.bob.example`) issue per exact subdomain on first contact — no DNS-01 required. Subject to Let's Encrypt rate limits (50 certs/week/registered domain).
+- The community member just needs a CNAME from their domain (e.g. `*.bob.example`) to an edge hostname; no DNS provider API access needed.
 
 ## Deploy
 
@@ -241,17 +252,41 @@ All settings are configurable via `TURBO_*` env vars (double underscore separate
 | `TURBO_HUB__OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file |
 | `TURBO_HUB__DNS_WEBHOOK_URL` | | POST hostname changes to this URL |
 | `TURBO_EDGE__ENABLED` | `true` | Enable the edge listener |
-| `TURBO_EDGE__LISTEN_ADDR` | `0.0.0.0:443` | Edge TCP bind address |
+| `TURBO_EDGE__LISTEN_ADDR` | `0.0.0.0:443` | Edge TCP bind address (TLS passthrough + termination share this port) |
 | `TURBO_EDGE__HEALTH_LISTEN_ADDR` | `0.0.0.0:9090` | Health + Prometheus metrics |
 | `TURBO_EDGE__HUB_URL` | | Remote hub URL (edge-only mode) |
+| `TURBO_EDGE__TLS__ACME_EMAIL` | | Enables on-demand Let's Encrypt issuance |
+| `TURBO_EDGE__TLS__CERT_DIR` | `/data/certs` | Where PEMs are cached |
+| `TURBO_EDGE__TLS__ACME_STAGING` | `false` | Use LE staging (avoids rate limits while testing) |
+| `TURBO_EDGE__TLS__HTTP_LISTEN_ADDR` | `0.0.0.0:80` | HTTP-01 challenge responder |
 
 turbo-agent (`TURBO_AGENT_*`):
 
 | Env var | Description |
 |---------|-------------|
-| `TURBO_AGENT_SERVICES` | JSON array: `[{"hostname":"app.example.eu","origin":"127.0.0.1:8080"}]` |
+| `TURBO_AGENT_SERVICES` | JSON array — see below |
 | `TURBO_AGENT_IDENTITY__KEY_PATH` | Agent key path |
 | `TURBO_AGENT_TRUSTED_EDGES` | JSON array of hex endpoint IDs |
+
+`TURBO_AGENT_SERVICES` shape:
+
+```json
+[
+  {
+    "hostname": "app.alice.example.eu",
+    "origin": "127.0.0.1:8080",
+    "origin_server_name": "optional — TLS SNI to use when dialing the origin",
+    "tls_mode": { "mode": "passthrough" }
+  },
+  {
+    "hostname": "*.bob.example",
+    "origin": "127.0.0.1:9000",
+    "tls_mode": { "mode": "terminate" }
+  }
+]
+```
+
+`tls_mode` is optional; missing means passthrough. On startup the agent POSTs a signed `SetHostnameTls` entry per service to the hub — edges pick it up via the existing route broadcast.
 
 turbo-cli:
 
@@ -298,7 +333,7 @@ Write a small HTTP handler that receives this and calls your DNS provider (Cloud
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `POST` | `/v1/entries` | tenant sig | Submit a signed config entry |
+| `POST` | `/v1/entries` | tenant sig | Submit a signed config entry (`UpsertHostname`, `UpsertAgent`, `SetHostnameTls`, etc.) |
 | `GET` | `/v1/tenants/{id}/entries` | none | List entries for a tenant |
 | `GET` | `/v1/health` | none | Hub health check |
 | `GET` | `/v1/edges` | none | List edge nodes |

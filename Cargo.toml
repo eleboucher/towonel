@@ -70,3 +70,13 @@ subtle = "2.6"
 zeroize = { version = "1", features = ["derive"] }
 # Read passphrases without terminal echo (key export/import).
 rpassword = "5"
+# TLS termination at the edge.
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+rustls-pemfile = "2"
+# ACME (Let's Encrypt) automatic certificate provisioning.
+instant-acme = "0.8"
+rcgen = "0.14"
+webpki-roots = "0.26"
+# Lock-free snapshot for the hot path (rustls cert resolver).
+arc-swap = "1.7"

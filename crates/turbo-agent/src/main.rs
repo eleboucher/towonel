@@ -1,6 +1,7 @@
 mod add_agent;
 mod config;
 mod init;
+mod publish_tls;
 mod tunnel;
 
 use std::collections::HashSet;
@@ -90,6 +91,10 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install ring CryptoProvider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -195,6 +200,24 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
              bootstrap, add entries manually to ~/.turbo-tunnel/state.toml, or pass \
              --allow-any-edge for local testing (NOT for production)."
         );
+    }
+
+    match (
+        resolved.hub_url.as_deref(),
+        resolved.tenant_key_path.as_deref(),
+    ) {
+        (Some(hub_url), Some(tenant_key_path)) if !resolved.services.is_empty() => {
+            if let Err(e) = publish_tls::publish(hub_url, tenant_key_path, &resolved.services).await
+            {
+                warn!(error = %e, "TLS policy publish failed; edge will use passthrough defaults");
+            }
+        }
+        _ => {
+            info!(
+                "skipping TLS policy publish (hub URL or tenant key missing; run \
+                 `turbo-agent init` to bootstrap)"
+            );
+        }
     }
 
     tokio::select! {

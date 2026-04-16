@@ -12,40 +12,45 @@ use turbo_common::tunnel::read_hostname_header;
 
 use crate::config::ServiceConfig;
 
-/// Maps hostname to local origin address (e.g., "127.0.0.1:8080").
+struct OriginTarget {
+    address: String,
+    server_name: Option<String>,
+}
+
 pub struct ServiceMap {
-    services: HashMap<String, String>,
+    services: HashMap<String, OriginTarget>,
 }
 
 impl ServiceMap {
     pub fn from_config(services: &[ServiceConfig]) -> Self {
         let mut map = HashMap::new();
         for svc in services {
-            map.insert(svc.hostname.to_lowercase(), svc.origin.clone());
+            map.insert(
+                svc.hostname.to_lowercase(),
+                OriginTarget {
+                    address: svc.origin.clone(),
+                    server_name: svc.origin_server_name.clone(),
+                },
+            );
         }
         Self { services: map }
     }
 
-    pub fn lookup(&self, hostname: &str) -> Option<&str> {
+    fn lookup(&self, hostname: &str) -> Option<&OriginTarget> {
         let lower = hostname.to_lowercase();
-        if let Some(origin) = self.services.get(&lower) {
-            return Some(origin.as_str());
+        if let Some(target) = self.services.get(&lower) {
+            return Some(target);
         }
         if let Some(dot_pos) = lower.find('.') {
             let wildcard = format!("*.{}", &lower[dot_pos + 1..]);
-            if let Some(origin) = self.services.get(&wildcard) {
-                return Some(origin.as_str());
+            if let Some(target) = self.services.get(&wildcard) {
+                return Some(target);
             }
         }
         None
     }
 }
 
-/// Run the agent tunnel: accept incoming connections from edges and forward
-/// each stream to the matching local origin service.
-///
-/// Connections from peers not in `trusted_edges` are rejected, unless
-/// `allow_any_edge` is true (insecure, for local testing).
 pub async fn run(
     endpoint: &iroh::Endpoint,
     service_map: Arc<ServiceMap>,
@@ -135,52 +140,29 @@ async fn handle_stream(
         .await
         .context("failed to read hostname header")?;
 
-    let origin = service_map
+    let target = service_map
         .lookup(&hostname)
         .ok_or_else(|| anyhow::anyhow!("no service configured for hostname {hostname}"))?;
 
     let span = info_span!("stream",
         %hostname,
-        %origin,
+        origin = %target.address,
         edge = %edge_id.fmt_short(),
     );
 
     async {
         info!("forwarding to origin");
 
-        let origin_stream = TcpStream::connect(origin)
+        let tcp_stream = TcpStream::connect(&target.address)
             .await
-            .with_context(|| format!("failed to connect to origin {origin}"))?;
+            .with_context(|| format!("failed to connect to origin {}", target.address))?;
 
-        let (mut origin_read, mut origin_write) = origin_stream.into_split();
-
-        let quic_to_origin = async {
-            let res = io::copy(&mut quic_recv, &mut origin_write).await;
-            let _ = origin_write.shutdown().await; // close TCP write -> origin sees EOF
-            res
-        };
-
-        let origin_to_quic = async {
-            let res = io::copy(&mut origin_read, &mut quic_send).await;
-            let _ = quic_send.finish();
-            res
-        };
-
-        let (q2o, o2q) = tokio::join!(quic_to_origin, origin_to_quic);
-
-        if let Err(e) = &q2o {
-            warn!("edge->origin: {e}");
-        }
-        if let Err(e) = &o2q {
-            warn!("origin->edge: {e}");
-        }
-
-        let bytes_in = q2o.unwrap_or(0);
-        let bytes_out = o2q.unwrap_or(0);
+        match &target.server_name {
+            Some(sni) => forward_tls(tcp_stream, sni, &mut quic_recv, &mut quic_send).await,
+            None => forward_plain(tcp_stream, &mut quic_recv, &mut quic_send).await,
+        }?;
 
         info!(
-            bytes_in,
-            bytes_out,
             duration_ms = start.elapsed().as_millis() as u64,
             "stream closed"
         );
@@ -188,4 +170,77 @@ async fn handle_stream(
     }
     .instrument(span)
     .await
+}
+
+async fn forward_plain(
+    origin: TcpStream,
+    quic_recv: &mut iroh::endpoint::RecvStream,
+    quic_send: &mut iroh::endpoint::SendStream,
+) -> anyhow::Result<()> {
+    let (mut origin_read, mut origin_write) = origin.into_split();
+
+    let q2o = async {
+        let res = io::copy(quic_recv, &mut origin_write).await;
+        let _ = origin_write.shutdown().await;
+        res
+    };
+    let o2q = async {
+        let res = io::copy(&mut origin_read, quic_send).await;
+        let _ = quic_send.finish();
+        res
+    };
+
+    let (r1, r2) = tokio::join!(q2o, o2q);
+    if let Err(e) = &r1 {
+        warn!("edge->origin: {e}");
+    }
+    if let Err(e) = &r2 {
+        warn!("origin->edge: {e}");
+    }
+    Ok(())
+}
+
+async fn forward_tls(
+    origin: TcpStream,
+    server_name: &str,
+    quic_recv: &mut iroh::endpoint::RecvStream,
+    quic_send: &mut iroh::endpoint::SendStream,
+) -> anyhow::Result<()> {
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let tls_config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+    let dns_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
+        .map_err(|e| anyhow::anyhow!("invalid origin_server_name `{server_name}`: {e}"))?;
+
+    let tls_stream = connector
+        .connect(dns_name, origin)
+        .await
+        .with_context(|| format!("TLS handshake with origin failed (SNI: {server_name})"))?;
+
+    let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
+
+    let q2o = async {
+        let res = io::copy(quic_recv, &mut tls_write).await;
+        let _ = tls_write.shutdown().await;
+        res
+    };
+    let o2q = async {
+        let res = io::copy(&mut tls_read, quic_send).await;
+        let _ = quic_send.finish();
+        res
+    };
+
+    let (r1, r2) = tokio::join!(q2o, o2q);
+    if let Err(e) = &r1 {
+        warn!("edge->origin(tls): {e}");
+    }
+    if let Err(e) = &r2 {
+        warn!("origin(tls)->edge: {e}");
+    }
+    Ok(())
 }

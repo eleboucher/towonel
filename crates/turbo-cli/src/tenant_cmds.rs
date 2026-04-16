@@ -98,6 +98,7 @@ pub(crate) async fn cmd_tenant_leave(
             ConfigOp::RevokeAgent { agent_id } => {
                 authorized_agents.remove(&agent_id);
             }
+            ConfigOp::SetHostnameTls { .. } => {}
         }
     }
 

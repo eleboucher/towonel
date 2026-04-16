@@ -9,4 +9,5 @@ pub mod routing;
 pub mod shutdown;
 pub mod sni;
 pub mod time;
+pub mod tls_policy;
 pub mod tunnel;

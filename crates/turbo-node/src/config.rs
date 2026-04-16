@@ -74,13 +74,39 @@ pub struct EdgeConfig {
     pub listen_addr: String,
     #[serde(default = "default_health_listen")]
     pub health_listen_addr: String,
-    /// For edge-only processes: URL of the remote hub to subscribe to for
-    /// route-table updates. Unused when the hub is co-located (full-node
-    /// mode uses in-process broadcast).
     #[serde(default)]
     pub hub_url: Option<String>,
     #[serde(default)]
     pub public_addresses: Vec<String>,
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TlsConfig {
+    /// Directory for PEM cert/key pairs. ACME writes here automatically;
+    /// operators can also drop user-provided certs here (named `{hostname}.crt`
+    /// + `{hostname}.key`).
+    #[serde(default = "default_cert_dir")]
+    pub cert_dir: std::path::PathBuf,
+    /// ACME email for Let's Encrypt account registration. Required for
+    /// on-demand issuance; missing email disables ACME (certs must be
+    /// user-provided).
+    pub acme_email: Option<String>,
+    /// Use Let's Encrypt staging (for testing, avoids rate limits).
+    #[serde(default)]
+    pub acme_staging: bool,
+    /// Bind address for the HTTP-01 challenge server (default ":80").
+    #[serde(default = "default_http_listen")]
+    pub http_listen_addr: String,
+}
+
+fn default_cert_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from("/data/certs")
+}
+
+fn default_http_listen() -> String {
+    "0.0.0.0:80".to_string()
 }
 
 /// Operator-configured tenant allowlist entry.
@@ -98,7 +124,8 @@ pub struct TenantEntry {
     pub pq_public_key: String,
     /// Human-readable alias (operator-local, not part of the protocol).
     pub name: String,
-    /// Hostname patterns this tenant is allowed to claim.
+    /// Hostname patterns this tenant is allowed to claim. TLS mode is not
+    /// configured here — the agent publishes it via `SetHostnameTls` entries.
     pub hostnames: Vec<String>,
     /// Hex-encoded iroh EndpointIds of agents serving this tenant.
     #[serde(default)]
@@ -156,6 +183,7 @@ impl Default for EdgeConfig {
             health_listen_addr: default_health_listen(),
             hub_url: None,
             public_addresses: Vec::new(),
+            tls: None,
         }
     }
 }

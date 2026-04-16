@@ -560,7 +560,11 @@ async fn redeem_invite_expired_returns_410() {
 }
 
 #[tokio::test]
-async fn redeem_invite_already_redeemed_rejected() {
+async fn redeem_invite_is_idempotent_with_valid_secret() {
+    // Redeeming an already-redeemed invite is allowed when the caller presents
+    // the correct invite secret: the old tenant binding is replaced by the new
+    // one. This matches Cloudflare Tunnel's idempotency and lets an agent
+    // recover after its key-bearing PVC is lost.
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
 
@@ -578,7 +582,6 @@ async fn redeem_invite_already_redeemed_rejected() {
     .await;
     assert_eq!(status, 200);
 
-    // Second redemption attempt with a different tenant must be rejected.
     let (status, body) = post_json(
         &client,
         &hub.url("/v1/invites/redeem"),
@@ -586,8 +589,8 @@ async fn redeem_invite_already_redeemed_rejected() {
         None,
     )
     .await;
-    assert_eq!(status, 409);
-    assert_eq!(body["error"]["code"], "invite_already_redeemed");
+    assert_eq!(status, 200);
+    assert_eq!(body["tenant_id"], t2.id().to_string());
 }
 
 #[tokio::test]

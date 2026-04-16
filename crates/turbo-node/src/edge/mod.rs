@@ -1,6 +1,8 @@
+pub mod acme;
 pub mod health;
 pub mod router;
 pub mod subscribe;
+pub mod tls;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,10 +18,13 @@ use tracing::{Instrument, debug, info, info_span, warn};
 
 use turbo_common::protocol::ALPN_TUNNEL;
 use turbo_common::sni::extract_sni;
+use turbo_common::tls_policy::TlsMode;
 use turbo_common::tunnel::write_hostname_header;
 
+use self::acme::AcmeCoordinator;
 use self::health::EdgeMetrics;
 use self::router::Router;
+use self::tls::CertStore;
 
 /// Maximum bytes to peek from a TCP connection to extract the TLS ClientHello.
 /// 16 KiB is more than enough for any realistic ClientHello.
@@ -77,9 +82,12 @@ impl AgentHealthState {
 /// leave a harmless stale entry).
 type AgentHealthMap = Mutex<HashMap<iroh::EndpointId, Arc<AgentHealthState>>>;
 
-/// The edge: listens on a TCP port, extracts SNI from TLS ClientHello, routes
-/// to the correct agent via an iroh QUIC stream, and does bidirectional copy.
-/// The edge never holds TLS private keys.
+/// The edge: listens on one TCP port, peeks the SNI, looks up the hostname's
+/// TLS policy, and dispatches:
+///   - `Passthrough`: raw TLS bytes forwarded to the agent (agent/origin handles TLS)
+///   - `Terminate`: edge handshakes TLS here, forwards plaintext to the agent
+///
+/// A single port serves both modes. Community members pick per-hostname.
 pub struct Edge {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
@@ -87,7 +95,14 @@ pub struct Edge {
     agent_health: Arc<AgentHealthMap>,
     listen_addr: String,
     health_listen_addr: String,
+    tls: Option<TlsState>,
     metrics: EdgeMetrics,
+}
+
+struct TlsState {
+    server_config: Arc<rustls::ServerConfig>,
+    cert_store: CertStore,
+    acme: Option<Arc<AcmeCoordinator>>,
 }
 
 impl Edge {
@@ -104,15 +119,21 @@ impl Edge {
             agent_health: Arc::new(Mutex::new(HashMap::new())),
             listen_addr,
             health_listen_addr,
+            tls: None,
             metrics: EdgeMetrics::new(),
         }
     }
 
-    /// Run the edge. Binds a TCP listener, starts the health/metrics HTTP
-    /// server, and spawns a task per TCP connection.
-    ///
-    /// The edge endpoint is outbound-only -- it does not accept incoming iroh
-    /// connections, so no incoming guard is needed.
+    pub fn with_tls(mut self, cert_store: CertStore, acme: Option<Arc<AcmeCoordinator>>) -> Self {
+        let server_config = cert_store.server_config();
+        self.tls = Some(TlsState {
+            server_config,
+            cert_store,
+            acme,
+        });
+        self
+    }
+
     pub async fn run(&self) -> anyhow::Result<()> {
         let health_app = health::router(self.metrics.clone());
         let health_listener = TcpListener::bind(&self.health_listen_addr).await?;
@@ -122,7 +143,7 @@ impl Edge {
         });
 
         let listener = TcpListener::bind(&self.listen_addr).await?;
-        info!(listen = %self.listen_addr, "edge listening (TLS passthrough mode)");
+        info!(listen = %self.listen_addr, tls = self.tls.is_some(), "edge listening");
 
         loop {
             let (tcp_stream, peer_addr) = match listener.accept().await {
@@ -134,18 +155,22 @@ impl Edge {
             };
             debug!(%peer_addr, "accepted TCP connection");
 
-            let router = Arc::clone(&self.router);
-            let endpoint = Arc::clone(&self.endpoint);
-            let pool = Arc::clone(&self.agent_pool);
-            let health = Arc::clone(&self.agent_health);
-            let metrics = self.metrics.clone();
+            let ctx = ConnCtx {
+                router: Arc::clone(&self.router),
+                endpoint: Arc::clone(&self.endpoint),
+                pool: Arc::clone(&self.agent_pool),
+                health: Arc::clone(&self.agent_health),
+                metrics: self.metrics.clone(),
+                tls_acceptor: self
+                    .tls
+                    .as_ref()
+                    .map(|t| tokio_rustls::TlsAcceptor::from(Arc::clone(&t.server_config))),
+                cert_store: self.tls.as_ref().map(|t| t.cert_store.clone()),
+                acme: self.tls.as_ref().and_then(|t| t.acme.clone()),
+            };
 
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(
-                    tcp_stream, peer_addr, router, endpoint, pool, health, metrics,
-                )
-                .await
-                {
+                if let Err(e) = handle_connection(tcp_stream, peer_addr, ctx).await {
                     debug!(%peer_addr, error = %e, "connection handling failed");
                 }
             });
@@ -153,25 +178,33 @@ impl Edge {
     }
 }
 
-/// Handle a single incoming TCP connection: peek SNI, route, tunnel.
-async fn handle_connection(
-    tcp_stream: TcpStream,
-    peer_addr: std::net::SocketAddr,
+/// Per-connection context shared between the dispatch paths.
+#[derive(Clone)]
+struct ConnCtx {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
     pool: Arc<AgentPool>,
     health: Arc<AgentHealthMap>,
     metrics: EdgeMetrics,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    cert_store: Option<CertStore>,
+    acme: Option<Arc<AcmeCoordinator>>,
+}
+
+/// Dispatch a single incoming TCP connection. Peek the SNI, look up the
+/// hostname's policy, then either terminate TLS here or pass through to the
+/// agent.
+async fn handle_connection(
+    tcp_stream: TcpStream,
+    peer_addr: std::net::SocketAddr,
+    ctx: ConnCtx,
 ) -> anyhow::Result<()> {
-    metrics.total_connections.inc();
-    metrics.active_connections.inc();
+    ctx.metrics.total_connections.inc();
+    ctx.metrics.active_connections.inc();
 
-    let result = handle_connection_inner(
-        tcp_stream, peer_addr, router, endpoint, pool, health, &metrics,
-    )
-    .await;
+    let result = handle_connection_inner(tcp_stream, peer_addr, &ctx).await;
 
-    metrics.active_connections.dec();
+    ctx.metrics.active_connections.dec();
 
     if let Err(ref e) = result {
         debug!(%peer_addr, error = %e, "connection ended with error");
@@ -180,7 +213,6 @@ async fn handle_connection(
     result
 }
 
-/// Get or create the health state for an agent.
 async fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentHealthState> {
     let mut map = health.lock().await;
     map.entry(id)
@@ -188,16 +220,10 @@ async fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentH
         .clone()
 }
 
-/// Inner logic for a single connection, separated so that the caller can
-/// reliably decrement `active_connections` regardless of the outcome.
 async fn handle_connection_inner(
     tcp_stream: TcpStream,
     peer_addr: std::net::SocketAddr,
-    router: Arc<Router>,
-    endpoint: Arc<Endpoint>,
-    pool: Arc<AgentPool>,
-    health: Arc<AgentHealthMap>,
-    metrics: &EdgeMetrics,
+    ctx: &ConnCtx,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
 
@@ -209,7 +235,8 @@ async fn handle_connection_inner(
 
     debug!(%hostname, "extracted SNI");
 
-    let mut agents = router
+    let mut agents = ctx
+        .router
         .lookup(&hostname)
         .await
         .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
@@ -217,7 +244,7 @@ async fn handle_connection_inner(
     if agents.len() > 1 {
         let mut scored: Vec<(EndpointAddr, (u32, u64))> = Vec::with_capacity(agents.len());
         for addr in agents.drain(..) {
-            let h = get_health(&health, addr.id).await;
+            let h = get_health(&ctx.health, addr.id).await;
             scored.push((addr, h.score()));
         }
         scored.sort_by_key(|(_, score)| *score);
@@ -230,18 +257,20 @@ async fn handle_connection_inner(
         .ok_or_else(|| anyhow::anyhow!("agent list empty for hostname: {hostname}"))?;
 
     let agent_id = agent_addr.id;
+    let policy = ctx.router.tls_policy(&hostname).await;
 
     let span = info_span!("conn",
         %hostname,
         peer = %peer_addr,
         agent = %agent_id.fmt_short(),
+        mode = tls_mode_label(&policy),
     );
 
-    let agent_health_state = get_health(&health, agent_id).await;
+    let agent_health_state = get_health(&ctx.health, agent_id).await;
 
     async {
-        let stream_result = open_agent_stream(&endpoint, &pool, agent_addr).await;
-        let (mut send_stream, mut recv_stream) = match stream_result {
+        let stream_result = open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr).await;
+        let (send_stream, recv_stream) = match stream_result {
             Ok(pair) => {
                 agent_health_state.record_success();
                 pair
@@ -252,35 +281,17 @@ async fn handle_connection_inner(
             }
         };
 
-        write_hostname_header(&mut send_stream, &hostname).await?;
-
-        let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
-
-        let client_to_agent = async {
-            let res = tokio::io::copy(&mut tcp_read, &mut send_stream).await;
-            let _ = send_stream.finish(); // signal EOF to agent
-            res
+        let (bytes_in, bytes_out) = match policy {
+            TlsMode::Passthrough => {
+                pipe_passthrough(tcp_stream, &hostname, send_stream, recv_stream).await?
+            }
+            TlsMode::Terminate => {
+                pipe_terminate(tcp_stream, &hostname, send_stream, recv_stream, ctx).await?
+            }
         };
 
-        let agent_to_client = async {
-            let res = tokio::io::copy(&mut recv_stream, &mut tcp_write).await;
-            let _ = tcp_write.shutdown().await; // graceful TCP close
-            res
-        };
-
-        let (c2a, a2c) = tokio::join!(client_to_agent, agent_to_client);
-        let bytes_in = c2a.as_ref().copied().unwrap_or(0);
-        let bytes_out = a2c.as_ref().copied().unwrap_or(0);
-
-        if let Err(e) = &c2a {
-            debug!("client->agent: {e}");
-        }
-        if let Err(e) = &a2c {
-            debug!("agent->client: {e}");
-        }
-
-        metrics.total_bytes_in.inc_by(bytes_in);
-        metrics.total_bytes_out.inc_by(bytes_out);
+        ctx.metrics.total_bytes_in.inc_by(bytes_in);
+        ctx.metrics.total_bytes_out.inc_by(bytes_out);
 
         info!(
             bytes_in,
@@ -292,6 +303,82 @@ async fn handle_connection_inner(
     }
     .instrument(span)
     .await
+}
+
+fn tls_mode_label(mode: &TlsMode) -> &'static str {
+    match mode {
+        TlsMode::Passthrough => "passthrough",
+        TlsMode::Terminate => "terminate",
+    }
+}
+
+async fn pipe_passthrough(
+    tcp_stream: TcpStream,
+    hostname: &str,
+    mut send_stream: iroh::endpoint::SendStream,
+    mut recv_stream: iroh::endpoint::RecvStream,
+) -> anyhow::Result<(u64, u64)> {
+    write_hostname_header(&mut send_stream, hostname).await?;
+
+    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+
+    let c2a = async {
+        let res = tokio::io::copy(&mut tcp_read, &mut send_stream).await;
+        let _ = send_stream.finish();
+        res
+    };
+    let a2c = async {
+        let res = tokio::io::copy(&mut recv_stream, &mut tcp_write).await;
+        let _ = tcp_write.shutdown().await;
+        res
+    };
+
+    let (c2a, a2c) = tokio::join!(c2a, a2c);
+    Ok((c2a.unwrap_or(0), a2c.unwrap_or(0)))
+}
+
+async fn pipe_terminate(
+    tcp_stream: TcpStream,
+    hostname: &str,
+    mut send_stream: iroh::endpoint::SendStream,
+    mut recv_stream: iroh::endpoint::RecvStream,
+    ctx: &ConnCtx,
+) -> anyhow::Result<(u64, u64)> {
+    let acceptor = ctx
+        .tls_acceptor
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("TLS termination configured but acceptor missing"))?;
+    let cert_store = ctx
+        .cert_store
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("TLS termination configured but cert store missing"))?;
+
+    if !cert_store.has_cert(hostname).await {
+        match &ctx.acme {
+            Some(acme) => acme.ensure_cert(hostname).await?,
+            None => anyhow::bail!("no cert for {hostname} and ACME disabled"),
+        }
+    }
+
+    let tls_stream = acceptor.accept(tcp_stream).await?;
+    let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
+
+    debug!(%hostname, "TLS terminated");
+    write_hostname_header(&mut send_stream, hostname).await?;
+
+    let c2a = async {
+        let res = tokio::io::copy(&mut tls_read, &mut send_stream).await;
+        let _ = send_stream.finish();
+        res
+    };
+    let a2c = async {
+        let res = tokio::io::copy(&mut recv_stream, &mut tls_write).await;
+        let _ = tls_write.shutdown().await;
+        res
+    };
+
+    let (c2a, a2c) = tokio::join!(c2a, a2c);
+    Ok((c2a.unwrap_or(0), a2c.unwrap_or(0)))
 }
 
 /// Return a new bidirectional QUIC stream to the agent, reusing a pooled

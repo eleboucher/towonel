@@ -5,19 +5,32 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::identity::{
     AgentId, PQ_SIGNATURE_LEN, PqPublicKey, TenantId, TenantKeypair, verify_pq_signature,
 };
+use crate::tls_policy::TlsMode;
 
 /// Operations that can be performed on the config state.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConfigOp {
     /// Claim a hostname for this tenant. Edge will route SNI matches to this tenant's agents.
-    UpsertHostname { hostname: String },
+    UpsertHostname {
+        hostname: String,
+    },
     /// Release a hostname.
-    DeleteHostname { hostname: String },
+    DeleteHostname {
+        hostname: String,
+    },
     /// Authorize an agent to connect on behalf of this tenant.
-    UpsertAgent { agent_id: AgentId },
+    UpsertAgent {
+        agent_id: AgentId,
+    },
     /// Revoke an agent's authorization.
-    RevokeAgent { agent_id: AgentId },
+    RevokeAgent {
+        agent_id: AgentId,
+    },
+    SetHostnameTls {
+        hostname: String,
+        mode: TlsMode,
+    },
 }
 
 /// The payload of a config entry, before signing.
@@ -183,6 +196,19 @@ fn to_canonical_cbor(payload: &ConfigPayload) -> Result<Vec<u8>, ConfigEntryErro
             "agent_id",
             CborValue::Bytes(agent_id.as_bytes().to_vec()),
         ),
+        ConfigOp::SetHostnameTls { hostname, mode } => {
+            let mode_cbor = tls_mode_to_cbor(mode);
+            CborValue::Map(vec![(
+                CborValue::Text("set_hostname_tls".into()),
+                CborValue::Map(vec![
+                    (
+                        CborValue::Text("hostname".into()),
+                        CborValue::Text(hostname.clone()),
+                    ),
+                    (CborValue::Text("mode".into()), mode_cbor),
+                ]),
+            )])
+        }
     };
 
     let outer = CborValue::Map(vec![
@@ -214,6 +240,20 @@ fn op_with(variant: &str, field: &str, value: CborValue) -> CborValue {
     CborValue::Map(vec![(
         CborValue::Text(variant.into()),
         CborValue::Map(vec![(CborValue::Text(field.into()), value)]),
+    )])
+}
+
+/// Canonical CBOR encoding of a `TlsMode`. Mirrors the `serde`
+/// internally-tagged representation (`{ mode = "passthrough" | "terminate" }`)
+/// so signatures are deterministic.
+fn tls_mode_to_cbor(mode: &TlsMode) -> CborValue {
+    let tag = match mode {
+        TlsMode::Passthrough => "passthrough",
+        TlsMode::Terminate => "terminate",
+    };
+    CborValue::Map(vec![(
+        CborValue::Text("mode".into()),
+        CborValue::Text(tag.into()),
     )])
 }
 
@@ -312,6 +352,14 @@ mod tests {
             ConfigOp::RevokeAgent {
                 agent_id: agent_kp.id(),
             },
+            ConfigOp::SetHostnameTls {
+                hostname: "test.example.eu".into(),
+                mode: TlsMode::Passthrough,
+            },
+            ConfigOp::SetHostnameTls {
+                hostname: "test.example.eu".into(),
+                mode: TlsMode::Terminate,
+            },
         ];
 
         for (i, op) in ops.into_iter().enumerate() {
@@ -400,7 +448,8 @@ mod tests {
                 "upsert_hostname",
                 "delete_hostname",
                 "upsert_agent",
-                "revoke_agent"
+                "revoke_agent",
+                "set_hostname_tls",
             ]
             .contains(&tag),
             "op variant tag must be snake_case, got {tag}"
@@ -408,6 +457,83 @@ mod tests {
 
         // ML-DSA signature is always exactly PQ_SIGNATURE_LEN bytes.
         assert_eq!(entry1.signature.len(), PQ_SIGNATURE_LEN);
+    }
+
+    #[test]
+    fn set_hostname_tls_canonical_cbor_stable_and_ordered() {
+        // SetHostnameTls produces a nested `mode` map whose key order and
+        // values must be deterministic so signatures are byte-stable.
+        let kp = TenantKeypair::from_seed([7u8; 32]);
+        for mode in [TlsMode::Passthrough, TlsMode::Terminate] {
+            let payload = ConfigPayload {
+                version: 1,
+                tenant_id: kp.id(),
+                sequence: 1,
+                timestamp: 1_700_000_000_000,
+                op: ConfigOp::SetHostnameTls {
+                    hostname: "app.example.eu".into(),
+                    mode: mode.clone(),
+                },
+            };
+            let a = SignedConfigEntry::sign(&payload, &kp).unwrap();
+            let b = SignedConfigEntry::sign(&payload, &kp).unwrap();
+            assert_eq!(
+                a.payload_cbor, b.payload_cbor,
+                "SetHostnameTls CBOR must be deterministic for mode {mode:?}"
+            );
+            let parsed: CborValue = ciborium::from_reader(a.payload_cbor.as_slice()).unwrap();
+            let map = match parsed {
+                CborValue::Map(m) => m,
+                _ => panic!("top-level must be a map"),
+            };
+            let (_, op_val) = map
+                .iter()
+                .find(|(k, _)| matches!(k, CborValue::Text(t) if t == "op"))
+                .unwrap();
+            let op_map = match op_val {
+                CborValue::Map(m) => m,
+                _ => panic!("op must be a map"),
+            };
+            let tag = match &op_map[0].0 {
+                CborValue::Text(t) => t.as_str(),
+                _ => panic!("op variant tag must be text"),
+            };
+            assert_eq!(tag, "set_hostname_tls");
+            let inner = match &op_map[0].1 {
+                CborValue::Map(m) => m,
+                _ => panic!("set_hostname_tls payload must be a map"),
+            };
+            let inner_keys: Vec<&str> = inner
+                .iter()
+                .map(|(k, _)| match k {
+                    CborValue::Text(t) => t.as_str(),
+                    _ => panic!("key must be text"),
+                })
+                .collect();
+            assert_eq!(
+                inner_keys,
+                ["hostname", "mode"],
+                "set_hostname_tls keys must be in a fixed order"
+            );
+            let mode_cbor = &inner[1].1;
+            let mode_map = match mode_cbor {
+                CborValue::Map(m) => m,
+                _ => panic!("mode must be a map"),
+            };
+            let expected_tag = match mode {
+                TlsMode::Passthrough => "passthrough",
+                TlsMode::Terminate => "terminate",
+            };
+            assert_eq!(mode_map.len(), 1, "mode map has a single `mode` key");
+            assert!(
+                matches!(&mode_map[0].0, CborValue::Text(t) if t == "mode"),
+                "mode map key must be `mode`"
+            );
+            assert!(
+                matches!(&mode_map[0].1, CborValue::Text(t) if t == expected_tag),
+                "mode tag must match the variant"
+            );
+        }
     }
 
     #[test]

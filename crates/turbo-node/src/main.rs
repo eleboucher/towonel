@@ -54,6 +54,10 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install ring CryptoProvider");
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -93,13 +97,8 @@ async fn main() -> anyhow::Result<()> {
             let public_url = default_public_url(&config.hub);
             let (route_tx, route_rx) = broadcast::channel::<RouteTable>(64);
             let hub_secret_key = iroh::SecretKey::from(secret_key.to_bytes());
-            let (router, edge, edge_node_id, edge_addresses) = build_edge(
-                secret_key,
-                &config.tenants,
-                &config.edge.listen_addr,
-                &config.edge.health_listen_addr,
-            )
-            .await?;
+            let (router, edge, edge_node_id, edge_addresses) =
+                build_edge(secret_key, &config.tenants, &config.edge).await?;
 
             let public_addresses = if config.edge.public_addresses.is_empty() {
                 edge_addresses
@@ -173,13 +172,8 @@ async fn main() -> anyhow::Result<()> {
         }
         (false, true) => {
             let subscriber_key = iroh::SecretKey::from(secret_key.to_bytes());
-            let (router, edge, _edge_node_id, _edge_addresses) = build_edge(
-                secret_key,
-                &config.tenants,
-                &config.edge.listen_addr,
-                &config.edge.health_listen_addr,
-            )
-            .await?;
+            let (router, edge, _edge_node_id, _edge_addresses) =
+                build_edge(secret_key, &config.tenants, &config.edge).await?;
 
             if let Some(hub_url) = config.edge.hub_url.clone() {
                 let router_for_sub = Arc::clone(&router);
@@ -262,9 +256,8 @@ fn build_ownership_policy(tenants: &[config::TenantEntry]) -> anyhow::Result<Own
 async fn build_edge(
     secret_key: iroh::SecretKey,
     tenants: &[config::TenantEntry],
-    listen_addr: &str,
-    health_listen_addr: &str,
-) -> anyhow::Result<(Arc<Router>, edge::Edge, String, Vec<String>)> {
+    edge_config: &config::EdgeConfig,
+) -> anyhow::Result<(Arc<edge::router::Router>, edge::Edge, String, Vec<String>)> {
     let ep = Endpoint::builder().secret_key(secret_key).bind().await?;
 
     let edge_node_id = ep.id().to_string();
@@ -275,14 +268,45 @@ async fn build_edge(
         "iroh endpoint bound for edge (outbound-only)"
     );
 
-    let router = Arc::new(Router::load_from_config(tenants)?);
+    let router = Arc::new(edge::router::Router::load_from_config(tenants)?);
 
-    let edge = edge::Edge::new(
+    let mut edge = edge::Edge::new(
         Arc::clone(&router),
         Arc::new(ep),
-        listen_addr.to_string(),
-        health_listen_addr.to_string(),
+        edge_config.listen_addr.clone(),
+        edge_config.health_listen_addr.clone(),
     );
+
+    if let Some(tls) = &edge_config.tls {
+        let cert_store = edge::tls::CertStore::new(&tls.cert_dir)?;
+
+        let acme = if let Some(email) = tls.acme_email.clone() {
+            let tokens: edge::acme::ChallengeTokens = Default::default();
+
+            // HTTP-01 challenge server on :80 (or wherever `http_listen_addr` points).
+            let http_addr = tls.http_listen_addr.clone();
+            let tokens_for_http = tokens.clone();
+            tokio::spawn(async move {
+                if let Err(e) = edge::acme::run_http01_server(&http_addr, tokens_for_http).await {
+                    tracing::error!(error = %e, "ACME HTTP-01 server exited");
+                }
+            });
+
+            let coordinator = edge::acme::AcmeCoordinator::new(
+                cert_store.clone(),
+                tokens,
+                email,
+                tls.acme_staging,
+            )
+            .await?;
+            Some(Arc::new(coordinator))
+        } else {
+            info!("TLS termination enabled without ACME; certs must be user-provided");
+            None
+        };
+
+        edge = edge.with_tls(cert_store, acme);
+    }
 
     Ok((router, edge, edge_node_id, edge_addresses))
 }
