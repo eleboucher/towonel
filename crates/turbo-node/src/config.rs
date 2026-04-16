@@ -75,7 +75,7 @@ pub struct EdgeConfig {
     #[serde(default = "default_health_listen")]
     pub health_listen_addr: String,
     #[serde(default)]
-    pub hub_url: Option<String>,
+    pub hub_urls: Vec<String>,
     #[serde(default)]
     pub public_addresses: Vec<String>,
     #[serde(default)]
@@ -181,7 +181,7 @@ impl Default for EdgeConfig {
             enabled: true,
             listen_addr: default_edge_listen(),
             health_listen_addr: default_health_listen(),
-            hub_url: None,
+            hub_urls: Vec::new(),
             public_addresses: Vec::new(),
             tls: None,
         }
@@ -198,16 +198,22 @@ impl NodeConfig {
     /// TURBO_HUB__LISTEN_ADDR=0.0.0.0:8443
     /// TURBO_HUB__OPERATOR_API_KEY_PATH=/run/secrets/operator.key
     /// TURBO_HUB__PEERS='[{"url":"https://hub-b.example.eu:8443"}]'
-    /// TURBO_EDGE__HUB_URL=https://hub-a.example.eu:8443
+    /// TURBO_EDGE__HUB_URLS='["https://hub-a.example.eu:8443","https://hub-b.example.eu:8443"]'
+    /// TURBO_EDGE__HUB_URL=https://hub-a.example.eu:8443   # legacy scalar alias
     /// TURBO_IDENTITY__KEY_PATH=/var/lib/turbo-tunnel/node.key
     /// ```
     ///
-    /// Lists (`peers`, `tenants`) take JSON in a single env var. Scalar
-    /// fields take their natural string form.
+    /// Lists (`peers`, `tenants`, `hub_urls`) take JSON in a single env var.
+    /// Scalar fields take their natural string form.
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         use figment::Figment;
         use figment::providers::{Env, Format, Toml};
-        let json_keys = ["edge.public_addresses", "hub.peers", "tenants"];
+        let json_keys = [
+            "edge.public_addresses",
+            "edge.hub_urls",
+            "hub.peers",
+            "tenants",
+        ];
         let mut config: Self = Figment::new()
             .merge(Toml::file(path))
             .merge(
@@ -225,9 +231,22 @@ impl NodeConfig {
             config.hub.peers = serde_json::from_str(&v)?;
         }
 
+        if let Ok(v) = std::env::var("TURBO_EDGE__HUB_URLS") {
+            config.edge.hub_urls = serde_json::from_str(&v)?;
+        } else if let Ok(v) = std::env::var("TURBO_EDGE__HUB_URL") {
+            if config.edge.hub_urls.is_empty() {
+                config.edge.hub_urls = vec![v];
+            }
+        }
+
         for peer in &config.hub.peers {
             if !peer.url.starts_with("https://") {
                 anyhow::bail!("federation peer URL must use https://: got {:?}", peer.url);
+            }
+        }
+        for url in &config.edge.hub_urls {
+            if !url.starts_with("https://") {
+                anyhow::bail!("hub_urls entry must use https://: got {:?}", url);
             }
         }
 

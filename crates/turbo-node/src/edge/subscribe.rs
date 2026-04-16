@@ -12,16 +12,27 @@ use super::router::Router;
 const RECONNECT_INITIAL_SECS: u64 = 1;
 const RECONNECT_MAX_SECS: u64 = 60;
 
-/// Runs forever, applying `RouteTable` snapshots from the remote hub to
-/// `router`. Returns only if `hub_url` is malformed; transient network
-/// errors are logged and retried.
+/// Runs forever, applying `RouteTable` snapshots from a remote hub to
+/// `router`. On disconnect the task rotates through `hub_urls` before
+/// applying exponential back-off, providing automatic hub failover when
+/// multiple federated hubs are configured.
 pub async fn run(
-    hub_url: String,
+    hub_urls: Vec<String>,
     secret_key: iroh::SecretKey,
     router: Arc<Router>,
 ) -> anyhow::Result<()> {
-    let url = format!("{}/v1/routes/subscribe", hub_url.trim_end_matches('/'));
-    let _ = reqwest::Url::parse(&url).context("invalid hub_url")?;
+    if hub_urls.is_empty() {
+        return Ok(());
+    }
+
+    let urls: Vec<String> = hub_urls
+        .iter()
+        .map(|base| {
+            let url = format!("{}/v1/routes/subscribe", base.trim_end_matches('/'));
+            reqwest::Url::parse(&url).context("invalid hub_url")?;
+            Ok(url)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -29,14 +40,33 @@ pub async fn run(
         .context("building reqwest client")?;
 
     let mut backoff = RECONNECT_INITIAL_SECS;
+    let mut idx = 0usize; // index into `urls`, rotated on each attempt
+
     loop {
-        match connect_and_stream(&client, &url, &secret_key, &router).await {
+        let url = &urls[idx];
+        match connect_and_stream(&client, url, &secret_key, &router).await {
             Ok(()) => {
-                tracing::info!("hub closed route subscription; reconnecting");
+                tracing::info!(%url, "hub closed route subscription; reconnecting");
                 backoff = RECONNECT_INITIAL_SECS;
             }
             Err(e) => {
-                tracing::warn!(error = %e, "route subscription failed; backing off {}s", backoff);
+                let next_idx = (idx + 1) % urls.len();
+                if urls.len() > 1 {
+                    tracing::warn!(
+                        error = %e,
+                        current_hub = %url,
+                        next_hub = %urls[next_idx],
+                        "route subscription failed; rotating hub and backing off {}s",
+                        backoff,
+                    );
+                } else {
+                    tracing::warn!(
+                        error = %e,
+                        "route subscription failed; backing off {}s",
+                        backoff
+                    );
+                }
+                idx = next_idx;
             }
         }
         tokio::time::sleep(Duration::from_secs(backoff)).await;
@@ -118,5 +148,13 @@ mod tests {
         let _ts: u64 = parts[1].parse().expect("ts parses as u64");
         let sig = B64.decode(parts[2]).expect("sig is base64url");
         assert_eq!(sig.len(), 64, "ed25519 sig is 64 bytes");
+    }
+
+    #[tokio::test]
+    async fn empty_hub_urls_returns_immediately() {
+        let router = Arc::new(super::super::router::Router::load_from_config(&[]).unwrap());
+        let sk = iroh::SecretKey::from([1u8; 32]);
+        let result = run(vec![], sk, router).await;
+        assert!(result.is_ok());
     }
 }

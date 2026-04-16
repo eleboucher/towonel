@@ -241,7 +241,7 @@ async fn handle_connection_inner(
         .await
         .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
 
-    if agents.len() > 1 {
+    {
         let mut scored: Vec<(EndpointAddr, (u32, u64))> = Vec::with_capacity(agents.len());
         for addr in agents.drain(..) {
             let h = get_health(&ctx.health, addr.id).await;
@@ -251,13 +251,43 @@ async fn handle_connection_inner(
         agents = scored.into_iter().map(|(addr, _)| addr).collect();
     }
 
-    let agent_addr = agents
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("agent list empty for hostname: {hostname}"))?;
+    if agents.is_empty() {
+        anyhow::bail!("agent list empty for hostname: {hostname}");
+    }
+
+    let policy = ctx.router.tls_policy(&hostname).await;
+
+    let mut last_err: Option<anyhow::Error> = None;
+    let mut chosen: Option<(
+        EndpointAddr,
+        iroh::endpoint::SendStream,
+        iroh::endpoint::RecvStream,
+    )> = None;
+
+    for agent_addr in agents {
+        let agent_health_state = get_health(&ctx.health, agent_addr.id).await;
+        match open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr.clone()).await {
+            Ok((send, recv)) => {
+                agent_health_state.record_success();
+                chosen = Some((agent_addr, send, recv));
+                break;
+            }
+            Err(e) => {
+                agent_health_state.record_failure();
+                debug!(
+                    agent = %agent_addr.id.fmt_short(),
+                    error = %e,
+                    "agent stream open failed, trying next"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+
+    let (agent_addr, send_stream_chosen, recv_stream_chosen) =
+        chosen.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("all agents failed")))?;
 
     let agent_id = agent_addr.id;
-    let policy = ctx.router.tls_policy(&hostname).await;
 
     let span = info_span!("conn",
         %hostname,
@@ -266,20 +296,8 @@ async fn handle_connection_inner(
         mode = tls_mode_label(&policy),
     );
 
-    let agent_health_state = get_health(&ctx.health, agent_id).await;
-
     async {
-        let stream_result = open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr).await;
-        let (send_stream, recv_stream) = match stream_result {
-            Ok(pair) => {
-                agent_health_state.record_success();
-                pair
-            }
-            Err(e) => {
-                agent_health_state.record_failure();
-                return Err(e);
-            }
-        };
+        let (send_stream, recv_stream) = (send_stream_chosen, recv_stream_chosen);
 
         let (bytes_in, bytes_out) = match policy {
             TlsMode::Passthrough => {
