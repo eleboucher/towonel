@@ -1,0 +1,39 @@
+[package]
+name = "turbo-node"
+version = "0.0.1"
+edition = "2024"
+
+[[bin]]
+name = "turbo-node"
+path = "src/main.rs"
+
+[dependencies]
+turbo-common = { path = "../turbo-common" }
+iroh = { workspace = true }
+sqlx = { workspace = true }
+ciborium = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+axum = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+tower-http = { workspace = true }
+prometheus-client = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
+tokio-stream = { workspace = true }
+async-stream = { workspace = true }
+# Used by the SSE route-subscriber client in edge-only mode (and by hub API tests).
+reqwest = { workspace = true }
+eventsource-stream = { workspace = true }
+tower_governor = { workspace = true }
+figment = { workspace = true }
+subtle = { workspace = true }
+
+[dev-dependencies]

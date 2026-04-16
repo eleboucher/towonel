@@ -1,0 +1,69 @@
+---
+name: Build and push container images
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-images:
+    runs-on: docker
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+
+      - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
+
+      - name: Login to git.erwanleboucher.dev
+        uses: https://data.forgejo.org/docker/login-action@v4
+        with:
+          registry: git.erwanleboucher.dev
+          username: ${{ vars.USERNAME }}
+          password: ${{ secrets.OWNER_PACKAGE_SECRET }}
+
+      - name: Compute node image metadata
+        id: meta-node
+        uses: https://data.forgejo.org/docker/metadata-action@v6
+        with:
+          images: |
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+
+      - name: Build and push turbo-node
+        uses: https://data.forgejo.org/docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.node
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-node.outputs.tags }}
+          labels: ${{ steps.meta-node.outputs.labels }}
+          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node:buildcache
+          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node:buildcache,mode=max
+
+      - name: Compute agent image metadata
+        id: meta-agent
+        uses: https://data.forgejo.org/docker/metadata-action@v6
+        with:
+          images: |
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+
+      - name: Build and push turbo-agent
+        uses: https://data.forgejo.org/docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.agent
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-agent.outputs.tags }}
+          labels: ${{ steps.meta-agent.outputs.labels }}
+          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent:buildcache
+          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent:buildcache,mode=max

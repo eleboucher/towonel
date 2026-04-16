@@ -1,0 +1,72 @@
+[package]
+name = "turbo-tunnel"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/turbo-common",
+    "crates/turbo-agent",
+    "crates/turbo-node",
+    "crates/turbo-cli",
+]
+
+[profile.release]
+strip = true
+lto = "thin"
+
+[dev-dependencies]
+turbo-common = { path = "crates/turbo-common" }
+iroh = { workspace = true }
+tokio = { workspace = true }
+
+[workspace.dependencies]
+iroh = "0.95"
+ed25519-dalek = { version = "2.2", features = ["serde", "rand_core"] }
+ciborium = "0.2"
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "signal"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+hex = "0.4"
+clienthello = "0.1"
+anyhow = "1"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["trace"] }
+# Pinned to 0.6 for ed25519-dalek 2.x compatibility. If a newer dep
+# needs rand_core 0.9, resolve the version conflict at that point.
+rand_core = { version = "0.9.5" }
+getrandom = "0.3"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+eventsource-stream = "0.2"
+prometheus-client = "0.22"
+base64 = "0.22"
+sha2 = "0.10"
+url = "2"
+# Post-quantum signatures (ML-DSA-65, FIPS 204). Pure Rust, no C deps.
+# `default-features = false` drops ml-dsa-44 / ml-dsa-87 we don't use.
+fips204 = { version = "0.4", default-features = false, features = ["ml-dsa-65", "default-rng"] }
+# Stream helpers (BroadcastStream) for the hub's SSE route-subscribe endpoint.
+tokio-stream = { version = "0.1", features = ["sync"] }
+async-stream = "0.3"
+# Per-IP rate limiting on the hub's public endpoints.
+tower_governor = { version = "0.8", default-features = false, features = ["axum"] }
+# Layered config (TOML file + TURBO_*  env-var overrides).
+figment = { version = "0.10", features = ["toml", "env"] }
+# Passphrase-based key backup (turbo-cli tenant export-key / import-key).
+aes-gcm = "0.10"
+argon2 = "0.5"
+# Audited constant-time operations (replaces hand-rolled constant_time_eq).
+subtle = "2.6"
+# Secure memory zeroing for seeds, passphrases, and derived keys.
+zeroize = { version = "1", features = ["derive"] }
+# Read passphrases without terminal echo (key export/import).
+rpassword = "5"

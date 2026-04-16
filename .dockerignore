@@ -1,0 +1,8 @@
+target/
+.git/
+.forgejo/
+*.key
+hub.db
+*.sqlite
+*.sqlite-journal
+dist/

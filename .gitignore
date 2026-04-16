@@ -1,0 +1,12 @@
+/target
+
+# Ed25519 key material — never commit
+*.key
+/agent.key
+/tenant.key
+/node.key
+
+# Local runtime state
+/hub.db
+*.sqlite
+*.sqlite-journal

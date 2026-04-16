@@ -1,0 +1,90 @@
+---
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  goreleaser:
+    runs-on: docker
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Run GoReleaser
+        run: curl -sfL https://goreleaser.com/static/run | VERSION=v2.15.2 bash -s -- release --clean
+        env:
+          GORELEASER_FORCE_TOKEN: gitea
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITEA_SERVER_URL: https://git.erwanleboucher.dev
+
+  container:
+    runs-on: docker
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+
+      - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
+
+      - name: Login to git.erwanleboucher.dev
+        uses: https://data.forgejo.org/docker/login-action@v4
+        with:
+          registry: git.erwanleboucher.dev
+          username: ${{ vars.USERNAME }}
+          password: ${{ secrets.OWNER_PACKAGE_SECRET }}
+
+      - name: Compute node image metadata
+        id: meta-node
+        uses: https://data.forgejo.org/docker/metadata-action@v6
+        with:
+          images: |
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push turbo-node
+        uses: https://data.forgejo.org/docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.node
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-node.outputs.tags }}
+          labels: ${{ steps.meta-node.outputs.labels }}
+          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node:buildcache
+          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node:buildcache,mode=max
+
+      - name: Compute agent image metadata
+        id: meta-agent
+        uses: https://data.forgejo.org/docker/metadata-action@v6
+        with:
+          images: |
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Build and push turbo-agent
+        uses: https://data.forgejo.org/docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.agent
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-agent.outputs.tags }}
+          labels: ${{ steps.meta-agent.outputs.labels }}
+          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent:buildcache
+          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent:buildcache,mode=max

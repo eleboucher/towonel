@@ -1,0 +1,36 @@
+---
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+project_name: turbo-tunnel
+gitea_urls:
+  api: https://git.erwanleboucher.dev/api/v1
+  download: https://git.erwanleboucher.dev
+
+builds:
+  - id: turbo-agent
+    builder: rust
+    dir: crates/turbo-agent
+    binary: turbo-agent
+    targets:
+      - x86_64-unknown-linux-gnu
+
+  - id: turbo-node
+    builder: rust
+    dir: crates/turbo-node
+    binary: turbo-node
+    targets:
+      - x86_64-unknown-linux-gnu
+
+  - id: turbo-cli
+    builder: rust
+    dir: crates/turbo-cli
+    binary: turbo-cli
+    targets:
+      - x86_64-unknown-linux-gnu
+
+archives:
+  - id: turbo-tunnel
+    ids:
+      - turbo-agent
+      - turbo-node
+      - turbo-cli
