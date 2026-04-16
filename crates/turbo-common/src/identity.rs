@@ -30,15 +30,18 @@ pub struct TenantId([u8; 32]);
 impl TenantId {
     /// Construct from raw bytes (no SHA-256 derivation). For round-tripping
     /// bytes already stored in the DB; derive from a pubkey via [`derive`].
-    pub fn from_bytes(bytes: &[u8; 32]) -> Self {
+    #[must_use] 
+    pub const fn from_bytes(bytes: &[u8; 32]) -> Self {
         Self(*bytes)
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
+    #[must_use] 
+    pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// Derive `TenantId = sha256(pq_public_key)`.
+    #[must_use] 
     pub fn derive(pq_pubkey: &PqPublicKey) -> Self {
         let digest = sha2::Sha256::digest(pq_pubkey.as_bytes().as_slice());
         Self(digest.into())
@@ -107,6 +110,7 @@ impl<'de> Deserialize<'de> for TenantId {
 pub struct PqPublicKey(Box<[u8; PQ_PUB_KEY_LEN]>);
 
 impl PqPublicKey {
+    #[must_use] 
     pub fn from_bytes(bytes: [u8; PQ_PUB_KEY_LEN]) -> Self {
         Self(Box::new(bytes))
     }
@@ -120,6 +124,7 @@ impl PqPublicKey {
         Ok(Self::from_bytes(arr))
     }
 
+    #[must_use] 
     pub fn as_bytes(&self) -> &[u8; PQ_PUB_KEY_LEN] {
         &self.0
     }
@@ -144,7 +149,7 @@ impl Eq for PqPublicKey {}
 impl fmt::Debug for PqPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let short: String = B64.encode(&self.0[..8]);
-        write!(f, "PqPublicKey({short}…, {} bytes)", PQ_PUB_KEY_LEN)
+        write!(f, "PqPublicKey({short}…, {PQ_PUB_KEY_LEN} bytes)")
     }
 }
 
@@ -186,9 +191,11 @@ impl<'de> Deserialize<'de> for PqPublicKey {
     }
 }
 
-/// A tenant's ML-DSA-65 signing keypair. The 32-byte seed is the only
-/// state persisted on disk; `pub_key` / `priv_key` / `tenant_id` are
-/// cached after derivation to keep `id()` / `public_key()` allocation-free.
+/// A tenant's ML-DSA-65 signing keypair.
+///
+/// The 32-byte seed is the only state persisted on disk; `pub_key` /
+/// `priv_key` / `tenant_id` are cached after derivation to keep `id()`
+/// / `public_key()` allocation-free.
 ///
 /// Both `priv_key` (via fips204's `ZeroizeOnDrop`) and `seed` (via
 /// `zeroize::Zeroizing`) are zeroed on drop.
@@ -210,14 +217,20 @@ impl fmt::Debug for TenantKeypair {
 
 impl TenantKeypair {
     /// Generate a fresh keypair, seeded from the OS RNG.
+    #[must_use]
     pub fn generate() -> Self {
         let mut seed = [0u8; PQ_SEED_LEN];
-        getrandom::fill(&mut seed).expect("OS RNG failed");
+        // OS RNG failure is unrecoverable at this layer.
+        #[allow(clippy::expect_used)]
+        {
+            getrandom::fill(&mut seed).expect("OS RNG failed");
+        }
         Self::from_seed(seed)
     }
 
     /// Reconstruct a keypair deterministically from its 32-byte seed.
     /// The seed is the bytes persisted in the tenant key file.
+    #[must_use] 
     pub fn from_seed(seed: [u8; PQ_SEED_LEN]) -> Self {
         let (pub_key, priv_key) = ml_dsa_65::KG::keygen_from_seed(&seed);
         let public_key = PqPublicKey::from_bytes(pub_key.into_bytes());
@@ -231,22 +244,29 @@ impl TenantKeypair {
     }
 
     /// Seed used to derive the keypair. Same bytes as the on-disk key file.
+    #[must_use] 
     pub fn seed(&self) -> &[u8; PQ_SEED_LEN] {
         &self.seed
     }
 
-    pub fn public_key(&self) -> &PqPublicKey {
+    #[must_use] 
+    pub const fn public_key(&self) -> &PqPublicKey {
         &self.public_key
     }
 
-    pub fn id(&self) -> TenantId {
+    #[must_use] 
+    pub const fn id(&self) -> TenantId {
         self.tenant_id
     }
 
     /// Randomized ML-DSA-65 signature over `message` (FIPS 204 §3.7 with
     /// OS RNG hedged randomness). Each call produces a different signature
     /// for the same input — verify via [`verify_pq_signature`].
+    #[must_use]
     pub fn sign(&self, message: &[u8]) -> [u8; PQ_SIGNATURE_LEN] {
+        // fips204's `try_sign` only fails if it can't draw OS RNG bytes or
+        // if `ctx` exceeds 255 bytes — neither can happen here.
+        #[allow(clippy::expect_used)]
         self.priv_key
             .try_sign(message, b"")
             .expect("ml-dsa sign should not fail with empty ctx")
@@ -256,7 +276,10 @@ impl TenantKeypair {
     /// For snapshot / wire-format tests that need byte-stable signatures.
     /// **Production code must use [`sign`] (randomized).**
     #[doc(hidden)]
+    #[must_use]
     pub fn sign_deterministic(&self, message: &[u8]) -> [u8; PQ_SIGNATURE_LEN] {
+        // Infallible for ctx shorter than 256 bytes.
+        #[allow(clippy::expect_used)]
         self.priv_key
             .try_sign_with_seed(&[0u8; 32], message, b"")
             .expect("ml-dsa deterministic sign should not fail with empty ctx")
@@ -266,15 +289,14 @@ impl TenantKeypair {
 /// Verify an ML-DSA-65 signature over `message` against `pq_pubkey`.
 /// Returns `false` on signature mismatch, malformed pubkey bytes, or any
 /// internal fips204 decode failure.
+#[must_use] 
 pub fn verify_pq_signature(
     pq_pubkey: &PqPublicKey,
     message: &[u8],
     signature: &[u8; PQ_SIGNATURE_LEN],
 ) -> bool {
-    match ml_dsa_65::PublicKey::try_from_bytes(*pq_pubkey.as_bytes()) {
-        Ok(pk) => pk.verify(message, signature, b""),
-        Err(_) => false,
-    }
+    ml_dsa_65::PublicKey::try_from_bytes(*pq_pubkey.as_bytes())
+        .is_ok_and(|pk| pk.verify(message, signature, b""))
 }
 
 /// An agent's public identity. Wraps an Ed25519 public key, because the
@@ -282,11 +304,12 @@ pub fn verify_pq_signature(
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AgentId(VerifyingKey);
 
-/// Re-export iroh's EndpointId directly — it's already an Ed25519 public key.
+/// Re-export iroh's `EndpointId` directly — it's already an Ed25519 public key.
 pub type NodeId = iroh::EndpointId;
 
 impl AgentId {
-    pub fn from_key(key: VerifyingKey) -> Self {
+    #[must_use] 
+    pub const fn from_key(key: VerifyingKey) -> Self {
         Self(key)
     }
 
@@ -294,10 +317,12 @@ impl AgentId {
         VerifyingKey::from_bytes(bytes).map(Self)
     }
 
-    pub fn as_key(&self) -> &VerifyingKey {
+    #[must_use] 
+    pub const fn as_key(&self) -> &VerifyingKey {
         &self.0
     }
 
+    #[must_use] 
     pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
@@ -351,21 +376,29 @@ impl<'de> Deserialize<'de> for AgentId {
 pub struct AgentKeypair(SigningKey);
 
 impl AgentKeypair {
+    #[must_use]
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).expect("OS RNG failed");
+        // OS RNG failure is unrecoverable at this layer.
+        #[allow(clippy::expect_used)]
+        {
+            getrandom::fill(&mut bytes).expect("OS RNG failed");
+        }
         Self(SigningKey::from_bytes(&bytes))
     }
 
-    pub fn from_signing_key(key: SigningKey) -> Self {
+    #[must_use] 
+    pub const fn from_signing_key(key: SigningKey) -> Self {
         Self(key)
     }
 
+    #[must_use] 
     pub fn id(&self) -> AgentId {
         AgentId(self.0.verifying_key())
     }
 
-    pub fn signing_key(&self) -> &SigningKey {
+    #[must_use] 
+    pub const fn signing_key(&self) -> &SigningKey {
         &self.0
     }
 }
@@ -407,7 +440,11 @@ fn load_or_generate_key_bytes(path: &Path) -> anyhow::Result<[u8; 32]> {
             .map_err(|_| anyhow::anyhow!("key file {} must be exactly 32 bytes", path.display()))
     } else {
         let mut bytes = [0u8; 32];
-        getrandom::fill(&mut bytes).expect("OS RNG failed");
+        // OS RNG failure is unrecoverable at this layer.
+        #[allow(clippy::expect_used)]
+        {
+            getrandom::fill(&mut bytes).expect("OS RNG failed");
+        }
         write_key_file(path, &bytes)?;
         Ok(bytes)
     }

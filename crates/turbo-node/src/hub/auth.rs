@@ -5,8 +5,8 @@ use turbo_common::time::now_ms;
 
 /// Parse and verify `Authorization: Signature <node_id_hex>.<ts_ms>.<sig_b64>`.
 ///
-/// Returns the 32-byte node_id on success. The caller is responsible for
-/// checking whether that node_id is authorized (e.g. trusted peer, registered
+/// Returns the 32-byte `node_id` on success. The caller is responsible for
+/// checking whether that `node_id` is authorized (e.g. trusted peer, registered
 /// edge, etc.).
 ///
 /// `auth_domain` is the string prepended to the signed message

@@ -25,7 +25,7 @@ pub struct RouteTable {
 impl RouteTable {
     /// Materialize a route table by replaying signed config entries in order.
     ///
-    /// Entries must be pre-sorted by (tenant_id, sequence). Each entry is
+    /// Entries must be pre-sorted by (`tenant_id`, sequence). Each entry is
     /// verified before being applied -- entries with invalid signatures are
     /// logged and skipped. The `policy` enforces which tenants and hostnames
     /// are allowed.
@@ -114,12 +114,14 @@ impl RouteTable {
     }
 
     /// Borrow the TLS policy table for in-process lookups on the edge.
-    pub fn tls_policies(&self) -> &TlsPolicyTable {
+    #[must_use] 
+    pub const fn tls_policies(&self) -> &TlsPolicyTable {
         &self.tls_policies
     }
 
     /// Look up the TLS mode for a hostname (exact or wildcard); missing
     /// entries default to `Passthrough`.
+    #[must_use] 
     pub fn tls_mode(&self, hostname: &str) -> TlsMode {
         self.tls_policies.lookup(hostname)
     }
@@ -129,6 +131,7 @@ impl RouteTable {
     /// Tries exact match first, then a single-level wildcard: `*.example.eu`
     /// matches `app.example.eu` but **not** `deep.app.example.eu`. Only the
     /// first label (before the first dot) is replaced by `*`.
+    #[must_use] 
     pub fn lookup(&self, hostname: &str) -> Option<&HashSet<AgentId>> {
         crate::hostname::wildcard_lookup(hostname, |key| {
             self.routes.get(key).filter(|a| !a.is_empty())
@@ -140,6 +143,7 @@ impl RouteTable {
     /// Use this when you already have the final hostname->agents mapping and
     /// don't need to replay signed config entries. Ownership is already
     /// enforced by the TOML structure itself.
+    #[must_use] 
     pub fn from_raw(routes: HashMap<String, HashSet<AgentId>>) -> Self {
         Self {
             routes,
@@ -160,6 +164,7 @@ impl RouteTable {
     }
 
     /// All hostnames with at least one agent.
+    #[must_use] 
     pub fn hostnames(&self) -> HashSet<String> {
         self.routes
             .iter()

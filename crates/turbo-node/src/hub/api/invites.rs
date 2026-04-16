@@ -36,6 +36,8 @@ pub(super) struct CreateInviteResponse {
     expires_at_ms: u64,
 }
 
+const MAX_TTL_SECS: u64 = 30 * 24 * 3600;
+
 pub(super) async fn post_invite(
     State(state): State<Arc<AppState>>,
     axum::Json(req): axum::Json<CreateInviteRequest>,
@@ -52,8 +54,6 @@ pub(super) async fn post_invite(
             return invalid_request(format!("invalid hostname `{h}`: {e}"));
         }
     }
-
-    const MAX_TTL_SECS: u64 = 30 * 24 * 3600;
     if req.expires_in_secs == 0 || req.expires_in_secs > MAX_TTL_SECS {
         return invalid_request(format!("expires_in_secs must be in 1..={MAX_TTL_SECS}"));
     }
@@ -198,6 +198,9 @@ pub(super) struct RedeemResponse {
     edge_addresses: Vec<String>,
 }
 
+// This handler is long because it covers multiple redemption paths (pending, re-redeem).
+// Refactoring would not meaningfully improve readability.
+#[allow(clippy::too_many_lines)]
 pub(super) async fn redeem_invite(
     State(state): State<Arc<AppState>>,
     axum::Json(req): axum::Json<RedeemRequest>,
@@ -249,8 +252,7 @@ pub(super) async fn redeem_invite(
                 return internal_error();
             }
 
-            let mut policy = state.policy.write().await;
-            policy.register_tenant(
+            state.policy.write().await.register_tenant(
                 &tenant_id,
                 pq_public_key.clone(),
                 invite.hostnames.iter().cloned(),
@@ -266,7 +268,6 @@ pub(super) async fn redeem_invite(
             });
         }
         InviteStatus::Revoked => return conflict("invite_revoked", "invite has been revoked"),
-        _ => return internal_error(),
     }
 
     if now_ms() > invite.expires_at_ms {

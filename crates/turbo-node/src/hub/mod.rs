@@ -34,6 +34,8 @@ pub fn load_or_generate_operator_key(path: &Path) -> anyhow::Result<String> {
         Ok(trimmed)
     } else {
         let mut bytes = [0u8; OPERATOR_KEY_BYTES];
+        // OS RNG failures are unrecoverable on any supported platform.
+        #[allow(clippy::expect_used)]
         getrandom::fill(&mut bytes).expect("OS RNG failed");
         let key = B64.encode(bytes);
         write_key_file(path, key.as_bytes())?;
@@ -69,17 +71,17 @@ pub struct HubParams {
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
-/// API, persists them to SQLite, and serves config updates to edges.
+/// API, persists them to `SQLite`, and serves config updates to edges.
 pub struct Hub {
     p: HubParams,
 }
 
 impl Hub {
-    pub fn new(params: HubParams) -> Self {
+    pub const fn new(params: HubParams) -> Self {
         Self { p: params }
     }
 
-    /// Run the hub. Opens the SQLite database and starts the HTTP management API.
+    /// Run the hub. Opens the `SQLite` database and starts the HTTP management API.
     pub async fn run(&self) -> anyhow::Result<()> {
         info!(
             listen = %self.p.listen_addr,

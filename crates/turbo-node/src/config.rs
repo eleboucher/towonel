@@ -39,7 +39,7 @@ pub struct HubConfig {
     #[serde(default)]
     pub public_url: Option<String>,
     /// Peer hubs for federation (option A — bidirectional HTTPS replication).
-    /// Each peer's iroh node_id authenticates inbound federation pushes; its
+    /// Each peer's iroh `node_id` authenticates inbound federation pushes; its
     /// URL is where this hub pushes its own state.
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
@@ -58,7 +58,7 @@ pub struct HubConfig {
 /// The peer's iroh `node_id` is **not** configured by the operator — the
 /// hub discovers it on boot by querying the peer's `GET /v1/health`. This
 /// turns peering into a one-line config: just the URL. If the peer's
-/// node_id later changes (key rotation), federation rejects and the
+/// `node_id` later changes (key rotation), federation rejects and the
 /// operator gets a clear error.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PeerConfig {
@@ -127,7 +127,7 @@ pub struct TenantEntry {
     /// Hostname patterns this tenant is allowed to claim. TLS mode is not
     /// configured here — the agent publishes it via `SetHostnameTls` entries.
     pub hostnames: Vec<String>,
-    /// Hex-encoded iroh EndpointIds of agents serving this tenant.
+    /// Hex-encoded iroh `EndpointIds` of agents serving this tenant.
     #[serde(default)]
     pub agent_node_ids: Vec<String>,
     /// Optional direct socket addresses for agents (e.g. for Docker/e2e where
@@ -137,7 +137,7 @@ pub struct TenantEntry {
     pub direct_addresses: Vec<String>,
 }
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
@@ -233,11 +233,10 @@ impl NodeConfig {
 
         if let Ok(v) = std::env::var("TURBO_EDGE__HUB_URLS") {
             config.edge.hub_urls = serde_json::from_str(&v)?;
-        } else if let Ok(v) = std::env::var("TURBO_EDGE__HUB_URL") {
-            if config.edge.hub_urls.is_empty() {
+        } else if let Ok(v) = std::env::var("TURBO_EDGE__HUB_URL")
+            && config.edge.hub_urls.is_empty() {
                 config.edge.hub_urls = vec![v];
             }
-        }
 
         for peer in &config.hub.peers {
             if !peer.url.starts_with("https://") {
@@ -246,14 +245,14 @@ impl NodeConfig {
         }
         for url in &config.edge.hub_urls {
             if !url.starts_with("https://") {
-                anyhow::bail!("hub_urls entry must use https://: got {:?}", url);
+                anyhow::bail!("hub_urls entry must use https://: got {url:?}");
             }
         }
 
         if let Some(ref url) = config.hub.dns_webhook_url
             && !url.starts_with("https://")
         {
-            anyhow::bail!("dns_webhook_url must use https://: got {:?}", url);
+            anyhow::bail!("dns_webhook_url must use https://: got {url:?}");
         }
 
         Ok(config)

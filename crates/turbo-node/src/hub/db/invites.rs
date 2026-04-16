@@ -3,10 +3,12 @@ use turbo_common::identity::{PqPublicKey, TenantId};
 use turbo_common::invite::INVITE_ID_LEN;
 
 use super::{Db, blob, blob_opt, ms, ms_opt};
-use super::{EdgeInviteRow, InviteRow, InviteStatus, PendingEdgeInvite, PendingInvite, RedeemedTenant};
+use super::{
+    EdgeInviteRow, InviteRow, InviteStatus, PendingEdgeInvite, PendingInvite, RedeemedTenant,
+};
 
 impl Db {
-    /// Persist a fresh pending invite. Duplicate invite_ids fail via the
+    /// Persist a fresh pending invite. Duplicate `invite_ids` fail via the
     /// PRIMARY KEY constraint.
     pub async fn insert_invite(&self, invite: &PendingInvite<'_>) -> anyhow::Result<()> {
         let hostnames_json = serde_json::to_string(invite.hostnames)?;
@@ -19,8 +21,8 @@ impl Db {
         .bind(invite.name)
         .bind(&hostnames_json)
         .bind(invite.secret_hash.as_slice())
-        .bind(invite.expires_at_ms as i64)
-        .bind(invite.created_at_ms as i64)
+        .bind(invite.expires_at_ms.cast_signed())
+        .bind(invite.created_at_ms.cast_signed())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -73,7 +75,7 @@ impl Db {
         )
         .bind(tenant_id.as_bytes().as_slice())
         .bind(pq_public_key.as_bytes().as_slice())
-        .bind(redeemed_at_ms as i64)
+        .bind(redeemed_at_ms.cast_signed())
         .bind(invite_id.as_slice())
         .execute(&self.pool)
         .await?;
@@ -94,7 +96,7 @@ impl Db {
         )
         .bind(tenant_id.as_bytes().as_slice())
         .bind(pq_public_key.as_bytes().as_slice())
-        .bind(redeemed_at_ms as i64)
+        .bind(redeemed_at_ms.cast_signed())
         .bind(invite_id.as_slice())
         .execute(&self.pool)
         .await?;
@@ -114,7 +116,7 @@ impl Db {
 
     /// Return the first hostname in `candidates_lower` that is already
     /// claimed by a pending invite, or `None`. Must be called under the
-    /// AppState invite lock (see api.rs) — otherwise two concurrent
+    /// `AppState` invite lock (see api.rs) — otherwise two concurrent
     /// create-invite calls can both see "no conflict" and both insert.
     pub async fn any_pending_invite_claims(
         &self,
@@ -148,7 +150,7 @@ impl Db {
              ON CONFLICT(tenant_id) DO UPDATE SET removed_at_ms = excluded.removed_at_ms",
         )
         .bind(tenant_id.as_bytes().as_slice())
-        .bind(removed_at_ms as i64)
+        .bind(removed_at_ms.cast_signed())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -214,8 +216,8 @@ impl Db {
         .bind(invite.invite_id.as_slice())
         .bind(invite.name)
         .bind(invite.secret_hash.as_slice())
-        .bind(invite.expires_at_ms as i64)
-        .bind(invite.created_at_ms as i64)
+        .bind(invite.expires_at_ms.cast_signed())
+        .bind(invite.created_at_ms.cast_signed())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -248,7 +250,7 @@ impl Db {
     }
 
     /// Atomically flip a pending edge invite to `redeemed` and register the
-    /// edge's iroh node_id. Both rows land in the same implicit transaction
+    /// edge's iroh `node_id`. Both rows land in the same implicit transaction
     /// — either both succeed or neither. Returns false if the invite was not
     /// pending (already redeemed, revoked, or missing).
     pub async fn redeem_edge_invite(
@@ -265,7 +267,7 @@ impl Db {
              WHERE invite_id = $3 AND status = 'pending'",
         )
         .bind(edge_node_id.as_slice())
-        .bind(redeemed_at_ms as i64)
+        .bind(redeemed_at_ms.cast_signed())
         .bind(invite_id.as_slice())
         .execute(&mut *tx)
         .await?;
@@ -280,7 +282,7 @@ impl Db {
         )
         .bind(edge_node_id.as_slice())
         .bind(name)
-        .bind(redeemed_at_ms as i64)
+        .bind(redeemed_at_ms.cast_signed())
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;

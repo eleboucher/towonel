@@ -69,12 +69,9 @@ pub async fn run(
     info!("agent tunnel ready, waiting for connections from edges");
 
     loop {
-        let incoming = match endpoint.accept().await {
-            Some(incoming) => incoming,
-            None => {
-                info!("endpoint closed, shutting down");
-                return Ok(());
-            }
+        let Some(incoming) = endpoint.accept().await else {
+            info!("endpoint closed, shutting down");
+            return Ok(());
         };
 
         let conn = match incoming.await {
@@ -162,10 +159,10 @@ async fn handle_stream(
             None => forward_plain(tcp_stream, &mut quic_recv, &mut quic_send).await,
         }?;
 
-        info!(
-            duration_ms = start.elapsed().as_millis() as u64,
-            "stream closed"
-        );
+        // truncation is intentional: streams won't last 584 million years
+        #[allow(clippy::cast_possible_truncation)]
+        let duration_ms = start.elapsed().as_millis() as u64;
+        info!(duration_ms, "stream closed");
         Ok(())
     }
     .instrument(span)

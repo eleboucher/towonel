@@ -4,7 +4,6 @@ use anyhow::Context;
 use tracing::{info, warn};
 use turbo_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
 use turbo_common::identity::TenantKeypair;
-use turbo_common::tls_policy::TlsMode;
 
 use crate::config::ServiceConfig;
 use crate::init::submit_entry;

@@ -26,11 +26,11 @@ use self::health::EdgeMetrics;
 use self::router::Router;
 use self::tls::CertStore;
 
-/// Maximum bytes to peek from a TCP connection to extract the TLS ClientHello.
-/// 16 KiB is more than enough for any realistic ClientHello.
+/// Maximum bytes to peek from a TCP connection to extract the TLS `ClientHello`.
+/// 16 KiB is more than enough for any realistic `ClientHello`.
 const PEEK_BUF_SIZE: usize = 16_384;
 
-/// Pool of iroh QUIC connections, keyed by agent EndpointId.
+/// Pool of iroh QUIC connections, keyed by agent `EndpointId`.
 ///
 /// QUIC connections are expensive to establish; streams are cheap. We keep
 /// one connection per agent and open multiple streams over it. iroh's
@@ -48,7 +48,7 @@ struct AgentHealthState {
 }
 
 impl AgentHealthState {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             consecutive_failures: AtomicU32::new(0),
             last_success_ts: AtomicU64::new(0),
@@ -243,7 +243,7 @@ async fn handle_connection_inner(
 
     {
         let mut scored: Vec<(EndpointAddr, (u32, u64))> = Vec::with_capacity(agents.len());
-        for addr in agents.drain(..) {
+        for addr in agents {
             let h = get_health(&ctx.health, addr.id).await;
             scored.push((addr, h.score()));
         }
@@ -311,12 +311,10 @@ async fn handle_connection_inner(
         ctx.metrics.total_bytes_in.inc_by(bytes_in);
         ctx.metrics.total_bytes_out.inc_by(bytes_out);
 
-        info!(
-            bytes_in,
-            bytes_out,
-            duration_ms = start.elapsed().as_millis() as u64,
-            "connection closed"
-        );
+        // truncation intentional:
+        #[allow(clippy::cast_possible_truncation)]
+        let duration_ms = start.elapsed().as_millis() as u64;
+        info!(bytes_in, bytes_out, duration_ms, "connection closed");
         Ok(())
     }
     .instrument(span)
@@ -364,7 +362,7 @@ async fn pipe_terminate(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("TLS termination configured but cert store missing"))?;
 
-    if !cert_store.has_cert(hostname).await {
+    if !cert_store.has_cert(hostname) {
         match &ctx.acme {
             Some(acme) => acme.ensure_cert(hostname).await?,
             None => anyhow::bail!("no cert for {hostname} and ACME disabled"),

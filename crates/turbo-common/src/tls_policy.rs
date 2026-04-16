@@ -14,10 +14,11 @@ pub enum TlsMode {
 
 impl TlsMode {
     /// Human-readable label for logging/metrics.
-    pub fn label(&self) -> &'static str {
+    #[must_use] 
+    pub const fn label(&self) -> &'static str {
         match self {
-            TlsMode::Passthrough => "passthrough",
-            TlsMode::Terminate => "terminate",
+            Self::Passthrough => "passthrough",
+            Self::Terminate => "terminate",
         }
     }
 }
@@ -28,11 +29,13 @@ pub struct TlsPolicyTable {
 }
 
 impl TlsPolicyTable {
+    #[must_use] 
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn from_raw(policies: HashMap<String, TlsMode>) -> Self {
+    #[must_use] 
+    pub const fn from_raw(policies: HashMap<String, TlsMode>) -> Self {
         Self { policies }
     }
 
@@ -40,20 +43,24 @@ impl TlsPolicyTable {
         self.policies.insert(hostname.into().to_lowercase(), mode);
     }
 
+    #[must_use] 
     pub fn lookup(&self, hostname: &str) -> TlsMode {
         wildcard_lookup(hostname, |key| self.policies.get(key))
             .cloned()
             .unwrap_or(TlsMode::Passthrough)
     }
 
+    #[must_use] 
     pub fn is_empty(&self) -> bool {
         self.policies.is_empty()
     }
 
+    #[must_use] 
     pub fn len(&self) -> usize {
         self.policies.len()
     }
 
+    #[must_use] 
     pub fn terminate_hostnames(&self) -> Vec<String> {
         self.policies
             .iter()

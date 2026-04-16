@@ -43,3 +43,6 @@ rcgen = { workspace = true }
 arc-swap = { workspace = true }
 
 [dev-dependencies]
+
+[lints]
+workspace = true

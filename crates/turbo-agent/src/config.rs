@@ -9,7 +9,7 @@ pub struct AgentConfig {
     pub identity: IdentityConfig,
     #[serde(default)]
     pub services: Vec<ServiceConfig>,
-    /// Hex-encoded iroh EndpointIds of trusted edges. May be omitted when
+    /// Hex-encoded iroh `EndpointIds` of trusted edges. May be omitted when
     /// `~/.turbo-tunnel/state.toml` already carries the list (written by
     /// `turbo-agent init`).
     #[serde(default)]
@@ -83,7 +83,7 @@ impl AgentConfig {
     /// Merge this agent config with `state.toml`. Fields set in the agent
     /// config win; state.toml fills in gaps. Errors only on missing
     /// agent key path (the one field we can't default to nothing).
-    pub fn resolve(self, state: &ClientState) -> anyhow::Result<ResolvedConfig> {
+    pub fn resolve(self, state: &ClientState) -> ResolvedConfig {
         let defaults = DefaultPaths::from_env();
         let key_path = self
             .identity
@@ -91,19 +91,19 @@ impl AgentConfig {
             .or_else(|| state.agent_key_path.clone())
             .unwrap_or(defaults.agent_key);
 
-        let trusted_edges = if !self.trusted_edges.is_empty() {
-            self.trusted_edges
-        } else {
+        let trusted_edges = if self.trusted_edges.is_empty() {
             state.trusted_edges.clone()
+        } else {
+            self.trusted_edges
         };
 
-        Ok(ResolvedConfig {
+        ResolvedConfig {
             key_path,
             services: self.services,
             trusted_edges,
             hub_url: state.hub_url.clone(),
             tenant_key_path: state.tenant_key_path.clone(),
-        })
+        }
     }
 }
 

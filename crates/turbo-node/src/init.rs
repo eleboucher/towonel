@@ -14,9 +14,7 @@ pub async fn run(invite_str: &str, config_out: Option<&Path>) -> anyhow::Result<
     println!("Contacting hub at {}...", token.hub_url);
 
     let key_path = PathBuf::from(DEFAULT_NODE_KEY);
-    let config_path = config_out
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_NODE_CONFIG));
+    let config_path = config_out.map_or_else(|| PathBuf::from(DEFAULT_NODE_CONFIG), Path::to_path_buf);
 
     let secret_key = turbo_common::identity::load_or_generate_secret_key(&key_path)
         .with_context(|| format!("failed to load/generate node key at {}", key_path.display()))?;

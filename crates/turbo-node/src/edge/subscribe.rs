@@ -80,6 +80,8 @@ async fn connect_and_stream(
     secret_key: &iroh::SecretKey,
     router: &Router,
 ) -> anyhow::Result<()> {
+    use tokio_stream::StreamExt;
+
     let auth = signed_auth_header(secret_key);
     let resp = client
         .get(url)
@@ -92,8 +94,6 @@ async fn connect_and_stream(
         .context("hub rejected subscription")?;
 
     tracing::info!(hub = %url, "connected to hub route stream");
-
-    use tokio_stream::StreamExt;
     let mut stream = resp.bytes_stream().eventsource();
     while let Some(result) = stream.next().await {
         match result {

@@ -62,7 +62,7 @@ impl std::fmt::Debug for SignedConfigEntry {
             .field("payload_cbor.len", &self.payload_cbor.len())
             .field("signature.len", &PQ_SIGNATURE_LEN)
             .field("tenant_id", &self.tenant_id)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -173,7 +173,7 @@ impl SignedConfigEntry {
 /// Map keys in RFC 8949 §4.2.1 length-first order:
 /// `op (2) < version (7) < sequence (8) < tenant_id (9) < timestamp (9)`.
 /// Identifiers are 32-byte CBOR byte strings (§2.3). `op` variant tags are
-/// snake_case (§3.2). Integers use ciborium's smallest-form encoding.
+/// `snake_case` (§3.2). Integers use ciborium's smallest-form encoding.
 fn to_canonical_cbor(payload: &ConfigPayload) -> Result<Vec<u8>, ConfigEntryError> {
     let op_value = match &payload.op {
         ConfigOp::UpsertHostname { hostname } => op_with(

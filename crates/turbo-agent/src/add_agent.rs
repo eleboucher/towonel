@@ -23,9 +23,7 @@ pub async fn run(
     )?;
     let tenant_id = tenant_kp.id();
 
-    let agent_key_path: PathBuf = agent_key_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| defaults.agent_key.clone());
+    let agent_key_path: PathBuf = agent_key_path.map_or_else(|| defaults.agent_key.clone(), Path::to_path_buf);
     if agent_key_path.exists() {
         return Err(anyhow!(
             "agent key file {} already exists. Pass --agent-key to a fresh \
@@ -76,9 +74,7 @@ pub async fn run(
     println!("✓ Agent authorized (sequence {})", latest_seq + 1);
     println!();
 
-    let out_path = out
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| defaults.agent_config.clone());
+    let out_path = out.map_or_else(|| defaults.agent_config.clone(), Path::to_path_buf);
     write_agent_config_template(&out_path, &hostnames, &[])?;
     println!("Config: {}", out_path.display());
     println!(
@@ -108,16 +104,16 @@ async fn fetch_entries(
 
     let body = crate::init::check_response(resp).await?;
 
-    let entries: Vec<SignedConfigEntry> = ciborium::from_reader(body.as_ref())
+    let entries: Vec<SignedConfigEntry> = ciborium::from_reader(body.as_slice())
         .with_context(|| format!("hub returned invalid CBOR at {url}"))?;
     Ok(entries)
 }
 
 /// Replay the tenant's entries to find hostnames currently claimed. Used
 /// to pre-populate the starter config. `pq_pubkey` is the tenant's own
-/// key (the entries are always ours, since the hub filters by tenant_id).
+/// key (the entries are always ours, since the hub filters by `tenant_id`).
 fn materialized_hostnames(entries: &[SignedConfigEntry], pq_pubkey: &PqPublicKey) -> Vec<String> {
-    let mut claimed: std::collections::BTreeSet<String> = Default::default();
+    let mut claimed: std::collections::BTreeSet<String> = std::collections::BTreeSet::default();
     for entry in entries {
         let Ok(payload) = entry.verify(pq_pubkey) else {
             continue;

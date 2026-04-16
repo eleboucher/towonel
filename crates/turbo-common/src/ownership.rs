@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::identity::{PqPublicKey, TenantId};
 
-/// Operator-configured hostname ownership plus the tenant's ML-DSA-65
-/// public key. `OwnershipPolicy` is both the allowlist and the
-/// verification oracle — `SignedConfigEntry::verify` looks up the PQ
-/// pubkey here.
+/// Operator-configured hostname ownership plus tenant ML-DSA-65 keys.
+///
+/// `OwnershipPolicy` is both the allowlist and the verification oracle —
+/// `SignedConfigEntry::verify` looks up the PQ pubkey here.
 #[derive(Clone, Debug, Default)]
 pub struct OwnershipPolicy {
     allowed: HashMap<TenantId, HashSet<String>>,
@@ -13,6 +13,7 @@ pub struct OwnershipPolicy {
 }
 
 impl OwnershipPolicy {
+    #[must_use] 
     pub fn new() -> Self {
         Self::default()
     }
@@ -33,10 +34,12 @@ impl OwnershipPolicy {
         self.pq_keys.insert(*tenant_id, pq_public_key);
     }
 
+    #[must_use] 
     pub fn pq_public_key(&self, tenant_id: &TenantId) -> Option<&PqPublicKey> {
         self.pq_keys.get(tenant_id)
     }
 
+    #[must_use] 
     pub fn is_known_tenant(&self, tenant_id: &TenantId) -> bool {
         self.allowed.contains_key(tenant_id)
     }
@@ -55,11 +58,11 @@ impl OwnershipPolicy {
     }
 
     /// Check if a tenant is allowed to claim a specific hostname.
+    #[must_use] 
     pub fn is_hostname_allowed(&self, tenant_id: &TenantId, hostname: &str) -> bool {
         let lower = hostname.to_lowercase();
-        let patterns = match self.allowed.get(tenant_id) {
-            Some(p) => p,
-            None => return false,
+        let Some(patterns) = self.allowed.get(tenant_id) else {
+            return false;
         };
 
         for pattern in patterns {

@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::http::HeaderMap;
+use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
@@ -17,14 +17,14 @@ use turbo_common::routing::RouteTable;
 use turbo_common::time::now_ms;
 
 use super::api::AppState;
-use super::api::{error_response, internal_error, invalid_request, json_ok, unauthorized};
+use super::api::{internal_error, invalid_request, json_ok, unauthorized};
 use super::db::FederatedTenant;
 
 const FEDERATION_AUTH_DOMAIN: &str = "turbo-tunnel/federation/v1";
 /// Same ±60s window we use for edge subscriber auth.
 const FEDERATION_MAX_CLOCK_SKEW_MS: u64 = 60_000;
 
-/// Set of iroh node_ids we've discovered for our configured peers. Inbound
+/// Set of iroh `node_ids` we've discovered for our configured peers. Inbound
 /// federation pushes whose signing key isn't in here get rejected.
 pub type TrustedPeerSet = Arc<RwLock<HashSet<[u8; 32]>>>;
 
@@ -52,7 +52,13 @@ async fn authenticate_peer(
         FEDERATION_MAX_CLOCK_SKEW_MS,
     )?;
 
-    if !state.federation.trusted_peers.read().await.contains(&node_id_bytes) {
+    if !state
+        .federation
+        .trusted_peers
+        .read()
+        .await
+        .contains(&node_id_bytes)
+    {
         return Err("signing node_id is not a configured federation peer");
     }
 
@@ -231,7 +237,7 @@ async fn rebuild_and_broadcast(state: &Arc<super::api::AppState>) {
 }
 
 /// Run forever pushing this hub's state to one peer. Discovers the peer's
-/// iroh node_id via GET /v1/health, then loops over local DB state and
+/// iroh `node_id` via GET /v1/health, then loops over local DB state and
 /// pushes unseen items. Idempotent — peers de-dupe.
 pub async fn run_peer(
     peer_url: String,
@@ -273,7 +279,7 @@ pub async fn run_peer(
     }
 }
 
-/// Resolve the peer's iroh node_id by polling its `/v1/health` until a
+/// Resolve the peer's iroh `node_id` by polling its `/v1/health` until a
 /// response is received. Backs off between attempts.
 async fn bootstrap_peer(
     client: &reqwest::Client,
@@ -315,6 +321,10 @@ async fn fetch_node_id(client: &reqwest::Client, health_url: &str) -> anyhow::Re
         .map_err(|_| anyhow::anyhow!("peer node_id is not 32 bytes"))
 }
 
+// The policy read guard is held for the entire entries loop to avoid repeated lock/unlock
+// and repeated policy clones. The significant_drop_tightening lint suggests narrowing the
+// scope, but doing so here would require cloning or repeated locking — both wasteful.
+#[allow(clippy::significant_drop_tightening)]
 async fn push_round(
     client: &reqwest::Client,
     peer_url: &str,
@@ -393,6 +403,8 @@ fn signed_auth_header(secret_key: &iroh::SecretKey) -> String {
     format!("Signature {node_id}.{ts}.{}", B64.encode(sig.to_bytes()))
 }
 
+// T is not required to be Sync because we only pass &T to json().
+#[allow(clippy::future_not_send)]
 async fn post_signed<T: Serialize>(
     client: &reqwest::Client,
     peer_url: &str,
@@ -432,7 +444,10 @@ async fn post_signed_cbor(
             reqwest::header::AUTHORIZATION,
             signed_auth_header(secret_key),
         )
-        .header(reqwest::header::CONTENT_TYPE, turbo_common::CBOR_CONTENT_TYPE)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            turbo_common::CBOR_CONTENT_TYPE,
+        )
         .body(body)
         .send()
         .await?;

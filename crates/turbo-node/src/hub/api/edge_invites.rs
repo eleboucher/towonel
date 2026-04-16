@@ -32,6 +32,8 @@ pub(super) struct CreateEdgeInviteResponse {
     expires_at_ms: u64,
 }
 
+const EDGE_MAX_TTL_SECS: u64 = 30 * 24 * 3600;
+
 pub(super) async fn post_edge_invite(
     State(state): State<Arc<AppState>>,
     axum::Json(req): axum::Json<CreateEdgeInviteRequest>,
@@ -40,9 +42,8 @@ pub(super) async fn post_edge_invite(
         Some(n) if !n.trim().is_empty() => n,
         _ => turbo_common::random_name::random_name(),
     };
-    const MAX_TTL_SECS: u64 = 30 * 24 * 3600;
-    if req.expires_in_secs == 0 || req.expires_in_secs > MAX_TTL_SECS {
-        return invalid_request(format!("expires_in_secs must be in 1..={MAX_TTL_SECS}"));
+    if req.expires_in_secs == 0 || req.expires_in_secs > EDGE_MAX_TTL_SECS {
+        return invalid_request(format!("expires_in_secs must be in 1..={EDGE_MAX_TTL_SECS}"));
     }
 
     let token = EdgeInviteToken::generate(state.public_url.clone());
@@ -129,7 +130,7 @@ pub(super) async fn delete_edge_invite(
 pub(super) struct RedeemEdgeInviteRequest {
     invite_id: String,
     invite_secret: String,
-    /// Hex-encoded iroh EndpointId (32-byte Ed25519 pubkey) that this edge
+    /// Hex-encoded iroh `EndpointId` (32-byte Ed25519 pubkey) that this edge
     /// will use to authenticate subsequent requests.
     edge_node_id: String,
 }
@@ -172,7 +173,6 @@ pub(super) async fn redeem_edge_invite(
         InviteStatus::Pending => {}
         InviteStatus::Redeemed => return conflict("invite_already_redeemed", "edge invite already redeemed"),
         InviteStatus::Revoked => return conflict("invite_revoked", "edge invite has been revoked"),
-        _ => return internal_error(),
     }
 
     if now_ms() > invite.expires_at_ms {

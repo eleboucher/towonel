@@ -39,7 +39,10 @@ impl CertStore {
     }
 
     fn reload_blocking(&self) {
-        let _guard = self.reload_lock.write().unwrap_or_else(|e| e.into_inner());
+        let _guard = self
+            .reload_lock
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let mut certs = CertMap::new();
         let entries = match std::fs::read_dir(&self.cert_dir) {
@@ -76,7 +79,7 @@ impl CertStore {
         info!(count, "cert store reloaded");
     }
 
-    pub async fn has_cert(&self, hostname: &str) -> bool {
+    pub fn has_cert(&self, hostname: &str) -> bool {
         self.inner.load().contains_key(hostname)
     }
 

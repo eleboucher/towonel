@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, anyhow};
@@ -13,9 +14,9 @@ use turbo_common::CBOR_CONTENT_TYPE;
 
 /// Check an HTTP response and return the body bytes on success, or a
 /// formatted error on failure.
-pub(crate) async fn check_response(resp: reqwest::Response) -> anyhow::Result<bytes::Bytes> {
+pub async fn check_response(resp: reqwest::Response) -> anyhow::Result<Vec<u8>> {
     let status = resp.status();
-    let body = resp.bytes().await?;
+    let body = resp.bytes().await?.to_vec();
     if !status.is_success() {
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
         return Err(anyhow!(
@@ -111,9 +112,7 @@ pub async fn run(invite_str: &str, out: Option<&Path>) -> anyhow::Result<()> {
     state.save(&defaults.state_file)?;
     println!("State:  {}", defaults.state_file.display());
 
-    let out_path = out
-        .map(Path::to_path_buf)
-        .unwrap_or(defaults.agent_config.clone());
+    let out_path = out.map_or_else(|| defaults.agent_config.clone(), Path::to_path_buf);
     write_agent_config_template(&out_path, &redeemed.hostnames, &redeemed.edge_addresses)?;
     println!("Config: {}", out_path.display());
 
@@ -150,7 +149,7 @@ fn make_payload(kp: &TenantKeypair, seq: u64, op: ConfigOp) -> ConfigPayload {
     }
 }
 
-pub(super) async fn submit_entry(
+pub async fn submit_entry(
     client: &reqwest::Client,
     hub_url: &str,
     kp: &TenantKeypair,
@@ -173,7 +172,7 @@ pub(super) async fn submit_entry(
     Ok(())
 }
 
-pub(super) fn write_agent_config_template(
+pub fn write_agent_config_template(
     path: &Path,
     hostnames: &[String],
     edge_addrs: &[String],
@@ -192,13 +191,13 @@ pub(super) fn write_agent_config_template(
     content.push_str("# Add your services below and run `turbo-agent` to start.\n\n");
     for h in hostnames {
         content.push_str("# [[services]]\n");
-        content.push_str(&format!("# hostname = \"{h}\"\n"));
+        let _ = writeln!(content, "# hostname = \"{h}\"");
         content.push_str("# origin = \"127.0.0.1:8080\"\n\n");
     }
     if !edge_addrs.is_empty() {
         content.push_str("# Edge addresses (for reference, DNS target):\n");
         for addr in edge_addrs {
-            content.push_str(&format!("# - {addr}\n"));
+            let _ = writeln!(content, "# - {addr}");
         }
     }
     std::fs::write(path, content)?;
@@ -209,7 +208,7 @@ pub(super) fn write_agent_config_template(
 struct RedeemRequest {
     invite_id: String,
     invite_secret: String,
-    /// Base64url-encoded ML-DSA-65 public key. The hub derives the tenant_id
+    /// Base64url-encoded ML-DSA-65 public key. The hub derives the `tenant_id`
     /// from this (see `POST /v1/invites/redeem`).
     tenant_pq_public_key: String,
     agent_node_id: String,

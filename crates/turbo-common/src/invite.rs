@@ -89,6 +89,7 @@ impl_invite_token!(EdgeInviteToken, EDGE_TOKEN_PREFIX);
 
 impl InviteToken {
     /// Short human-readable form of the invite id (first 8 hex chars).
+    #[must_use] 
     pub fn invite_id_short(&self) -> String {
         hex::encode(&self.invite_id[..4])
     }
@@ -96,6 +97,7 @@ impl InviteToken {
 
 /// SHA-256 of an invite secret — what the hub stores and compares against
 /// during redemption. Never the raw secret.
+#[must_use] 
 pub fn hash_invite_secret(secret: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
@@ -106,8 +108,12 @@ pub fn hash_invite_secret(secret: &[u8]) -> [u8; 32] {
 fn fresh_id_and_secret() -> ([u8; INVITE_ID_LEN], [u8; INVITE_SECRET_LEN]) {
     let mut id = [0u8; INVITE_ID_LEN];
     let mut secret = [0u8; INVITE_SECRET_LEN];
-    getrandom::fill(&mut id).expect("OS RNG failed");
-    getrandom::fill(&mut secret).expect("OS RNG failed");
+    // OS RNG failure is unrecoverable at this layer.
+    #[allow(clippy::expect_used)]
+    {
+        getrandom::fill(&mut id).expect("OS RNG failed");
+        getrandom::fill(&mut secret).expect("OS RNG failed");
+    }
     (id, secret)
 }
 

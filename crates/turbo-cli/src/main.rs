@@ -17,9 +17,9 @@ const HUB_URL_ENV: &str = "TURBO_HUB_URL";
 
 /// Check an HTTP response and return the body bytes on success, or a
 /// formatted error on failure.
-pub(crate) async fn check_response(resp: reqwest::Response) -> anyhow::Result<bytes::Bytes> {
+pub(crate) async fn check_response(resp: reqwest::Response) -> anyhow::Result<Vec<u8>> {
     let status = resp.status();
-    let body = resp.bytes().await?;
+    let body = resp.bytes().await?.to_vec();
     if !status.is_success() {
         let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
         return Err(anyhow!(
@@ -74,14 +74,14 @@ enum TenantAction {
         #[arg(long, default_value = "tenant.key")]
         key_path: PathBuf,
     },
-    /// Voluntarily leave: submit DeleteHostname + RevokeAgent entries and
+    /// Voluntarily leave: submit `DeleteHostname` + `RevokeAgent` entries and
     /// print a confirmation. The operator may additionally drop the tenant
     /// from their allowlist.
     Leave {
         /// Path to the tenant key. Defaults to the value in state.toml.
         #[arg(long)]
         key_path: Option<PathBuf>,
-        /// Hub URL. Defaults to state.toml / TURBO_HUB_URL.
+        /// Hub URL. Defaults to state.toml / `TURBO_HUB_URL`.
         #[arg(long)]
         hub_url: Option<String>,
     },
@@ -91,7 +91,7 @@ enum TenantAction {
     Remove {
         #[arg(long)]
         hub_url: Option<String>,
-        /// Operator API key. Defaults to $TURBO_OPERATOR_KEY.
+        /// Operator API key. Defaults to $`TURBO_OPERATOR_KEY`.
         #[arg(long)]
         api_key: Option<String>,
         /// Hex-encoded tenant public key (64 chars).
@@ -128,10 +128,10 @@ enum TenantAction {
 enum EntryAction {
     /// Sign and submit a config entry to a hub.
     Submit {
-        /// Defaults to state.toml / TURBO_HUB_URL.
+        /// Defaults to state.toml / `TURBO_HUB_URL`.
         #[arg(long)]
         hub_url: Option<String>,
-        /// Defaults to state.toml's tenant_key_path.
+        /// Defaults to state.toml's `tenant_key_path`.
         #[arg(long)]
         key_path: Option<PathBuf>,
         /// Operation: upsert-hostname, delete-hostname, upsert-agent, revoke-agent
@@ -167,7 +167,7 @@ enum InviteAction {
     Create {
         #[arg(long)]
         hub_url: Option<String>,
-        /// Operator API key. Defaults to $TURBO_OPERATOR_KEY.
+        /// Operator API key. Defaults to $`TURBO_OPERATOR_KEY`.
         #[arg(long)]
         api_key: Option<String>,
         /// Human-readable tenant name. Random if omitted.
@@ -193,7 +193,7 @@ enum InviteAction {
         hub_url: Option<String>,
         #[arg(long)]
         api_key: Option<String>,
-        /// The invite_id as printed by `invite list` (base64url).
+        /// The `invite_id` as printed by `invite list` (base64url).
         #[arg(long)]
         id: String,
     },
@@ -232,8 +232,12 @@ enum EdgeInviteAction {
     },
 }
 
+// Large futures are an artifact of async state machine size; Box::pin adds overhead.
+#[allow(clippy::large_futures)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Ring provider install only fails if another provider was already installed (programming error).
+    #[allow(clippy::expect_used)]
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install ring CryptoProvider");
@@ -373,6 +377,8 @@ pub(crate) fn resolve_operator_key(flag: Option<String>) -> anyhow::Result<Strin
 
 pub(crate) fn generate_and_save_agent_key(path: &Path) -> anyhow::Result<SigningKey> {
     let mut key_bytes = [0u8; 32];
+    // OS RNG failures are unrecoverable and should not happen on any supported platform.
+    #[allow(clippy::expect_used)]
     getrandom::fill(&mut key_bytes).expect("OS RNG failed");
     let key = SigningKey::from_bytes(&key_bytes);
     write_key_file(path, &key.to_bytes())

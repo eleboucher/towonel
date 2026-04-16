@@ -21,7 +21,7 @@ impl Db {
         .bind(tenant.tenant_id.as_bytes().as_slice())
         .bind(tenant.pq_public_key.as_bytes().as_slice())
         .bind(&hostnames_json)
-        .bind(tenant.registered_at_ms as i64)
+        .bind(tenant.registered_at_ms.cast_signed())
         .bind(source_peer_node_id.as_slice())
         .execute(&self.pool)
         .await?;
@@ -53,7 +53,7 @@ impl Db {
                     tenant_id: TenantId::from_bytes(&tenant_arr),
                     pq_public_key,
                     hostnames,
-                    registered_at_ms: row.get::<i64, _>("registered_at_ms") as u64,
+                    registered_at_ms: row.get::<i64, _>("registered_at_ms").cast_unsigned(),
                 })
             })
             .collect()

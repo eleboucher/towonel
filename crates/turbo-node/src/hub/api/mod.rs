@@ -39,11 +39,11 @@ pub struct AppState {
     pub policy: Arc<RwLock<OwnershipPolicy>>,
     /// Shared HTTP client for outbound requests (DNS webhook, etc.).
     pub http_client: reqwest::Client,
-    /// Identity information (node_id, edge info, version).
+    /// Identity information (`node_id`, edge info, version).
     pub identity: super::HubIdentity,
     /// Bearer token protecting operator-only endpoints.
     pub operator_api_key: String,
-    /// Public URL of the hub (e.g. "https://node.turbo.example.eu:8443").
+    /// Public URL of the hub (e.g. "<https://node.turbo.example.eu:8443>").
     pub public_url: String,
     /// Serializes the check+insert window in `POST /v1/invites`.
     pub invite_lock: Mutex<()>,
@@ -57,7 +57,7 @@ pub struct AppState {
 
 /// Federation-related runtime state.
 pub struct FederationState {
-    /// iroh node_ids of configured federation peers.
+    /// iroh `node_ids` of configured federation peers.
     pub trusted_peers: super::federation::TrustedPeerSet,
     /// Nonce cache for federation auth: prevents within-window replay.
     pub nonces: Mutex<std::collections::HashSet<([u8; 32], u64)>>,
@@ -148,6 +148,9 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
 
     let public_write = if rate_limit {
         let governor_conf = std::sync::Arc::new(
+            // The builder configuration above is statically valid; finish() returns None
+            // only for invalid configs (e.g. zero rate), which can't happen here.
+            #[allow(clippy::expect_used)]
             tower_governor::governor::GovernorConfigBuilder::default()
                 .per_second(2)
                 .burst_size(20)

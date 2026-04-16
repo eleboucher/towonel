@@ -13,6 +13,7 @@ const ANIMALS: &[&str] = &[
     "tiger", "viper", "walrus", "wolf", "wren",
 ];
 
+#[must_use] 
 pub fn random_name() -> String {
     let adj = ADJECTIVES[random_index(ADJECTIVES.len())];
     let animal = ANIMALS[random_index(ANIMALS.len())];
@@ -21,6 +22,10 @@ pub fn random_name() -> String {
 
 fn random_index(len: usize) -> usize {
     let mut buf = [0u8; 8];
-    getrandom::fill(&mut buf).expect("getrandom failed");
+    // OS RNG failure is unrecoverable at this layer.
+    #[allow(clippy::expect_used)]
+    {
+        getrandom::fill(&mut buf).expect("getrandom failed");
+    }
     usize::from_ne_bytes(buf) % len
 }

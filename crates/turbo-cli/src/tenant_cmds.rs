@@ -28,7 +28,9 @@ fn derive_key(passphrase: &[u8], salt: &[u8]) -> anyhow::Result<zeroize::Zeroizi
     Ok(key)
 }
 
-pub(crate) async fn cmd_keypair_init(key_path: &std::path::Path, kind: &str) -> anyhow::Result<()> {
+// No await inside but matches the async interface of the other command handlers.
+#[allow(clippy::unused_async)]
+pub async fn cmd_keypair_init(key_path: &std::path::Path, kind: &str) -> anyhow::Result<()> {
     match kind {
         "tenant" => {
             if key_path.exists() {
@@ -64,7 +66,7 @@ pub(crate) async fn cmd_keypair_init(key_path: &std::path::Path, kind: &str) -> 
     Ok(())
 }
 
-pub(crate) async fn cmd_tenant_leave(
+pub async fn cmd_tenant_leave(
     key_path: Option<PathBuf>,
     hub_url: Option<String>,
 ) -> anyhow::Result<()> {
@@ -76,14 +78,11 @@ pub(crate) async fn cmd_tenant_leave(
 
     let entries = fetch_entries(&hub_url, &tenant_id).await?;
     let mut latest_seq = 0u64;
-    let mut owned_hostnames: std::collections::HashSet<String> = Default::default();
-    let mut authorized_agents: std::collections::HashSet<AgentId> = Default::default();
+    let mut owned_hostnames: std::collections::HashSet<String> = std::collections::HashSet::default();
+    let mut authorized_agents: std::collections::HashSet<AgentId> = std::collections::HashSet::default();
 
     for entry in &entries {
-        let payload = match entry.verify(pq_pubkey) {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+        let Ok(payload) = entry.verify(pq_pubkey) else { continue };
         latest_seq = latest_seq.max(payload.sequence);
         match payload.op {
             ConfigOp::UpsertHostname { hostname } => {
@@ -148,7 +147,7 @@ pub(crate) async fn cmd_tenant_leave(
     Ok(())
 }
 
-pub(crate) async fn cmd_tenant_remove(
+pub async fn cmd_tenant_remove(
     hub_url: Option<String>,
     api_key: Option<String>,
     tenant_id: String,
@@ -174,7 +173,7 @@ pub(crate) async fn cmd_tenant_remove(
     Ok(())
 }
 
-pub(crate) fn cmd_tenant_export_key(
+pub fn cmd_tenant_export_key(
     key_path: Option<PathBuf>,
     passphrase: Option<String>,
 ) -> anyhow::Result<()> {
@@ -195,9 +194,12 @@ pub(crate) fn cmd_tenant_export_key(
     };
 
     let mut salt = [0u8; ARGON2_SALT_LEN];
+    // OS RNG failures are unrecoverable on any supported platform.
+    #[allow(clippy::expect_used)]
     getrandom::fill(&mut salt).expect("OS RNG failed");
 
     let mut nonce_bytes = [0u8; AES_GCM_NONCE_LEN];
+    #[allow(clippy::expect_used)]
     getrandom::fill(&mut nonce_bytes).expect("OS RNG failed");
 
     let enc_key = derive_key(passphrase.as_bytes(), &salt)?;
@@ -220,17 +222,17 @@ pub(crate) fn cmd_tenant_export_key(
     println!();
     println!("Tenant ID: {}", keypair.id());
     println!(
-        "Restore with: turbo-cli tenant import-key --backup '{}' --key-path tenant.key",
-        encoded
+        "Restore with: turbo-cli tenant import-key --backup '{encoded}' --key-path tenant.key"
     );
     Ok(())
 }
 
-pub(crate) fn cmd_tenant_import_key(
+pub fn cmd_tenant_import_key(
     key_path: PathBuf,
     backup: String,
     passphrase: Option<String>,
 ) -> anyhow::Result<()> {
+    #![allow(clippy::needless_pass_by_value)]
     use aes_gcm::{
         Aes256Gcm, Nonce,
         aead::{Aead, KeyInit},
@@ -288,6 +290,8 @@ pub(crate) fn cmd_tenant_import_key(
     write_key_file(&key_path, &seed_bytes)
         .with_context(|| format!("failed to write key to {}", key_path.display()))?;
 
+    // SAFETY: we verified seed_bytes.len() == 32 above, so try_into() is infallible.
+    #[allow(clippy::unwrap_used)]
     let seed: [u8; 32] = seed_bytes.try_into().unwrap();
     let kp = turbo_common::identity::TenantKeypair::from_seed(seed);
     println!("Restored tenant key to {}", key_path.display());

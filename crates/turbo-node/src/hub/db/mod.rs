@@ -17,13 +17,13 @@ use turbo_common::identity::TenantId;
 /// applied, so a shipped migration cannot be edited in place.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// SQLite storage layer for signed config entries.
+/// `SQLite` storage layer for signed config entries.
 pub struct Db {
     pool: sqlx::SqlitePool,
 }
 
 impl Db {
-    /// Open (or create) the SQLite database at `path` and apply any
+    /// Open (or create) the `SQLite` database at `path` and apply any
     /// pending migrations.
     pub async fn open(path: &Path) -> anyhow::Result<Self> {
         let options = SqliteConnectOptions::new()
@@ -46,7 +46,7 @@ impl Db {
             "INSERT INTO entries (tenant_id, sequence, payload_cbor, signature) VALUES ($1, $2, $3, $4)",
         )
         .bind(entry.tenant_id.as_bytes().as_slice())
-        .bind(sequence as i64)
+        .bind(sequence.cast_signed())
         .bind(&entry.payload_cbor)
         .bind(entry.signature.as_slice())
         .execute(&self.pool)
@@ -69,7 +69,7 @@ impl Db {
         rows.iter().map(row_to_entry).collect()
     }
 
-    /// Get all entries across all tenants, ordered by tenant_id and sequence ascending.
+    /// Get all entries across all tenants, ordered by `tenant_id` and sequence ascending.
     pub async fn get_all_entries(&self) -> anyhow::Result<Vec<SignedConfigEntry>> {
         let rows = sqlx::query(
             "SELECT tenant_id, payload_cbor, signature FROM entries ORDER BY tenant_id, sequence ASC",
@@ -105,12 +105,12 @@ fn blob_opt<const N: usize>(
 
 /// Extract an i64 column as u64.
 fn ms(row: &sqlx::sqlite::SqliteRow, col: &str) -> u64 {
-    row.get::<i64, _>(col) as u64
+    row.get::<i64, _>(col).cast_unsigned()
 }
 
 /// Extract an optional i64 column as Option<u64>.
 fn ms_opt(row: &sqlx::sqlite::SqliteRow, col: &str) -> anyhow::Result<Option<u64>> {
-    Ok(row.try_get::<Option<i64>, _>(col)?.map(|v| v as u64))
+    Ok(row.try_get::<Option<i64>, _>(col)?.map(i64::cast_unsigned))
 }
 
 fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<SignedConfigEntry> {

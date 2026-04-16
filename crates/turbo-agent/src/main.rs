@@ -26,7 +26,7 @@ struct Cli {
     #[arg(short, long)]
     config: Option<PathBuf>,
 
-    /// Write the iroh EndpointId (hex) to this path once the endpoint is bound.
+    /// Write the iroh `EndpointId` (hex) to this path once the endpoint is bound.
     /// Intended for orchestration (docker-compose, systemd, scripts) that need
     /// to learn the agent's identity without scraping logs.
     #[arg(long)]
@@ -89,8 +89,14 @@ enum Command {
     },
 }
 
+// Large futures are an artifact of the async state machine size; Box::pin adds overhead
+// at the call site without improving correctness.
+#[allow(clippy::large_futures)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // The ring provider install only fails if a different provider was already installed,
+    // which is a programming error and should panic at startup.
+    #[allow(clippy::expect_used)]
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install ring CryptoProvider");
@@ -125,15 +131,12 @@ async fn main() -> anyhow::Result<()> {
 async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let defaults = DefaultPaths::from_env();
 
-    let agent_config = match resolve_config_path(cli.config.as_deref(), &defaults) {
-        Some(path) => {
-            info!(path = %path.display(), "loading agent config");
-            config::AgentConfig::load(&path)?
-        }
-        None => {
-            info!("no agent config found, using state.toml + defaults");
-            config::AgentConfig::default()
-        }
+    let agent_config = if let Some(path) = resolve_config_path(cli.config.as_deref(), &defaults) {
+        info!(path = %path.display(), "loading agent config");
+        config::AgentConfig::load(&path)?
+    } else {
+        info!("no agent config found, using state.toml + defaults");
+        config::AgentConfig::default()
     };
 
     let state = ClientState::load(&defaults.state_file).with_context(|| {
@@ -143,7 +146,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         )
     })?;
 
-    let resolved = agent_config.resolve(&state)?;
+    let resolved = agent_config.resolve(&state);
 
     info!(services = resolved.services.len(), "turbo-agent starting");
 
@@ -176,7 +179,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     if let Some(path) = cli.addr_out.as_ref() {
         let joined = bound_sockets
             .iter()
-            .map(|a| a.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
         write_atomic(path, joined.as_bytes())
@@ -207,8 +210,9 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         resolved.tenant_key_path.as_deref(),
     ) {
         (Some(hub_url), Some(tenant_key_path)) if !resolved.services.is_empty() => {
-            if let Err(e) = publish_tls::publish(hub_url, tenant_key_path, &resolved.services).await
-            {
+            #[allow(clippy::large_futures)]
+            let publish_result = publish_tls::publish(hub_url, tenant_key_path, &resolved.services).await;
+            if let Err(e) = publish_result {
                 warn!(error = %e, "TLS policy publish failed; edge will use passthrough defaults");
             }
         }
@@ -226,7 +230,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
                 error!("tunnel error: {e}");
             }
         }
-        _ = turbo_common::shutdown::shutdown_signal() => {}
+        () = turbo_common::shutdown::shutdown_signal() => {}
     }
 
     endpoint.close().await;

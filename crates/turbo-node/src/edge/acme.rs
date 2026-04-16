@@ -63,51 +63,52 @@ impl AcmeCoordinator {
     }
 
     pub async fn ensure_cert(&self, hostname: &str) -> anyhow::Result<()> {
-        if self.cert_store.has_cert(hostname).await {
+        if self.cert_store.has_cert(hostname) {
             return Ok(());
         }
 
         if let Some(ts) = self.failures.lock().await.get(hostname).copied()
             && ts.elapsed() < FAILURE_COOLDOWN
         {
+            // checked_sub is infallible here: ts.elapsed() < FAILURE_COOLDOWN
+            #[allow(clippy::unwrap_used)]
+            let remaining_secs = FAILURE_COOLDOWN.checked_sub(ts.elapsed()).unwrap().as_secs();
             anyhow::bail!(
-                "recent ACME failure for {hostname} (cooldown {}s remaining)",
-                (FAILURE_COOLDOWN - ts.elapsed()).as_secs()
+                "recent ACME failure for {hostname} (cooldown {remaining_secs}s remaining)",
             );
         }
 
         let (notify, follower_wait) = {
             let mut inflight = self.inflight.lock().await;
-            match inflight.get(hostname) {
-                Some(existing) => {
-                    let notify = Arc::clone(existing);
-                    (Some(notify), true)
-                }
-                None => {
-                    let n = Arc::new(Notify::new());
-                    inflight.insert(hostname.to_string(), Arc::clone(&n));
-                    (Some(n), false)
-                }
+            // map_or_else cannot be used here: the closure would need to mutate inflight,
+            // which conflicts with the immutable borrow from get(). Keep if-let.
+            #[allow(clippy::option_if_let_else)]
+            if let Some(existing) = inflight.get(hostname) {
+                let notify = Arc::clone(existing);
+                drop(inflight);
+                (notify, true)
+            } else {
+                let n = Arc::new(Notify::new());
+                inflight.insert(hostname.to_string(), Arc::clone(&n));
+                drop(inflight);
+                (n, false)
             }
         };
 
         if follower_wait {
-            let notify = notify.expect("follower path always has a notify");
             let notified = notify.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if self.cert_store.has_cert(hostname).await {
+            if self.cert_store.has_cert(hostname) {
                 return Ok(());
             }
             tokio::time::timeout(ISSUANCE_TIMEOUT, notified).await?;
-            return if self.cert_store.has_cert(hostname).await {
+            return if self.cert_store.has_cert(hostname) {
                 Ok(())
             } else {
                 anyhow::bail!("ACME issuance failed for {hostname}")
             };
         }
-
-        let notify = notify.expect("leader path always has a notify");
 
         let result = tokio::time::timeout(
             ISSUANCE_TIMEOUT,
@@ -156,17 +157,18 @@ pub async fn run_http01_server(listen_addr: &str, tokens: ChallengeTokens) -> an
                 move |axum::extract::Path(token): axum::extract::Path<String>| {
                     let tokens = tokens.clone();
                     async move {
-                        let map = tokens.read().await;
-                        match map.get(&token) {
-                            Some(auth) => (
+                        let auth = tokens.read().await.get(&token).cloned();
+                        // map_or_else would not be cleaner here due to the tuple construction.
+                        #[allow(clippy::option_if_let_else)]
+                        if let Some(auth) = auth {
+                            (
                                 axum::http::StatusCode::OK,
                                 [(axum::http::header::CONTENT_TYPE, "text/plain")],
-                                auth.clone(),
+                                auth,
                             )
-                                .into_response(),
-                            None => {
-                                (axum::http::StatusCode::NOT_FOUND, "not found").into_response()
-                            }
+                                .into_response()
+                        } else {
+                            (axum::http::StatusCode::NOT_FOUND, "not found").into_response()
                         }
                     }
                 }

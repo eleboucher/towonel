@@ -19,7 +19,7 @@ use crate::config::TenantEntry;
 pub struct Router {
     table: RwLock<RouteTable>,
     tls_policies: RwLock<TlsPolicyTable>,
-    /// Optional direct socket addresses per agent EndpointId, used when relay
+    /// Optional direct socket addresses per agent `EndpointId`, used when relay
     /// discovery is unavailable (e.g. Docker e2e tests).
     direct_addrs: HashMap<AgentId, Vec<SocketAddr>>,
 }
@@ -27,7 +27,7 @@ pub struct Router {
 impl Router {
     /// Build a routing table from the TOML tenant config.
     ///
-    /// For each tenant, parses the hex-encoded agent EndpointIds and maps every
+    /// For each tenant, parses the hex-encoded agent `EndpointIds` and maps every
     /// hostname pattern to those agents. Produces a [`RouteTable`] internally.
     /// Also parses optional `direct_addresses` for Docker/e2e environments.
     pub fn load_from_config(tenants: &[TenantEntry]) -> anyhow::Result<Self> {

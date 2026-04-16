@@ -20,14 +20,10 @@ impl DefaultPaths {
     /// Compute defaults from `$HOME`. Falls back to `.` when `$HOME` is
     /// unset so containerized deployments can still run.
     pub fn from_env() -> Self {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
         let state_dir = home.join(DEFAULT_DIR);
         Self {
-            state_file: std::env::var_os("TURBO_STATE")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| state_dir.join(STATE_FILE)),
+            state_file: std::env::var_os("TURBO_STATE").map_or_else(|| state_dir.join(STATE_FILE), PathBuf::from),
             agent_key: state_dir.join(AGENT_KEY_FILE),
             tenant_key: state_dir.join(TENANT_KEY_FILE),
             agent_config: state_dir.join("agent.toml"),
@@ -54,7 +50,7 @@ pub struct ClientState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_key_path: Option<PathBuf>,
 
-    /// Hex-encoded iroh EndpointIds of trusted edges. Populated by
+    /// Hex-encoded iroh `EndpointIds` of trusted edges. Populated by
     /// `turbo-agent init` from the invite redemption response.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_edges: Vec<String>,

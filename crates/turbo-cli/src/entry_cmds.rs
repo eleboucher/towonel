@@ -8,7 +8,7 @@ use turbo_common::time::now_ms;
 
 use super::{CBOR_CONTENT_TYPE, check_response, resolve_hub_url, resolve_tenant_key_path};
 
-pub(crate) async fn fetch_entries(
+pub async fn fetch_entries(
     hub_url: &str,
     tenant_id: &turbo_common::identity::TenantId,
 ) -> anyhow::Result<Vec<SignedConfigEntry>> {
@@ -25,12 +25,12 @@ pub(crate) async fn fetch_entries(
 
     let body = check_response(resp).await?;
 
-    let entries: Vec<SignedConfigEntry> = ciborium::from_reader(body.as_ref())
+    let entries: Vec<SignedConfigEntry> = ciborium::from_reader(body.as_slice())
         .with_context(|| format!("hub returned invalid CBOR at {url}"))?;
     Ok(entries)
 }
 
-pub(crate) async fn submit_payload(
+pub async fn submit_payload(
     hub_url: &str,
     keypair: &TenantKeypair,
     sequence: u64,
@@ -61,7 +61,7 @@ pub(crate) async fn submit_payload(
     Ok(())
 }
 
-pub(crate) async fn cmd_entry_submit(
+pub async fn cmd_entry_submit(
     hub_url: Option<String>,
     key_path: Option<PathBuf>,
     op_str: &str,
@@ -116,7 +116,7 @@ pub(crate) async fn cmd_entry_submit(
     Ok(())
 }
 
-pub(crate) async fn cmd_entry_list(
+pub async fn cmd_entry_list(
     hub_url: Option<String>,
     key_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {

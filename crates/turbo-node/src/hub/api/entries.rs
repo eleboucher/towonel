@@ -17,13 +17,19 @@ use super::{
     tenant_not_allowed, unsupported_version,
 };
 
+#[derive(Serialize)]
+struct PostEntryResponse {
+    status: &'static str,
+    sequence: u64,
+}
+
 /// `POST /v1/entries`
 ///
 /// Validation pipeline per protocol section 4.3:
 /// 1. parse CBOR body
 /// 2. tenant allowlist check (cheap -- fail before crypto)
 /// 3. Ed25519 signature verification
-/// 4. inner/outer tenant_id match
+/// 4. inner/outer `tenant_id` match
 /// 5. payload version check
 /// 6. hostname ownership check (for hostname ops only)
 /// 7. sequence uniqueness (DB UNIQUE constraint)
@@ -87,11 +93,6 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         Err(e) => warn!(error = %e, "failed to rebuild routes after insert"),
     }
 
-    #[derive(Serialize)]
-    struct PostEntryResponse {
-        status: &'static str,
-        sequence: u64,
-    }
     cbor_response(&PostEntryResponse {
         status: "ok",
         sequence,
@@ -146,14 +147,11 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
         edges: Vec<EdgeEntry<'a>>,
     }
 
-    let edges = match state.identity.edge_node_id.as_deref() {
-        Some(node_id) => vec![EdgeEntry {
-            node_id,
-            healthy: true,
-            addresses: &state.identity.edge_addresses,
-        }],
-        None => Vec::new(),
-    };
+    let edges = state.identity.edge_node_id.as_deref().map_or_else(Vec::new, |node_id| vec![EdgeEntry {
+        node_id,
+        healthy: true,
+        addresses: &state.identity.edge_addresses,
+    }]);
 
     json_ok(ListEdgesResponse { edges })
 }

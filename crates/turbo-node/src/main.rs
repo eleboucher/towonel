@@ -52,8 +52,13 @@ enum Command {
     },
 }
 
+// main() is long because it branches over (hub, edge) mode combinations.
+// Splitting it would not improve readability.
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // The ring provider install only fails if another provider was already installed.
+    #[allow(clippy::expect_used)]
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install ring CryptoProvider");
@@ -109,7 +114,10 @@ async fn main() -> anyhow::Result<()> {
                 software_version: SOFTWARE_VERSION,
             };
             let hub = hub::Hub::new(build_hub_params(
-                &config, identity, hub_secret_key, route_tx,
+                &config,
+                identity,
+                hub_secret_key,
+                route_tx,
             )?);
 
             tokio::spawn(route_sync_task(route_rx, router));
@@ -121,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
                 res = edge.run() => {
                     if let Err(e) = res { error!("edge error: {e}"); }
                 }
-                _ = turbo_common::shutdown::shutdown_signal() => {}
+                () = turbo_common::shutdown::shutdown_signal() => {}
             }
         }
         (true, false) => {
@@ -132,14 +140,12 @@ async fn main() -> anyhow::Result<()> {
                 edge_addresses: Vec::new(),
                 software_version: SOFTWARE_VERSION,
             };
-            let hub = hub::Hub::new(build_hub_params(
-                &config, identity, secret_key, route_tx,
-            )?);
+            let hub = hub::Hub::new(build_hub_params(&config, identity, secret_key, route_tx)?);
             tokio::select! {
                 res = hub.run() => {
                     if let Err(e) = res { error!("hub error: {e}"); }
                 }
-                _ = turbo_common::shutdown::shutdown_signal() => {}
+                () = turbo_common::shutdown::shutdown_signal() => {}
             }
         }
         (false, true) => {
@@ -163,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
                 res = edge.run() => {
                     if let Err(e) = res { error!("edge error: {e}"); }
                 }
-                _ = turbo_common::shutdown::shutdown_signal() => {}
+                () = turbo_common::shutdown::shutdown_signal() => {}
             }
         }
         (false, false) => {
@@ -194,8 +200,7 @@ fn build_hub_params(
     route_tx: broadcast::Sender<RouteTable>,
 ) -> anyhow::Result<hub::HubParams> {
     let policy = build_ownership_policy(&config.tenants)?;
-    let operator_api_key =
-        hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
+    let operator_api_key = hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
     let public_url = default_public_url(&config.hub);
     let peer_urls: Vec<String> = config.hub.peers.iter().map(|p| p.url.clone()).collect();
     Ok(hub::HubParams {
@@ -251,7 +256,7 @@ fn build_ownership_policy(tenants: &[config::TenantEntry]) -> anyhow::Result<Own
 
 /// Create an iroh Endpoint, build the Router from tenant config, and
 /// construct the Edge. Returns the Router (for dynamic updates), the Edge,
-/// the edge's EndpointId (hex), and its bound socket addresses (as strings).
+/// the edge's `EndpointId` (hex), and its bound socket addresses (as strings).
 ///
 /// The edge endpoint has no ALPNs because it only makes outbound connections
 /// to agents -- it never accepts inbound iroh connections.
@@ -263,7 +268,11 @@ async fn build_edge(
     let ep = Endpoint::builder().secret_key(secret_key).bind().await?;
 
     let edge_node_id = ep.id().to_string();
-    let edge_addresses: Vec<String> = ep.bound_sockets().iter().map(|s| s.to_string()).collect();
+    let edge_addresses: Vec<String> = ep
+        .bound_sockets()
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
 
     info!(
         endpoint_id = %ep.addr().id.fmt_short(),
@@ -283,7 +292,7 @@ async fn build_edge(
         let cert_store = edge::tls::CertStore::new(&tls.cert_dir)?;
 
         let acme = if let Some(email) = tls.acme_email.clone() {
-            let tokens: edge::acme::ChallengeTokens = Default::default();
+            let tokens: edge::acme::ChallengeTokens = Arc::default();
 
             // HTTP-01 challenge server on :80 (or wherever `http_listen_addr` points).
             let http_addr = tls.http_listen_addr.clone();

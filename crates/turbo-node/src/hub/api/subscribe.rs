@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{HeaderMap, header};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::Serialize;
 use turbo_common::routing::RouteTable;
 
-use turbo_common::time::now_ms;
 
 use super::{AppState, internal_error, json_ok, unauthorized};
 
@@ -46,6 +45,8 @@ async fn authenticate_edge_subscriber(
 /// wrap it in an SSE `routes` event.
 fn route_event(table: &RouteTable) -> axum::response::sse::Event {
     let mut buf = Vec::new();
+    // RouteTable only contains serializable primitives; CBOR encode into a Vec is infallible.
+    #[allow(clippy::expect_used)]
     ciborium::into_writer(table, &mut buf).expect("RouteTable CBOR encode is infallible");
     axum::response::sse::Event::default()
         .event("routes")
@@ -83,7 +84,7 @@ pub(super) async fn routes_subscribe(
         loop {
             match rx.recv().await {
                 Ok(table) => yield Ok(route_event(&table)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -97,14 +98,14 @@ pub(super) async fn routes_subscribe(
 /// `GET /v1/dns/records` -- returns all active hostnames paired with this
 /// hub's edge addresses. An external-dns sidecar or cron job can poll this
 /// to create A / AAAA records pointing each hostname at the edge IPs.
-pub(super) async fn get_dns_records(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let hostnames = state.prev_hostnames.read().await;
+#[derive(Serialize)]
+struct DnsRecord<'a> {
+    hostname: &'a str,
+    targets: &'a [String],
+}
 
-    #[derive(Serialize)]
-    struct DnsRecord<'a> {
-        hostname: &'a str,
-        targets: &'a [String],
-    }
+pub(super) async fn get_dns_records(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let hostnames: Vec<String> = state.prev_hostnames.read().await.iter().cloned().collect();
 
     let records: Vec<DnsRecord<'_>> = hostnames
         .iter()

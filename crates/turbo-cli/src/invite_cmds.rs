@@ -2,7 +2,23 @@ use anyhow::{Context, anyhow};
 
 use super::{JSON_CONTENT_TYPE, check_response, resolve_hub_url, resolve_operator_key, short};
 
-pub(crate) async fn cmd_invite_create(
+#[derive(serde::Serialize)]
+struct CreateInviteReq<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    hostnames: &'a [String],
+    expires_in_secs: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct CreateInviteResp {
+    token: String,
+    invite_id: String,
+    name: String,
+    expires_at_ms: u64,
+}
+
+pub async fn cmd_invite_create(
     hub_url: Option<String>,
     api_key: Option<String>,
     name: Option<String>,
@@ -21,27 +37,12 @@ pub(crate) async fn cmd_invite_create(
         return Err(anyhow!("--expires must be > 0"));
     }
 
-    #[derive(serde::Serialize)]
-    struct Req<'a> {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        name: Option<&'a str>,
-        hostnames: &'a [String],
-        expires_in_secs: u64,
-    }
-    #[derive(serde::Deserialize)]
-    struct Resp {
-        token: String,
-        invite_id: String,
-        name: String,
-        expires_at_ms: u64,
-    }
-
     let url = format!("{}/v1/invites", hub_url.trim_end_matches('/'));
     let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(&api_key)
         .header(reqwest::header::CONTENT_TYPE, JSON_CONTENT_TYPE)
-        .json(&Req {
+        .json(&CreateInviteReq {
             name: name.as_deref(),
             hostnames: &hostnames,
             expires_in_secs,
@@ -51,7 +52,7 @@ pub(crate) async fn cmd_invite_create(
         .with_context(|| format!("failed to POST {url}"))?;
 
     let body = check_response(resp).await?;
-    let parsed: Resp = serde_json::from_slice(&body)?;
+    let parsed: CreateInviteResp = serde_json::from_slice(&body)?;
 
     println!("Created invite for \"{}\"", parsed.name);
     println!("  Invite ID: {}", parsed.invite_id);
@@ -64,24 +65,26 @@ pub(crate) async fn cmd_invite_create(
     Ok(())
 }
 
-pub(crate) async fn cmd_invite_list(
+#[derive(serde::Deserialize)]
+struct ListInvitesResp {
+    invites: Vec<InviteItem>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(clippy::struct_field_names)]
+struct InviteItem {
+    invite_id: String,
+    name: String,
+    status: String,
+    expires_at_ms: u64,
+}
+
+pub async fn cmd_invite_list(
     hub_url: Option<String>,
     api_key: Option<String>,
 ) -> anyhow::Result<()> {
     let hub_url = resolve_hub_url(hub_url)?;
     let api_key = resolve_operator_key(api_key)?;
-
-    #[derive(serde::Deserialize)]
-    struct Resp {
-        invites: Vec<Invite>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Invite {
-        invite_id: String,
-        name: String,
-        status: String,
-        expires_at_ms: u64,
-    }
 
     let url = format!("{}/v1/invites", hub_url.trim_end_matches('/'));
     let resp = reqwest::Client::new()
@@ -92,7 +95,7 @@ pub(crate) async fn cmd_invite_list(
         .with_context(|| format!("failed to GET {url}"))?;
 
     let body = check_response(resp).await?;
-    let parsed: Resp = serde_json::from_slice(&body)?;
+    let parsed: ListInvitesResp = serde_json::from_slice(&body)?;
 
     if parsed.invites.is_empty() {
         println!("No invites.");
@@ -111,7 +114,7 @@ pub(crate) async fn cmd_invite_list(
     Ok(())
 }
 
-pub(crate) async fn cmd_invite_revoke(
+pub async fn cmd_invite_revoke(
     hub_url: Option<String>,
     api_key: Option<String>,
     id: String,
@@ -132,7 +135,36 @@ pub(crate) async fn cmd_invite_revoke(
     Ok(())
 }
 
-pub(crate) async fn cmd_edge_invite_create(
+#[derive(serde::Serialize)]
+struct CreateEdgeInviteReq<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    expires_in_secs: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct CreateEdgeInviteResp {
+    token: String,
+    invite_id: String,
+    name: String,
+    expires_at_ms: u64,
+}
+
+#[derive(serde::Deserialize)]
+struct ListEdgeInvitesResp {
+    invites: Vec<EdgeInviteItem>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(clippy::struct_field_names)]
+struct EdgeInviteItem {
+    invite_id: String,
+    name: String,
+    status: String,
+    expires_at_ms: u64,
+}
+
+pub async fn cmd_edge_invite_create(
     hub_url: Option<String>,
     api_key: Option<String>,
     name: Option<String>,
@@ -147,26 +179,12 @@ pub(crate) async fn cmd_edge_invite_create(
         return Err(anyhow!("--expires must be > 0"));
     }
 
-    #[derive(serde::Serialize)]
-    struct Req<'a> {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        name: Option<&'a str>,
-        expires_in_secs: u64,
-    }
-    #[derive(serde::Deserialize)]
-    struct Resp {
-        token: String,
-        invite_id: String,
-        name: String,
-        expires_at_ms: u64,
-    }
-
     let url = format!("{}/v1/edge-invites", hub_url.trim_end_matches('/'));
     let resp = reqwest::Client::new()
         .post(&url)
         .bearer_auth(&api_key)
         .header(reqwest::header::CONTENT_TYPE, JSON_CONTENT_TYPE)
-        .json(&Req {
+        .json(&CreateEdgeInviteReq {
             name: name.as_deref(),
             expires_in_secs,
         })
@@ -175,7 +193,7 @@ pub(crate) async fn cmd_edge_invite_create(
         .with_context(|| format!("failed to POST {url}"))?;
 
     let body = check_response(resp).await?;
-    let parsed: Resp = serde_json::from_slice(&body)?;
+    let parsed: CreateEdgeInviteResp = serde_json::from_slice(&body)?;
 
     println!("Created edge invite for \"{}\"", parsed.name);
     println!("  Invite ID: {}", parsed.invite_id);
@@ -187,24 +205,12 @@ pub(crate) async fn cmd_edge_invite_create(
     Ok(())
 }
 
-pub(crate) async fn cmd_edge_invite_list(
+pub async fn cmd_edge_invite_list(
     hub_url: Option<String>,
     api_key: Option<String>,
 ) -> anyhow::Result<()> {
     let hub_url = resolve_hub_url(hub_url)?;
     let api_key = resolve_operator_key(api_key)?;
-
-    #[derive(serde::Deserialize)]
-    struct Resp {
-        invites: Vec<Invite>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Invite {
-        invite_id: String,
-        name: String,
-        status: String,
-        expires_at_ms: u64,
-    }
 
     let url = format!("{}/v1/edge-invites", hub_url.trim_end_matches('/'));
     let resp = reqwest::Client::new()
@@ -215,14 +221,14 @@ pub(crate) async fn cmd_edge_invite_list(
         .with_context(|| format!("failed to GET {url}"))?;
 
     let body = check_response(resp).await?;
-    let parsed: Resp = serde_json::from_slice(&body)?;
+    let parsed: ListEdgeInvitesResp = serde_json::from_slice(&body)?;
 
     if parsed.invites.is_empty() {
         println!("No edge invites.");
         return Ok(());
     }
     println!("{:<24} {:<20} {:<10} EXPIRES_AT_MS", "ID", "NAME", "STATUS");
-    for inv in parsed.invites {
+    for inv in &parsed.invites {
         println!(
             "{:<24} {:<20} {:<10} {}",
             short(&inv.invite_id, 20),
@@ -234,7 +240,7 @@ pub(crate) async fn cmd_edge_invite_list(
     Ok(())
 }
 
-pub(crate) async fn cmd_edge_invite_revoke(
+pub async fn cmd_edge_invite_revoke(
     hub_url: Option<String>,
     api_key: Option<String>,
     id: String,
