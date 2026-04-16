@@ -155,9 +155,9 @@ enum InviteAction {
         /// Operator API key. Defaults to $TURBO_OPERATOR_KEY.
         #[arg(long)]
         api_key: Option<String>,
-        /// Human-readable tenant name.
+        /// Human-readable tenant name. Random if omitted.
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         /// Comma-separated hostname patterns to pre-approve.
         #[arg(long, value_delimiter = ',')]
         hostnames: Vec<String>,
@@ -192,9 +192,9 @@ enum EdgeInviteAction {
         hub_url: Option<String>,
         #[arg(long)]
         api_key: Option<String>,
-        /// Human-readable edge name (e.g. "charlie-fra1").
+        /// Human-readable edge name (e.g. "charlie-fra1"). Random if omitted.
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         /// Token validity, e.g. "24h", "7d". Default 24h.
         #[arg(long, default_value = "24h")]
         expires: String,

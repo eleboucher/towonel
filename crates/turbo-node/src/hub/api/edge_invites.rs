@@ -18,7 +18,8 @@ use super::{
 
 #[derive(Debug, Deserialize)]
 pub(super) struct CreateEdgeInviteRequest {
-    name: String,
+    /// Optional human-readable label. A random name is generated when absent.
+    name: Option<String>,
     expires_in_secs: u64,
 }
 
@@ -27,6 +28,7 @@ pub(super) struct CreateEdgeInviteResponse {
     status: &'static str,
     token: String,
     invite_id: String,
+    name: String,
     expires_at_ms: u64,
 }
 
@@ -34,9 +36,10 @@ pub(super) async fn post_edge_invite(
     State(state): State<Arc<AppState>>,
     axum::Json(req): axum::Json<CreateEdgeInviteRequest>,
 ) -> Response {
-    if req.name.trim().is_empty() {
-        return invalid_request("name must not be empty");
-    }
+    let name = match req.name {
+        Some(n) if !n.trim().is_empty() => n,
+        _ => turbo_common::random_name::random_name(),
+    };
     const MAX_TTL_SECS: u64 = 30 * 24 * 3600;
     if req.expires_in_secs == 0 || req.expires_in_secs > MAX_TTL_SECS {
         return invalid_request(format!("expires_in_secs must be in 1..={MAX_TTL_SECS}"));
@@ -48,7 +51,7 @@ pub(super) async fn post_edge_invite(
 
     let pending = super::db::PendingEdgeInvite {
         invite_id: token.invite_id,
-        name: &req.name,
+        name: &name,
         secret_hash: hash_invite_secret(&token.invite_secret),
         expires_at_ms,
         created_at_ms,
@@ -63,6 +66,7 @@ pub(super) async fn post_edge_invite(
         status: "ok",
         token: token.encode(),
         invite_id: token.invite_id_b64(),
+        name,
         expires_at_ms,
     })
 }

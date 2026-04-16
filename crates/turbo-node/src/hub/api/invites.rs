@@ -19,7 +19,8 @@ use super::{
 
 #[derive(Debug, Deserialize)]
 pub(super) struct CreateInviteRequest {
-    name: String,
+    /// Optional human-readable label. A random name is generated when absent.
+    name: Option<String>,
     hostnames: Vec<String>,
     /// Relative TTL from now. 48h default enforced by the operator tool;
     /// the hub trusts whatever it's told but caps at 30 days.
@@ -31,6 +32,7 @@ pub(super) struct CreateInviteResponse {
     status: &'static str,
     token: String,
     invite_id: String,
+    name: String,
     expires_at_ms: u64,
 }
 
@@ -38,9 +40,10 @@ pub(super) async fn post_invite(
     State(state): State<Arc<AppState>>,
     axum::Json(req): axum::Json<CreateInviteRequest>,
 ) -> Response {
-    if req.name.trim().is_empty() {
-        return invalid_request("name must not be empty");
-    }
+    let name = match req.name {
+        Some(n) if !n.trim().is_empty() => n,
+        _ => turbo_common::random_name::random_name(),
+    };
     if req.hostnames.is_empty() {
         return invalid_request("at least one hostname is required");
     }
@@ -92,7 +95,7 @@ pub(super) async fn post_invite(
 
     let pending = PendingInvite {
         invite_id: token.invite_id,
-        name: &req.name,
+        name: &name,
         hostnames: &req.hostnames,
         secret_hash: hash_invite_secret(&token.invite_secret),
         expires_at_ms,
@@ -108,6 +111,7 @@ pub(super) async fn post_invite(
         status: "ok",
         token: token.encode(),
         invite_id: token.invite_id_b64(),
+        name,
         expires_at_ms,
     })
 }

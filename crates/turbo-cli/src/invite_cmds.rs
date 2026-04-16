@@ -5,7 +5,7 @@ use super::{JSON_CONTENT_TYPE, resolve_hub_url, resolve_operator_key, short};
 pub(crate) async fn cmd_invite_create(
     hub_url: Option<String>,
     api_key: Option<String>,
-    name: String,
+    name: Option<String>,
     hostnames: Vec<String>,
     expires: String,
 ) -> anyhow::Result<()> {
@@ -23,7 +23,8 @@ pub(crate) async fn cmd_invite_create(
 
     #[derive(serde::Serialize)]
     struct Req<'a> {
-        name: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<&'a str>,
         hostnames: &'a [String],
         expires_in_secs: u64,
     }
@@ -31,6 +32,7 @@ pub(crate) async fn cmd_invite_create(
     struct Resp {
         token: String,
         invite_id: String,
+        name: String,
         expires_at_ms: u64,
     }
 
@@ -40,7 +42,7 @@ pub(crate) async fn cmd_invite_create(
         .bearer_auth(&api_key)
         .header(reqwest::header::CONTENT_TYPE, JSON_CONTENT_TYPE)
         .json(&Req {
-            name: &name,
+            name: name.as_deref(),
             hostnames: &hostnames,
             expires_in_secs,
         })
@@ -59,7 +61,7 @@ pub(crate) async fn cmd_invite_create(
     }
     let parsed: Resp = serde_json::from_slice(&body)?;
 
-    println!("Created invite for \"{name}\"");
+    println!("Created invite for \"{}\"", parsed.name);
     println!("  Invite ID: {}", parsed.invite_id);
     println!("  Hostnames: {}", hostnames.join(", "));
     println!("  Expires:   {} (in {expires})", parsed.expires_at_ms);
@@ -157,7 +159,7 @@ pub(crate) async fn cmd_invite_revoke(
 pub(crate) async fn cmd_edge_invite_create(
     hub_url: Option<String>,
     api_key: Option<String>,
-    name: String,
+    name: Option<String>,
     expires: String,
 ) -> anyhow::Result<()> {
     let hub_url = resolve_hub_url(hub_url)?;
@@ -171,13 +173,15 @@ pub(crate) async fn cmd_edge_invite_create(
 
     #[derive(serde::Serialize)]
     struct Req<'a> {
-        name: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<&'a str>,
         expires_in_secs: u64,
     }
     #[derive(serde::Deserialize)]
     struct Resp {
         token: String,
         invite_id: String,
+        name: String,
         expires_at_ms: u64,
     }
 
@@ -187,7 +191,7 @@ pub(crate) async fn cmd_edge_invite_create(
         .bearer_auth(&api_key)
         .header(reqwest::header::CONTENT_TYPE, JSON_CONTENT_TYPE)
         .json(&Req {
-            name: &name,
+            name: name.as_deref(),
             expires_in_secs,
         })
         .send()
@@ -205,7 +209,7 @@ pub(crate) async fn cmd_edge_invite_create(
     }
     let parsed: Resp = serde_json::from_slice(&body)?;
 
-    println!("Created edge invite for \"{name}\"");
+    println!("Created edge invite for \"{}\"", parsed.name);
     println!("  Invite ID: {}", parsed.invite_id);
     println!("  Expires:   {} (in {expires})", parsed.expires_at_ms);
     println!();

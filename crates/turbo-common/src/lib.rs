@@ -4,6 +4,7 @@ pub mod hostname;
 pub mod identity;
 pub mod invite;
 pub mod ownership;
+pub mod random_name;
 pub mod protocol;
 pub mod routing;
 pub mod shutdown;
