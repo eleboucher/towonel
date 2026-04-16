@@ -9,7 +9,22 @@ use turbo_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
 use turbo_common::identity::{AgentId, AgentKeypair, TenantKeypair};
 use turbo_common::invite::InviteToken;
 
-const CBOR_CONTENT_TYPE: &str = "application/cbor";
+use turbo_common::CBOR_CONTENT_TYPE;
+
+/// Check an HTTP response and return the body bytes on success, or a
+/// formatted error on failure.
+pub(crate) async fn check_response(resp: reqwest::Response) -> anyhow::Result<bytes::Bytes> {
+    let status = resp.status();
+    let body = resp.bytes().await?;
+    if !status.is_success() {
+        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        return Err(anyhow!(
+            "hub returned {status}: {}",
+            serde_json::to_string_pretty(&err)?
+        ));
+    }
+    Ok(body)
+}
 
 pub async fn run(invite_str: &str, out: Option<&Path>) -> anyhow::Result<()> {
     let token = InviteToken::decode(invite_str).context("invalid invite token")?;
@@ -46,15 +61,7 @@ pub async fn run(invite_str: &str, out: Option<&Path>) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to POST {redeem_url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    let body = check_response(resp).await?;
     let redeemed: RedeemResponse =
         serde_json::from_slice(&body).context("hub returned malformed redemption response")?;
 
@@ -162,15 +169,7 @@ pub(super) async fn submit_entry(
         .await
         .with_context(|| format!("failed to POST {url}"))?;
 
-    let status = resp.status();
-    let resp_body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&resp_body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    check_response(resp).await?;
     Ok(())
 }
 

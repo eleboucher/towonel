@@ -130,20 +130,9 @@ impl RouteTable {
     /// matches `app.example.eu` but **not** `deep.app.example.eu`. Only the
     /// first label (before the first dot) is replaced by `*`.
     pub fn lookup(&self, hostname: &str) -> Option<&HashSet<AgentId>> {
-        let lower = hostname.to_lowercase();
-
-        if let Some(agents) = self.routes.get(&lower).filter(|a| !a.is_empty()) {
-            return Some(agents);
-        }
-
-        if let Some(dot_pos) = lower.find('.') {
-            let wildcard = format!("*.{}", &lower[dot_pos + 1..]);
-            if let Some(agents) = self.routes.get(&wildcard).filter(|a| !a.is_empty()) {
-                return Some(agents);
-            }
-        }
-
-        None
+        crate::hostname::wildcard_lookup(hostname, |key| {
+            self.routes.get(key).filter(|a| !a.is_empty())
+        })
     }
 
     /// Build a route table from a pre-computed map (e.g. from TOML config).

@@ -3,7 +3,7 @@ use turbo_common::identity::{PqPublicKey, TenantId};
 use turbo_common::invite::INVITE_ID_LEN;
 
 use super::{Db, blob, blob_opt, ms, ms_opt};
-use super::{EdgeInviteRow, InviteRow, PendingEdgeInvite, PendingInvite, RedeemedTenant};
+use super::{EdgeInviteRow, InviteRow, InviteStatus, PendingEdgeInvite, PendingInvite, RedeemedTenant};
 
 impl Db {
     /// Persist a fresh pending invite. Duplicate invite_ids fail via the
@@ -320,7 +320,7 @@ fn row_to_invite(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<InviteRow> {
         hostnames: serde_json::from_str(&hostnames_json)?,
         secret_hash: blob(row, "secret_hash")?,
         expires_at_ms: ms(row, "expires_at_ms"),
-        status: row.get("status"),
+        status: InviteStatus::parse(row.get("status"))?,
         tenant_id: blob_opt::<32>(row, "tenant_id")?.map(|b| TenantId::from_bytes(&b)),
         redeemed_at_ms: ms_opt(row, "redeemed_at_ms")?,
         created_at_ms: ms(row, "created_at_ms"),
@@ -333,7 +333,7 @@ fn row_to_edge_invite(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<EdgeInvit
         name: row.get("name"),
         secret_hash: blob(row, "secret_hash")?,
         expires_at_ms: ms(row, "expires_at_ms"),
-        status: row.get("status"),
+        status: InviteStatus::parse(row.get("status"))?,
         edge_node_id: blob_opt(row, "edge_node_id")?,
         redeemed_at_ms: ms_opt(row, "redeemed_at_ms")?,
         created_at_ms: ms(row, "created_at_ms"),
@@ -377,7 +377,7 @@ mod tests {
         assert_eq!(row.name, "alice");
         assert_eq!(row.hostnames, hostnames);
         assert_eq!(row.secret_hash, pending.secret_hash);
-        assert_eq!(row.status, "pending");
+        assert_eq!(row.status, InviteStatus::Pending);
         assert_eq!(row.expires_at_ms, 2_000_000_000_000);
         assert!(row.tenant_id.is_none());
         assert!(row.redeemed_at_ms.is_none());
@@ -436,7 +436,7 @@ mod tests {
         assert!(ok);
 
         let row = db.get_invite(&pending.invite_id).await.unwrap().unwrap();
-        assert_eq!(row.status, "redeemed");
+        assert_eq!(row.status, InviteStatus::Redeemed);
         assert_eq!(row.tenant_id, Some(tenant.id()));
         assert_eq!(row.redeemed_at_ms, Some(1_700_001_000_000));
     }
@@ -503,7 +503,7 @@ mod tests {
 
         assert!(db.revoke_invite(&pending.invite_id).await.unwrap());
         let row = db.get_invite(&pending.invite_id).await.unwrap().unwrap();
-        assert_eq!(row.status, "revoked");
+        assert_eq!(row.status, InviteStatus::Revoked);
 
         // Revoking twice must be a no-op returning false.
         assert!(!db.revoke_invite(&pending.invite_id).await.unwrap());

@@ -91,10 +91,6 @@ async fn main() -> anyhow::Result<()> {
 
     match (config.hub.enabled, config.edge.enabled) {
         (true, true) => {
-            let policy = build_ownership_policy(&config.tenants)?;
-            let operator_api_key =
-                hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
-            let public_url = default_public_url(&config.hub);
             let (route_tx, route_rx) = broadcast::channel::<RouteTable>(64);
             let hub_secret_key = iroh::SecretKey::from(secret_key.to_bytes());
             let (router, edge, edge_node_id, edge_addresses) =
@@ -112,19 +108,9 @@ async fn main() -> anyhow::Result<()> {
                 edge_addresses: public_addresses,
                 software_version: SOFTWARE_VERSION,
             };
-            let peer_urls: Vec<String> = config.hub.peers.iter().map(|p| p.url.clone()).collect();
-            let hub = hub::Hub::new(hub::HubParams {
-                listen_addr: config.hub.listen_addr.clone(),
-                db_path: config.hub.db_path.clone(),
-                route_tx,
-                static_policy: policy,
-                identity,
-                operator_api_key,
-                public_url,
-                peer_urls,
-                secret_key: hub_secret_key,
-                dns_webhook_url: config.hub.dns_webhook_url.clone(),
-            });
+            let hub = hub::Hub::new(build_hub_params(
+                &config, identity, hub_secret_key, route_tx,
+            )?);
 
             tokio::spawn(route_sync_task(route_rx, router));
 
@@ -139,10 +125,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         (true, false) => {
-            let policy = build_ownership_policy(&config.tenants)?;
-            let operator_api_key =
-                hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
-            let public_url = default_public_url(&config.hub);
             let (route_tx, _) = broadcast::channel::<RouteTable>(64);
             let identity = HubIdentity {
                 node_id: node_id.to_string(),
@@ -150,19 +132,9 @@ async fn main() -> anyhow::Result<()> {
                 edge_addresses: Vec::new(),
                 software_version: SOFTWARE_VERSION,
             };
-            let peer_urls: Vec<String> = config.hub.peers.iter().map(|p| p.url.clone()).collect();
-            let hub = hub::Hub::new(hub::HubParams {
-                listen_addr: config.hub.listen_addr.clone(),
-                db_path: config.hub.db_path.clone(),
-                route_tx,
-                static_policy: policy,
-                identity,
-                operator_api_key,
-                public_url,
-                peer_urls,
-                secret_key,
-                dns_webhook_url: config.hub.dns_webhook_url.clone(),
-            });
+            let hub = hub::Hub::new(build_hub_params(
+                &config, identity, secret_key, route_tx,
+            )?);
             tokio::select! {
                 res = hub.run() => {
                     if let Err(e) = res { error!("hub error: {e}"); }
@@ -209,6 +181,35 @@ fn default_public_url(hub: &config::HubConfig) -> String {
     hub.public_url
         .clone()
         .unwrap_or_else(|| format!("https://{}", hub.listen_addr))
+}
+
+/// Build [`hub::HubParams`] from the node config and an identity.
+///
+/// Shared between the hub+edge and hub-only match arms so the field
+/// wiring isn't duplicated.
+fn build_hub_params(
+    config: &config::NodeConfig,
+    identity: HubIdentity,
+    secret_key: iroh::SecretKey,
+    route_tx: broadcast::Sender<RouteTable>,
+) -> anyhow::Result<hub::HubParams> {
+    let policy = build_ownership_policy(&config.tenants)?;
+    let operator_api_key =
+        hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
+    let public_url = default_public_url(&config.hub);
+    let peer_urls: Vec<String> = config.hub.peers.iter().map(|p| p.url.clone()).collect();
+    Ok(hub::HubParams {
+        listen_addr: config.hub.listen_addr.clone(),
+        db_path: config.hub.db_path.clone(),
+        route_tx,
+        static_policy: policy,
+        identity,
+        operator_api_key,
+        public_url,
+        peer_urls,
+        secret_key,
+        dns_webhook_url: config.hub.dns_webhook_url.clone(),
+    })
 }
 
 /// Build the `OwnershipPolicy` from the operator's tenant allowlist in config.

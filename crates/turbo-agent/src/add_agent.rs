@@ -106,15 +106,7 @@ async fn fetch_entries(
         .await
         .with_context(|| format!("failed to GET {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    let body = crate::init::check_response(resp).await?;
 
     let entries: Vec<SignedConfigEntry> = ciborium::from_reader(body.as_ref())
         .with_context(|| format!("hub returned invalid CBOR at {url}"))?;

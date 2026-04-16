@@ -17,6 +17,7 @@ use turbo_common::routing::RouteTable;
 use turbo_common::time::now_ms;
 
 use super::api::AppState;
+use super::api::{error_response, internal_error, invalid_request, json_ok, unauthorized};
 use super::db::FederatedTenant;
 
 const FEDERATION_AUTH_DOMAIN: &str = "turbo-tunnel/federation/v1";
@@ -45,47 +46,13 @@ async fn authenticate_peer(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<[u8; 32], &'static str> {
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .ok_or("missing Authorization header")?
-        .to_str()
-        .map_err(|_| "malformed Authorization header")?;
-    let body = auth
-        .strip_prefix("Signature ")
-        .ok_or("Authorization must be `Signature <node_id>.<ts>.<sig>`")?;
+    let (node_id_bytes, ts_ms) = super::auth::verify_signature_header(
+        headers,
+        FEDERATION_AUTH_DOMAIN,
+        FEDERATION_MAX_CLOCK_SKEW_MS,
+    )?;
 
-    let mut parts = body.splitn(3, '.');
-    let node_id_hex = parts.next().ok_or("missing node_id segment")?;
-    let ts_str = parts.next().ok_or("missing timestamp segment")?;
-    let sig_b64 = parts.next().ok_or("missing signature segment")?;
-
-    let node_id_bytes: [u8; 32] = hex::decode(node_id_hex)
-        .map_err(|_| "node_id is not hex")?
-        .try_into()
-        .map_err(|_| "node_id must be 32 bytes")?;
-
-    let ts_ms: u64 = ts_str.parse().map_err(|_| "timestamp is not a u64")?;
-    if now_ms().abs_diff(ts_ms) > FEDERATION_MAX_CLOCK_SKEW_MS {
-        return Err("timestamp outside freshness window");
-    }
-
-    let sig_arr: [u8; 64] = B64
-        .decode(sig_b64)
-        .map_err(|_| "signature is not base64url")?
-        .try_into()
-        .map_err(|_| "signature must be 64 bytes")?;
-
-    let pubkey = ed25519_dalek::VerifyingKey::from_bytes(&node_id_bytes)
-        .map_err(|_| "node_id is not a valid Ed25519 public key")?;
-    let message = format!("{FEDERATION_AUTH_DOMAIN}/{node_id_hex}/{ts_ms}");
-    pubkey
-        .verify_strict(
-            message.as_bytes(),
-            &ed25519_dalek::Signature::from_bytes(&sig_arr),
-        )
-        .map_err(|_| "signature does not verify")?;
-
-    if !state.trusted_peers.read().await.contains(&node_id_bytes) {
+    if !state.federation.trusted_peers.read().await.contains(&node_id_bytes) {
         return Err("signing node_id is not a configured federation peer");
     }
 
@@ -93,7 +60,7 @@ async fn authenticate_peer(
         const MAX_NONCE_ENTRIES: usize = 10_000;
         let now = now_ms();
         let evict_before = now.saturating_sub(FEDERATION_MAX_CLOCK_SKEW_MS * 2);
-        let mut nonces = state.federation_nonces.lock().await;
+        let mut nonces = state.federation.nonces.lock().await;
         nonces.retain(|&(_, ts)| ts > evict_before);
         if nonces.len() >= MAX_NONCE_ENTRIES {
             return Err("nonce cache full — too many requests in window");
@@ -106,42 +73,16 @@ async fn authenticate_peer(
     Ok(node_id_bytes)
 }
 
-fn unauthorized(msg: &'static str) -> Response {
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-        axum::Json(serde_json::json!({"error": {"code": "unauthorized", "message": msg}})),
-    )
-        .into_response()
-}
-
 fn invalid(msg: impl Into<String>) -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-        axum::Json(serde_json::json!({
-            "error": {"code": "invalid_request", "message": msg.into()}
-        })),
-    )
-        .into_response()
+    invalid_request(msg)
 }
 
 fn internal() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-        axum::Json(serde_json::json!({"error": {"code": "internal", "message": "internal error"}})),
-    )
-        .into_response()
+    internal_error()
 }
 
 fn ok() -> Response {
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
-        axum::Json(serde_json::json!({"status": "ok"})),
-    )
-        .into_response()
+    json_ok(serde_json::json!({"status": "ok"}))
 }
 
 /// `POST /v1/federation/tenants` — peer announces a tenant they redeemed.
@@ -491,7 +432,7 @@ async fn post_signed_cbor(
             reqwest::header::AUTHORIZATION,
             signed_auth_header(secret_key),
         )
-        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .header(reqwest::header::CONTENT_TYPE, turbo_common::CBOR_CONTENT_TYPE)
         .body(body)
         .send()
         .await?;

@@ -1,5 +1,5 @@
-use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use base64::Engine;
 
 /// Length of `invite_id` in bytes.
 pub const INVITE_ID_LEN: usize = 16;
@@ -33,53 +33,6 @@ pub struct InviteToken {
     pub invite_secret: [u8; INVITE_SECRET_LEN],
 }
 
-impl InviteToken {
-    pub fn new(
-        hub_url: impl Into<String>,
-        invite_id: [u8; INVITE_ID_LEN],
-        invite_secret: [u8; INVITE_SECRET_LEN],
-    ) -> Self {
-        Self {
-            hub_url: hub_url.into(),
-            invite_id,
-            invite_secret,
-        }
-    }
-
-    pub fn generate(hub_url: impl Into<String>) -> Self {
-        let (id, secret) = fresh_id_and_secret();
-        Self::new(hub_url, id, secret)
-    }
-
-    pub fn encode(&self) -> String {
-        encode_v1(
-            TENANT_TOKEN_PREFIX,
-            &self.hub_url,
-            &self.invite_id,
-            &self.invite_secret,
-        )
-    }
-
-    pub fn decode(s: &str) -> Result<Self, InviteTokenError> {
-        let (hub_url, invite_id, invite_secret) = decode_v1(TENANT_TOKEN_PREFIX, s)?;
-        Ok(Self {
-            hub_url,
-            invite_id,
-            invite_secret,
-        })
-    }
-
-    /// Short human-readable form of the invite id (first 8 hex chars).
-    pub fn invite_id_short(&self) -> String {
-        hex::encode(&self.invite_id[..4])
-    }
-
-    /// Base64url-encoded id (how the id appears in the token and API).
-    pub fn invite_id_b64(&self) -> String {
-        B64.encode(self.invite_id)
-    }
-}
-
 /// A parsed edge invite token — same structure as [`InviteToken`], different
 /// prefix, redeemed by a VPS operator to register as an edge node.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -89,44 +42,55 @@ pub struct EdgeInviteToken {
     pub invite_secret: [u8; INVITE_SECRET_LEN],
 }
 
-impl EdgeInviteToken {
-    pub fn new(
-        hub_url: impl Into<String>,
-        invite_id: [u8; INVITE_ID_LEN],
-        invite_secret: [u8; INVITE_SECRET_LEN],
-    ) -> Self {
-        Self {
-            hub_url: hub_url.into(),
-            invite_id,
-            invite_secret,
+/// Implement encode/decode/generate for an invite token type with a given prefix.
+macro_rules! impl_invite_token {
+    ($Type:ident, $prefix:expr) => {
+        impl $Type {
+            pub fn new(
+                hub_url: impl Into<String>,
+                invite_id: [u8; INVITE_ID_LEN],
+                invite_secret: [u8; INVITE_SECRET_LEN],
+            ) -> Self {
+                Self {
+                    hub_url: hub_url.into(),
+                    invite_id,
+                    invite_secret,
+                }
+            }
+
+            pub fn generate(hub_url: impl Into<String>) -> Self {
+                let (id, secret) = fresh_id_and_secret();
+                Self::new(hub_url, id, secret)
+            }
+
+            pub fn encode(&self) -> String {
+                encode_v1($prefix, &self.hub_url, &self.invite_id, &self.invite_secret)
+            }
+
+            pub fn decode(s: &str) -> Result<Self, InviteTokenError> {
+                let (hub_url, invite_id, invite_secret) = decode_v1($prefix, s)?;
+                Ok(Self {
+                    hub_url,
+                    invite_id,
+                    invite_secret,
+                })
+            }
+
+            /// Base64url-encoded id (how the id appears in the token and API).
+            pub fn invite_id_b64(&self) -> String {
+                B64.encode(self.invite_id)
+            }
         }
-    }
+    };
+}
 
-    pub fn generate(hub_url: impl Into<String>) -> Self {
-        let (id, secret) = fresh_id_and_secret();
-        Self::new(hub_url, id, secret)
-    }
+impl_invite_token!(InviteToken, TENANT_TOKEN_PREFIX);
+impl_invite_token!(EdgeInviteToken, EDGE_TOKEN_PREFIX);
 
-    pub fn encode(&self) -> String {
-        encode_v1(
-            EDGE_TOKEN_PREFIX,
-            &self.hub_url,
-            &self.invite_id,
-            &self.invite_secret,
-        )
-    }
-
-    pub fn decode(s: &str) -> Result<Self, InviteTokenError> {
-        let (hub_url, invite_id, invite_secret) = decode_v1(EDGE_TOKEN_PREFIX, s)?;
-        Ok(Self {
-            hub_url,
-            invite_id,
-            invite_secret,
-        })
-    }
-
-    pub fn invite_id_b64(&self) -> String {
-        B64.encode(self.invite_id)
+impl InviteToken {
+    /// Short human-readable form of the invite id (first 8 hex chars).
+    pub fn invite_id_short(&self) -> String {
+        hex::encode(&self.invite_id[..4])
     }
 }
 

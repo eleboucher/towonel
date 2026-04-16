@@ -37,17 +37,21 @@ impl TestHub {
             route_tx,
             policy,
             http_client: reqwest::Client::new(),
-            node_id: FAKE_NODE_ID.to_string(),
-            edge_addresses: vec!["127.0.0.1:4443".to_string()],
-            edge_node_id: Some(FAKE_NODE_ID.to_string()),
-            software_version: "0.0.0-test",
+            identity: super::HubIdentity {
+                node_id: FAKE_NODE_ID.to_string(),
+                edge_addresses: vec!["127.0.0.1:4443".to_string()],
+                edge_node_id: Some(FAKE_NODE_ID.to_string()),
+                software_version: "0.0.0-test",
+            },
             operator_api_key: OPERATOR_KEY.to_string(),
             public_url: "https://hub.test.example".to_string(),
             invite_lock: tokio::sync::Mutex::new(()),
-            trusted_peers: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+            federation: super::api::FederationState {
+                trusted_peers: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+                nonces: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+            },
             dns_webhook_url: None,
             prev_hostnames: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-            federation_nonces: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         });
 
         let app = router_unlimited(state.clone());

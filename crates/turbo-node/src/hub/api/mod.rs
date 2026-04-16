@@ -23,8 +23,8 @@ use turbo_common::routing::RouteTable;
 use super::db;
 use db::Db;
 
-pub(super) const CBOR_CONTENT_TYPE: &str = "application/cbor";
-pub(super) const JSON_CONTENT_TYPE: &str = "application/json; charset=utf-8";
+pub(super) use turbo_common::CBOR_CONTENT_TYPE;
+pub(super) use turbo_common::JSON_CONTENT_TYPE;
 
 /// Protocol version supported by this hub.
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -38,43 +38,29 @@ pub struct AppState {
     /// read lock.
     pub policy: Arc<RwLock<OwnershipPolicy>>,
     /// Shared HTTP client for outbound requests (DNS webhook, etc.).
-    /// `reqwest::Client` is backed by an `Arc` internally, so cloning is cheap.
     pub http_client: reqwest::Client,
-    /// The hub's own iroh endpoint public key (hex). Exposed by `/v1/health`
-    /// so callers can verify they're talking to the expected hub.
-    pub node_id: String,
-    /// Addresses of the co-located edge (empty when edge is disabled).
-    pub edge_addresses: Vec<String>,
-    /// The co-located edge's iroh EndpointId, if edge is enabled.
-    pub edge_node_id: Option<String>,
-    /// Software version reported by `/v1/health`.
-    pub software_version: &'static str,
+    /// Identity information (node_id, edge info, version).
+    pub identity: super::HubIdentity,
     /// Bearer token protecting operator-only endpoints.
     pub operator_api_key: String,
     /// Public URL of the hub (e.g. "https://node.turbo.example.eu:8443").
-    /// Embedded into invite tokens so tenants can bootstrap without asking.
     pub public_url: String,
-    /// Serializes the check+insert window in `POST /v1/invites` so two
-    /// concurrent operator calls can't race past each other's hostname
-    /// conflict check and both persist overlapping pending invites.
-    /// Invite creation is a rare operator action, contention is negligible.
+    /// Serializes the check+insert window in `POST /v1/invites`.
     pub invite_lock: Mutex<()>,
-    /// iroh node_ids of configured federation peers, populated by the
-    /// per-peer bootstrap task. Inbound `/v1/federation/*` requests must
-    /// be signed by one of these node_ids.
-    pub trusted_peers: super::federation::TrustedPeerSet,
-    /// Optional webhook URL for DNS automation. When set, the hub POSTs
-    /// hostname add/remove events after every route-table rebuild.
+    /// Federation state: trusted peers and nonce cache.
+    pub federation: FederationState,
+    /// Optional webhook URL for DNS automation.
     pub dns_webhook_url: Option<String>,
-    /// Hostnames present in the last broadcasted route table. Used to diff
-    /// against the new table and determine which hostnames were added or
-    /// removed.
+    /// Hostnames present in the last broadcasted route table.
     pub prev_hostnames: RwLock<std::collections::HashSet<String>>,
-    /// Nonce cache for federation auth: `(node_id, timestamp_ms)` pairs
-    /// already seen. Prevents within-window replay of signed headers.
-    /// Entries older than `2 * FEDERATION_MAX_CLOCK_SKEW_MS` are evicted on
-    /// each check.
-    pub federation_nonces: Mutex<std::collections::HashSet<([u8; 32], u64)>>,
+}
+
+/// Federation-related runtime state.
+pub struct FederationState {
+    /// iroh node_ids of configured federation peers.
+    pub trusted_peers: super::federation::TrustedPeerSet,
+    /// Nonce cache for federation auth: prevents within-window replay.
+    pub nonces: Mutex<std::collections::HashSet<([u8; 32], u64)>>,
 }
 
 /// Broadcast `table` to edges and fire the DNS webhook if hostnames changed.

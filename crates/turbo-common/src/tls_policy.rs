@@ -1,3 +1,5 @@
+use crate::hostname::wildcard_lookup;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -8,6 +10,16 @@ pub enum TlsMode {
     #[default]
     Passthrough,
     Terminate,
+}
+
+impl TlsMode {
+    /// Human-readable label for logging/metrics.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TlsMode::Passthrough => "passthrough",
+            TlsMode::Terminate => "terminate",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -29,16 +41,9 @@ impl TlsPolicyTable {
     }
 
     pub fn lookup(&self, hostname: &str) -> TlsMode {
-        let lower = hostname.to_lowercase();
-        if let Some(mode) = self.policies.get(&lower) {
-            return mode.clone();
-        }
-        if let Some(dot_pos) = lower.find('.')
-            && let Some(mode) = self.policies.get(&format!("*.{}", &lower[dot_pos + 1..]))
-        {
-            return mode.clone();
-        }
-        TlsMode::Passthrough
+        wildcard_lookup(hostname, |key| self.policies.get(key))
+            .cloned()
+            .unwrap_or(TlsMode::Passthrough)
     }
 
     pub fn is_empty(&self) -> bool {

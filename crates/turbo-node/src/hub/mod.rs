@@ -1,4 +1,5 @@
 pub mod api;
+pub mod auth;
 pub mod db;
 pub mod federation;
 
@@ -131,17 +132,21 @@ impl Hub {
             route_tx: self.p.route_tx.clone(),
             policy: Arc::new(RwLock::new(policy)),
             http_client: reqwest::Client::new(),
-            node_id: self.p.identity.node_id.clone(),
-            edge_node_id: self.p.identity.edge_node_id.clone(),
-            edge_addresses: self.p.identity.edge_addresses.clone(),
-            software_version: self.p.identity.software_version,
+            identity: HubIdentity {
+                node_id: self.p.identity.node_id.clone(),
+                edge_node_id: self.p.identity.edge_node_id.clone(),
+                edge_addresses: self.p.identity.edge_addresses.clone(),
+                software_version: self.p.identity.software_version,
+            },
             operator_api_key: self.p.operator_api_key.clone(),
             public_url: self.p.public_url.clone(),
             invite_lock: tokio::sync::Mutex::new(()),
-            trusted_peers: trusted_peers.clone(),
+            federation: api::FederationState {
+                trusted_peers: trusted_peers.clone(),
+                nonces: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+            },
             dns_webhook_url: self.p.dns_webhook_url.clone(),
             prev_hostnames: RwLock::new(std::collections::HashSet::new()),
-            federation_nonces: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         });
 
         for peer_url in &self.p.peer_urls {

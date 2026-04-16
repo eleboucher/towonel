@@ -6,7 +6,7 @@ use turbo_common::identity::{AgentId, TenantKeypair, load_tenant_keypair};
 
 use turbo_common::time::now_ms;
 
-use super::{CBOR_CONTENT_TYPE, resolve_hub_url, resolve_tenant_key_path};
+use super::{CBOR_CONTENT_TYPE, check_response, resolve_hub_url, resolve_tenant_key_path};
 
 pub(crate) async fn fetch_entries(
     hub_url: &str,
@@ -23,16 +23,7 @@ pub(crate) async fn fetch_entries(
         .await
         .with_context(|| format!("failed to GET {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    let body = check_response(resp).await?;
 
     let entries: Vec<SignedConfigEntry> = ciborium::from_reader(body.as_ref())
         .with_context(|| format!("hub returned invalid CBOR at {url}"))?;
@@ -66,15 +57,7 @@ pub(crate) async fn submit_payload(
         .await
         .with_context(|| format!("failed to POST {post_url}"))?;
 
-    let status = resp.status();
-    let resp_body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&resp_body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    check_response(resp).await?;
     Ok(())
 }
 

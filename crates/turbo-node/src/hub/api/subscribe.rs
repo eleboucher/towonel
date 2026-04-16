@@ -16,6 +16,8 @@ use super::{AppState, internal_error, json_ok, unauthorized};
 /// acceptable (the endpoint just opens another identical SSE stream).
 const EDGE_SUB_MAX_CLOCK_SKEW_MS: u64 = 60_000;
 
+const EDGE_SUB_AUTH_DOMAIN: &str = "turbo-tunnel/edge-sub/v1";
+
 /// Parse the `Authorization: Signature <node_id>.<ts>.<sig>` header, check
 /// the timestamp window, verify the Ed25519 signature against `node_id`, and
 /// confirm the node is registered in the `edges` table.
@@ -23,48 +25,11 @@ async fn authenticate_edge_subscriber(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<[u8; 32], &'static str> {
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .ok_or("missing Authorization header")?
-        .to_str()
-        .map_err(|_| "malformed Authorization header")?;
-    let body = auth
-        .strip_prefix("Signature ")
-        .ok_or("Authorization must be `Signature <node_id>.<ts>.<sig>`")?;
-
-    let mut parts = body.splitn(3, '.');
-    let node_id_hex = parts.next().ok_or("missing node_id segment")?;
-    let ts_str = parts.next().ok_or("missing timestamp segment")?;
-    let sig_b64 = parts.next().ok_or("missing signature segment")?;
-
-    let node_id_bytes: [u8; 32] = hex::decode(node_id_hex)
-        .map_err(|_| "node_id is not hex")?
-        .try_into()
-        .map_err(|_| "node_id must be 32 bytes")?;
-
-    let ts_ms: u64 = ts_str.parse().map_err(|_| "timestamp is not a u64")?;
-    let now = now_ms();
-    let skew = now.abs_diff(ts_ms);
-    if skew > EDGE_SUB_MAX_CLOCK_SKEW_MS {
-        return Err("timestamp outside freshness window");
-    }
-
-    let sig_bytes = B64
-        .decode(sig_b64)
-        .map_err(|_| "signature is not base64url")?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .try_into()
-        .map_err(|_| "signature must be 64 bytes")?;
-
-    let pubkey = ed25519_dalek::VerifyingKey::from_bytes(&node_id_bytes)
-        .map_err(|_| "node_id is not a valid Ed25519 public key")?;
-    let message = format!("turbo-tunnel/edge-sub/v1/{node_id_hex}/{ts_ms}");
-    pubkey
-        .verify_strict(
-            message.as_bytes(),
-            &ed25519_dalek::Signature::from_bytes(&sig_arr),
-        )
-        .map_err(|_| "signature does not verify")?;
+    let (node_id_bytes, _ts_ms) = crate::hub::auth::verify_signature_header(
+        headers,
+        EDGE_SUB_AUTH_DOMAIN,
+        EDGE_SUB_MAX_CLOCK_SKEW_MS,
+    )?;
 
     if !state
         .db
@@ -145,7 +110,7 @@ pub(super) async fn get_dns_records(State(state): State<Arc<AppState>>) -> impl 
         .iter()
         .map(|h| DnsRecord {
             hostname: h.as_str(),
-            targets: &state.edge_addresses,
+            targets: &state.identity.edge_addresses,
         })
         .collect();
 

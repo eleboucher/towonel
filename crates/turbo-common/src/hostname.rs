@@ -1,3 +1,24 @@
+/// Given a hostname, try an exact key lookup, then a single-level wildcard
+/// (`*.example.eu` matches `app.example.eu`). Returns the value if found.
+///
+/// The `get` closure receives a lowercase key and returns `Some(V)` on hit.
+pub fn wildcard_lookup<'m, V>(
+    hostname: &str,
+    get: impl Fn(&str) -> Option<&'m V>,
+) -> Option<&'m V> {
+    let lower = hostname.to_lowercase();
+    if let Some(v) = get(&lower) {
+        return Some(v);
+    }
+    if let Some(dot_pos) = lower.find('.') {
+        let wildcard = format!("*.{}", &lower[dot_pos + 1..]);
+        if let Some(v) = get(&wildcard) {
+            return Some(v);
+        }
+    }
+    None
+}
+
 /// Validate a hostname or wildcard pattern against a simplified RFC 1123.
 ///
 /// Accepts:

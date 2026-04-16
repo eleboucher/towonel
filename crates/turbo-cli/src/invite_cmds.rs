@@ -1,6 +1,6 @@
 use anyhow::{Context, anyhow};
 
-use super::{JSON_CONTENT_TYPE, resolve_hub_url, resolve_operator_key, short};
+use super::{JSON_CONTENT_TYPE, check_response, resolve_hub_url, resolve_operator_key, short};
 
 pub(crate) async fn cmd_invite_create(
     hub_url: Option<String>,
@@ -50,15 +50,7 @@ pub(crate) async fn cmd_invite_create(
         .await
         .with_context(|| format!("failed to POST {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    let body = check_response(resp).await?;
     let parsed: Resp = serde_json::from_slice(&body)?;
 
     println!("Created invite for \"{}\"", parsed.name);
@@ -99,15 +91,7 @@ pub(crate) async fn cmd_invite_list(
         .await
         .with_context(|| format!("failed to GET {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    let body = check_response(resp).await?;
     let parsed: Resp = serde_json::from_slice(&body)?;
 
     if parsed.invites.is_empty() {
@@ -143,15 +127,7 @@ pub(crate) async fn cmd_invite_revoke(
         .await
         .with_context(|| format!("failed to DELETE {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    check_response(resp).await?;
     println!("Revoked invite {id}");
     Ok(())
 }
@@ -198,15 +174,7 @@ pub(crate) async fn cmd_edge_invite_create(
         .await
         .with_context(|| format!("failed to POST {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    let body = check_response(resp).await?;
     let parsed: Resp = serde_json::from_slice(&body)?;
 
     println!("Created edge invite for \"{}\"", parsed.name);
@@ -246,15 +214,7 @@ pub(crate) async fn cmd_edge_invite_list(
         .await
         .with_context(|| format!("failed to GET {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    let body = check_response(resp).await?;
     let parsed: Resp = serde_json::from_slice(&body)?;
 
     if parsed.invites.is_empty() {
@@ -290,15 +250,7 @@ pub(crate) async fn cmd_edge_invite_revoke(
         .await
         .with_context(|| format!("failed to DELETE {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    check_response(resp).await?;
     println!("Revoked edge invite {id}");
     Ok(())
 }

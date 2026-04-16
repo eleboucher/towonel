@@ -1,14 +1,13 @@
 use std::path::Path;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use tracing::{info, warn};
 use turbo_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
 use turbo_common::identity::TenantKeypair;
 use turbo_common::tls_policy::TlsMode;
 
 use crate::config::ServiceConfig;
-
-const CBOR_CONTENT_TYPE: &str = "application/cbor";
+use crate::init::submit_entry;
 
 pub async fn publish(
     hub_url: &str,
@@ -37,10 +36,10 @@ pub async fn publish(
                 mode: svc.tls_mode.clone(),
             },
         };
-        match submit(&client, hub_url, &tenant_kp, payload).await {
+        match submit_entry(&client, hub_url, &tenant_kp, payload).await {
             Ok(()) => info!(
                 hostname = %svc.hostname,
-                mode = mode_label(&svc.tls_mode),
+                mode = svc.tls_mode.label(),
                 seq,
                 "published TLS policy to hub",
             ),
@@ -51,41 +50,6 @@ pub async fn publish(
                 "failed to publish TLS policy; edge will fall back to passthrough",
             ),
         }
-    }
-    Ok(())
-}
-
-fn mode_label(mode: &TlsMode) -> &'static str {
-    match mode {
-        TlsMode::Passthrough => "passthrough",
-        TlsMode::Terminate => "terminate",
-    }
-}
-
-async fn submit(
-    client: &reqwest::Client,
-    hub_url: &str,
-    kp: &TenantKeypair,
-    payload: ConfigPayload,
-) -> anyhow::Result<()> {
-    let entry = SignedConfigEntry::sign(&payload, kp)?;
-    let mut body = Vec::new();
-    ciborium::into_writer(&entry, &mut body)?;
-
-    let url = format!("{}/v1/entries", hub_url.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .header(reqwest::header::CONTENT_TYPE, CBOR_CONTENT_TYPE)
-        .body(body)
-        .send()
-        .await
-        .with_context(|| format!("failed to POST {url}"))?;
-
-    let status = resp.status();
-    let resp_body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&resp_body).unwrap_or_default();
-        return Err(anyhow!("hub returned {status}: {err}"));
     }
     Ok(())
 }

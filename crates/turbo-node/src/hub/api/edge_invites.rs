@@ -10,7 +10,7 @@ use turbo_common::invite::{EdgeInviteToken, hash_invite_secret};
 
 use turbo_common::time::now_ms;
 
-use super::db::EdgeInviteRow;
+use super::db::{EdgeInviteRow, InviteStatus};
 use super::{
     AppState, conflict, constant_time_eq, gone, internal_error, invalid_request, json_ok,
     not_found, parse_invite_id, unauthorized,
@@ -75,7 +75,7 @@ pub(super) async fn post_edge_invite(
 pub(super) struct EdgeInviteSummary {
     invite_id: String,
     name: String,
-    status: String,
+    status: InviteStatus,
     expires_at_ms: u64,
     edge_node_id: Option<String>,
     redeemed_at_ms: Option<u64>,
@@ -168,10 +168,10 @@ pub(super) async fn redeem_edge_invite(
         }
     };
 
-    match invite.status.as_str() {
-        "pending" => {}
-        "redeemed" => return conflict("invite_already_redeemed", "edge invite already redeemed"),
-        "revoked" => return conflict("invite_revoked", "edge invite has been revoked"),
+    match invite.status {
+        InviteStatus::Pending => {}
+        InviteStatus::Redeemed => return conflict("invite_already_redeemed", "edge invite already redeemed"),
+        InviteStatus::Revoked => return conflict("invite_revoked", "edge invite has been revoked"),
         _ => return internal_error(),
     }
 
@@ -203,7 +203,7 @@ pub(super) async fn redeem_edge_invite(
 
     json_ok(RedeemEdgeInviteResponse {
         status: "ok",
-        hub_node_id: state.node_id.clone(),
+        hub_node_id: state.identity.node_id.clone(),
         name: invite.name,
     })
 }

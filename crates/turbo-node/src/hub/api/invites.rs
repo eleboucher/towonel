@@ -11,7 +11,7 @@ use turbo_common::invite::{InviteToken, hash_invite_secret};
 
 use turbo_common::time::now_ms;
 
-use super::db::{InviteRow, PendingInvite};
+use super::db::{InviteRow, InviteStatus, PendingInvite};
 use super::{
     AppState, conflict, constant_time_eq, gone, internal_error, invalid_request, json_ok,
     not_found, parse_invite_id, unauthorized,
@@ -121,7 +121,7 @@ pub(super) struct InviteSummary {
     invite_id: String,
     name: String,
     hostnames: Vec<String>,
-    status: String,
+    status: InviteStatus,
     expires_at_ms: u64,
     tenant_id: Option<String>,
     redeemed_at_ms: Option<u64>,
@@ -228,9 +228,9 @@ pub(super) async fn redeem_invite(
         }
     };
 
-    match invite.status.as_str() {
-        "pending" => {}
-        "redeemed" => {
+    match invite.status {
+        InviteStatus::Pending => {}
+        InviteStatus::Redeemed => {
             if !constant_time_eq(&hash_invite_secret(&invite_secret), &invite.secret_hash) {
                 return unauthorized("invite_secret does not match");
             }
@@ -260,12 +260,12 @@ pub(super) async fn redeem_invite(
                 status: "ok",
                 tenant_id: tenant_id.to_string(),
                 hostnames: invite.hostnames,
-                hub_node_id: state.node_id.clone(),
-                edge_node_id: state.edge_node_id.clone(),
-                edge_addresses: state.edge_addresses.clone(),
+                hub_node_id: state.identity.node_id.clone(),
+                edge_node_id: state.identity.edge_node_id.clone(),
+                edge_addresses: state.identity.edge_addresses.clone(),
             });
         }
-        "revoked" => return conflict("invite_revoked", "invite has been revoked"),
+        InviteStatus::Revoked => return conflict("invite_revoked", "invite has been revoked"),
         _ => return internal_error(),
     }
 
@@ -322,8 +322,8 @@ pub(super) async fn redeem_invite(
         status: "ok",
         tenant_id: tenant_id.to_string(),
         hostnames: invite.hostnames,
-        hub_node_id: state.node_id.clone(),
-        edge_node_id: state.edge_node_id.clone(),
-        edge_addresses: state.edge_addresses.clone(),
+        hub_node_id: state.identity.node_id.clone(),
+        edge_node_id: state.identity.edge_node_id.clone(),
+        edge_addresses: state.identity.edge_addresses.clone(),
     })
 }

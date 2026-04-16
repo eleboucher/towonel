@@ -10,10 +10,25 @@ use ed25519_dalek::SigningKey;
 use turbo_common::client_state::{ClientState, DefaultPaths};
 use turbo_common::identity::write_key_file;
 
-pub(crate) const CBOR_CONTENT_TYPE: &str = "application/cbor";
-pub(crate) const JSON_CONTENT_TYPE: &str = "application/json";
+pub(crate) use turbo_common::CBOR_CONTENT_TYPE;
+pub(crate) use turbo_common::JSON_CONTENT_TYPE_PLAIN as JSON_CONTENT_TYPE;
 const OPERATOR_KEY_ENV: &str = "TURBO_OPERATOR_KEY";
 const HUB_URL_ENV: &str = "TURBO_HUB_URL";
+
+/// Check an HTTP response and return the body bytes on success, or a
+/// formatted error on failure.
+pub(crate) async fn check_response(resp: reqwest::Response) -> anyhow::Result<bytes::Bytes> {
+    let status = resp.status();
+    let body = resp.bytes().await?;
+    if !status.is_success() {
+        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        return Err(anyhow!(
+            "hub returned {status}: {}",
+            serde_json::to_string_pretty(&err)?
+        ));
+    }
+    Ok(body)
+}
 
 #[derive(Parser)]
 #[command(name = "turbo-cli", about = "turbo-tunnel management CLI")]

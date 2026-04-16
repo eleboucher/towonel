@@ -128,8 +128,8 @@ pub(super) async fn health(State(state): State<Arc<AppState>>) -> Response {
     }
     json_ok(HealthResponse {
         status: "ok",
-        node_id: &state.node_id,
-        version: state.software_version,
+        node_id: &state.identity.node_id,
+        version: state.identity.software_version,
         protocol_version: PROTOCOL_VERSION,
     })
 }
@@ -146,11 +146,11 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
         edges: Vec<EdgeEntry<'a>>,
     }
 
-    let edges = match state.edge_node_id.as_deref() {
+    let edges = match state.identity.edge_node_id.as_deref() {
         Some(node_id) => vec![EdgeEntry {
             node_id,
             healthy: true,
-            addresses: &state.edge_addresses,
+            addresses: &state.identity.edge_addresses,
         }],
         None => Vec::new(),
     };

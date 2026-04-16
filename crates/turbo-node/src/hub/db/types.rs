@@ -1,6 +1,42 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use turbo_common::identity::{PqPublicKey, TenantId};
 use turbo_common::invite::INVITE_ID_LEN;
+
+/// Status of an invite (tenant or edge).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InviteStatus {
+    Pending,
+    Redeemed,
+    Revoked,
+}
+
+impl InviteStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Redeemed => "redeemed",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    pub fn parse(s: &str) -> anyhow::Result<Self> {
+        match s {
+            "pending" => Ok(Self::Pending),
+            "redeemed" => Ok(Self::Redeemed),
+            "revoked" => Ok(Self::Revoked),
+            other => anyhow::bail!("unknown invite status: {other}"),
+        }
+    }
+}
+
+impl fmt::Display for InviteStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Fields required to create a pending invite row.
 pub struct PendingInvite<'a> {
@@ -20,7 +56,7 @@ pub struct InviteRow {
     pub hostnames: Vec<String>,
     pub secret_hash: [u8; 32],
     pub expires_at_ms: u64,
-    pub status: String,
+    pub status: InviteStatus,
     pub tenant_id: Option<TenantId>,
     pub redeemed_at_ms: Option<u64>,
     pub created_at_ms: u64,
@@ -55,7 +91,7 @@ pub struct EdgeInviteRow {
     pub name: String,
     pub secret_hash: [u8; 32],
     pub expires_at_ms: u64,
-    pub status: String,
+    pub status: InviteStatus,
     pub edge_node_id: Option<[u8; 32]>,
     pub redeemed_at_ms: Option<u64>,
     pub created_at_ms: u64,

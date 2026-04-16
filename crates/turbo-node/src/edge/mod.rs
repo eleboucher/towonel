@@ -293,7 +293,7 @@ async fn handle_connection_inner(
         %hostname,
         peer = %peer_addr,
         agent = %agent_id.fmt_short(),
-        mode = tls_mode_label(&policy),
+        mode = policy.label(),
     );
 
     async {
@@ -321,13 +321,6 @@ async fn handle_connection_inner(
     }
     .instrument(span)
     .await
-}
-
-fn tls_mode_label(mode: &TlsMode) -> &'static str {
-    match mode {
-        TlsMode::Passthrough => "passthrough",
-        TlsMode::Terminate => "terminate",
-    }
 }
 
 async fn pipe_passthrough(

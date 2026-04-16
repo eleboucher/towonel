@@ -5,7 +5,7 @@ use turbo_common::config_entry::ConfigOp;
 use turbo_common::identity::{AgentId, load_tenant_keypair, write_key_file};
 
 use super::entry_cmds::{fetch_entries, submit_payload};
-use super::{resolve_hub_url, resolve_operator_key, resolve_tenant_key_path};
+use super::{check_response, resolve_hub_url, resolve_operator_key, resolve_tenant_key_path};
 
 const KEY_BACKUP_PREFIX: &str = "turbo-key-v1:";
 const ARGON2_SALT_LEN: usize = 16;
@@ -168,15 +168,7 @@ pub(crate) async fn cmd_tenant_remove(
         .await
         .with_context(|| format!("failed to DELETE {url}"))?;
 
-    let status = resp.status();
-    let body = resp.bytes().await?;
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
-    }
+    check_response(resp).await?;
     println!("Removed tenant {tenant}");
     println!("  Their signed entries remain in the database but are no longer routed.");
     Ok(())
