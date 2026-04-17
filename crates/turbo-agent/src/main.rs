@@ -211,7 +211,8 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     ) {
         (Some(hub_url), Some(tenant_key_path)) if !resolved.services.is_empty() => {
             #[allow(clippy::large_futures)]
-            let publish_result = publish_tls::publish(hub_url, tenant_key_path, &resolved.services).await;
+            let publish_result =
+                publish_tls::publish(hub_url, tenant_key_path, &resolved.services).await;
             if let Err(e) = publish_result {
                 warn!(error = %e, "TLS policy publish failed; edge will use passthrough defaults");
             }

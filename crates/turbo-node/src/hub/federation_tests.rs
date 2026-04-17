@@ -384,9 +384,13 @@ async fn push_entry_duplicate_sequence_is_idempotent() {
     let cbor = cbor_entry(&tenant, 1, "app.alice.test");
     for offset in [0u64, 1500] {
         let auth = signed_auth_header_at(&peer, now_ms().saturating_sub(offset));
-        let status =
-            post_signed_cbor(&client, &hub.url("/v1/federation/entries"), cbor.clone(), &auth)
-                .await;
+        let status = post_signed_cbor(
+            &client,
+            &hub.url("/v1/federation/entries"),
+            cbor.clone(),
+            &auth,
+        )
+        .await;
         assert_eq!(status, 200);
     }
 
@@ -478,7 +482,14 @@ async fn redeem_invite_sync_push_survives_unreachable_peer() {
     )
     .await;
     assert_eq!(status, 200, "peer failure must not fail the redeem");
-    assert!(hub_a.state.policy.read().await.is_known_tenant(&tenant.id()));
+    assert!(
+        hub_a
+            .state
+            .policy
+            .read()
+            .await
+            .is_known_tenant(&tenant.id())
+    );
 }
 
 #[tokio::test]

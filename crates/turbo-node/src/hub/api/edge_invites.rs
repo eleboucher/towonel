@@ -44,7 +44,9 @@ pub(super) async fn post_edge_invite(
         _ => turbo_common::random_name::random_name(),
     };
     if req.expires_in_secs == 0 || req.expires_in_secs > EDGE_MAX_TTL_SECS {
-        return invalid_request(format!("expires_in_secs must be in 1..={EDGE_MAX_TTL_SECS}"));
+        return invalid_request(format!(
+            "expires_in_secs must be in 1..={EDGE_MAX_TTL_SECS}"
+        ));
     }
 
     let token = EdgeInviteToken::generate(state.public_url.clone());
@@ -172,7 +174,9 @@ pub(super) async fn redeem_edge_invite(
 
     match invite.status {
         InviteStatus::Pending => {}
-        InviteStatus::Redeemed => return conflict("invite_already_redeemed", "edge invite already redeemed"),
+        InviteStatus::Redeemed => {
+            return conflict("invite_already_redeemed", "edge invite already redeemed");
+        }
         InviteStatus::Revoked => return conflict("invite_revoked", "edge invite has been revoked"),
     }
 

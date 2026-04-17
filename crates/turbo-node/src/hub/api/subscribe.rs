@@ -8,7 +8,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::Serialize;
 use turbo_common::routing::RouteTable;
 
-
 use super::{AppState, internal_error, json_ok, unauthorized};
 
 /// Timestamp window for signature freshness. Replay within this window is

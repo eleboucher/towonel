@@ -231,11 +231,6 @@ async fn resync_propagates_removal() {
         policy.is_known_tenant(&tenant.id())
     };
     assert!(!is_known, "removed tenant must not be active on target");
-    let removals = target
-        .state
-        .db
-        .list_tenant_removals()
-        .await
-        .expect("list");
+    let removals = target.state.db.list_tenant_removals().await.expect("list");
     assert!(removals.contains(&tenant.id()));
 }

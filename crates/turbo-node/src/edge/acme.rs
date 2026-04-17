@@ -72,7 +72,10 @@ impl AcmeCoordinator {
         {
             // checked_sub is infallible here: ts.elapsed() < FAILURE_COOLDOWN
             #[allow(clippy::unwrap_used)]
-            let remaining_secs = FAILURE_COOLDOWN.checked_sub(ts.elapsed()).unwrap().as_secs();
+            let remaining_secs = FAILURE_COOLDOWN
+                .checked_sub(ts.elapsed())
+                .unwrap()
+                .as_secs();
             anyhow::bail!(
                 "recent ACME failure for {hostname} (cooldown {remaining_secs}s remaining)",
             );

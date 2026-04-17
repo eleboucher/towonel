@@ -156,7 +156,10 @@ impl Db {
             return Ok(None);
         }
         let hit = invite_hostnames::Entity::find()
-            .join(JoinType::InnerJoin, invite_hostnames::Relation::Invite.def())
+            .join(
+                JoinType::InnerJoin,
+                invite_hostnames::Relation::Invite.def(),
+            )
             .filter(invites::Column::Status.eq(InviteStatus::Pending.as_str()))
             .filter(invite_hostnames::Column::HostnameLower.is_in(candidates_lower.to_vec()))
             .one(&self.conn)
@@ -216,9 +219,9 @@ impl Db {
                 let tenant_bytes = invite
                     .tenant_id
                     .ok_or_else(|| anyhow::anyhow!("redeemed invite missing tenant_id"))?;
-                let pq_bytes = invite
-                    .tenant_pq_public_key
-                    .ok_or_else(|| anyhow::anyhow!("redeemed invite missing tenant_pq_public_key"))?;
+                let pq_bytes = invite.tenant_pq_public_key.ok_or_else(|| {
+                    anyhow::anyhow!("redeemed invite missing tenant_pq_public_key")
+                })?;
                 let tenant_arr = bytes_to_array::<32>(tenant_bytes, "redeemed tenant_id")?;
                 let pq_public_key = PqPublicKey::from_slice(&pq_bytes)
                     .map_err(|e| anyhow::anyhow!("invalid redeemed pq_public_key: {e}"))?;
@@ -379,10 +382,7 @@ async fn load_invite_hostnames(
 
 type DatabaseConnectionAlias = sea_orm::DatabaseConnection;
 
-fn model_to_invite_row(
-    model: invites::Model,
-    hostnames: Vec<String>,
-) -> anyhow::Result<InviteRow> {
+fn model_to_invite_row(model: invites::Model, hostnames: Vec<String>) -> anyhow::Result<InviteRow> {
     Ok(InviteRow {
         invite_id: bytes_to_array(model.invite_id, "invite_id")?,
         name: model.name,

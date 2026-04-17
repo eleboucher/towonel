@@ -13,7 +13,7 @@ pub struct OwnershipPolicy {
 }
 
 impl OwnershipPolicy {
-    #[must_use] 
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -34,12 +34,12 @@ impl OwnershipPolicy {
         self.pq_keys.insert(*tenant_id, pq_public_key);
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn pq_public_key(&self, tenant_id: &TenantId) -> Option<&PqPublicKey> {
         self.pq_keys.get(tenant_id)
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn is_known_tenant(&self, tenant_id: &TenantId) -> bool {
         self.allowed.contains_key(tenant_id)
     }
@@ -58,7 +58,7 @@ impl OwnershipPolicy {
     }
 
     /// Check if a tenant is allowed to claim a specific hostname.
-    #[must_use] 
+    #[must_use]
     pub fn is_hostname_allowed(&self, tenant_id: &TenantId, hostname: &str) -> bool {
         let lower = hostname.to_lowercase();
         let Some(patterns) = self.allowed.get(tenant_id) else {

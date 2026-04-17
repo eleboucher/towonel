@@ -147,11 +147,17 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
         edges: Vec<EdgeEntry<'a>>,
     }
 
-    let edges = state.identity.edge_node_id.as_deref().map_or_else(Vec::new, |node_id| vec![EdgeEntry {
-        node_id,
-        healthy: true,
-        addresses: &state.identity.edge_addresses,
-    }]);
+    let edges = state
+        .identity
+        .edge_node_id
+        .as_deref()
+        .map_or_else(Vec::new, |node_id| {
+            vec![EdgeEntry {
+                node_id,
+                healthy: true,
+                addresses: &state.identity.edge_addresses,
+            }]
+        });
 
     json_ok(ListEdgesResponse { edges })
 }

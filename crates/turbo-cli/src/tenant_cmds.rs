@@ -78,11 +78,15 @@ pub async fn cmd_tenant_leave(
 
     let entries = fetch_entries(&hub_url, &tenant_id).await?;
     let mut latest_seq = 0u64;
-    let mut owned_hostnames: std::collections::HashSet<String> = std::collections::HashSet::default();
-    let mut authorized_agents: std::collections::HashSet<AgentId> = std::collections::HashSet::default();
+    let mut owned_hostnames: std::collections::HashSet<String> =
+        std::collections::HashSet::default();
+    let mut authorized_agents: std::collections::HashSet<AgentId> =
+        std::collections::HashSet::default();
 
     for entry in &entries {
-        let Ok(payload) = entry.verify(pq_pubkey) else { continue };
+        let Ok(payload) = entry.verify(pq_pubkey) else {
+            continue;
+        };
         latest_seq = latest_seq.max(payload.sequence);
         match payload.op {
             ConfigOp::UpsertHostname { hostname } => {

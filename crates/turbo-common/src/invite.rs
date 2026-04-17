@@ -1,5 +1,5 @@
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 
 /// Length of `invite_id` in bytes.
 pub const INVITE_ID_LEN: usize = 16;
@@ -89,7 +89,7 @@ impl_invite_token!(EdgeInviteToken, EDGE_TOKEN_PREFIX);
 
 impl InviteToken {
     /// Short human-readable form of the invite id (first 8 hex chars).
-    #[must_use] 
+    #[must_use]
     pub fn invite_id_short(&self) -> String {
         hex::encode(&self.invite_id[..4])
     }
@@ -97,7 +97,7 @@ impl InviteToken {
 
 /// SHA-256 of an invite secret — what the hub stores and compares against
 /// during redemption. Never the raw secret.
-#[must_use] 
+#[must_use]
 pub fn hash_invite_secret(secret: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();

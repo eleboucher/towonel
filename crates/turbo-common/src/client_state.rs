@@ -23,7 +23,8 @@ impl DefaultPaths {
         let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
         let state_dir = home.join(DEFAULT_DIR);
         Self {
-            state_file: std::env::var_os("TURBO_STATE").map_or_else(|| state_dir.join(STATE_FILE), PathBuf::from),
+            state_file: std::env::var_os("TURBO_STATE")
+                .map_or_else(|| state_dir.join(STATE_FILE), PathBuf::from),
             agent_key: state_dir.join(AGENT_KEY_FILE),
             tenant_key: state_dir.join(TENANT_KEY_FILE),
             agent_config: state_dir.join("agent.toml"),

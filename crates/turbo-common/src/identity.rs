@@ -30,18 +30,18 @@ pub struct TenantId([u8; 32]);
 impl TenantId {
     /// Construct from raw bytes (no SHA-256 derivation). For round-tripping
     /// bytes already stored in the DB; derive from a pubkey via [`derive`].
-    #[must_use] 
+    #[must_use]
     pub const fn from_bytes(bytes: &[u8; 32]) -> Self {
         Self(*bytes)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
     /// Derive `TenantId = sha256(pq_public_key)`.
-    #[must_use] 
+    #[must_use]
     pub fn derive(pq_pubkey: &PqPublicKey) -> Self {
         let digest = sha2::Sha256::digest(pq_pubkey.as_bytes().as_slice());
         Self(digest.into())
@@ -110,7 +110,7 @@ impl<'de> Deserialize<'de> for TenantId {
 pub struct PqPublicKey(Box<[u8; PQ_PUB_KEY_LEN]>);
 
 impl PqPublicKey {
-    #[must_use] 
+    #[must_use]
     pub fn from_bytes(bytes: [u8; PQ_PUB_KEY_LEN]) -> Self {
         Self(Box::new(bytes))
     }
@@ -124,7 +124,7 @@ impl PqPublicKey {
         Ok(Self::from_bytes(arr))
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; PQ_PUB_KEY_LEN] {
         &self.0
     }
@@ -230,7 +230,7 @@ impl TenantKeypair {
 
     /// Reconstruct a keypair deterministically from its 32-byte seed.
     /// The seed is the bytes persisted in the tenant key file.
-    #[must_use] 
+    #[must_use]
     pub fn from_seed(seed: [u8; PQ_SEED_LEN]) -> Self {
         let (pub_key, priv_key) = ml_dsa_65::KG::keygen_from_seed(&seed);
         let public_key = PqPublicKey::from_bytes(pub_key.into_bytes());
@@ -244,17 +244,17 @@ impl TenantKeypair {
     }
 
     /// Seed used to derive the keypair. Same bytes as the on-disk key file.
-    #[must_use] 
+    #[must_use]
     pub fn seed(&self) -> &[u8; PQ_SEED_LEN] {
         &self.seed
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn public_key(&self) -> &PqPublicKey {
         &self.public_key
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn id(&self) -> TenantId {
         self.tenant_id
     }
@@ -289,7 +289,7 @@ impl TenantKeypair {
 /// Verify an ML-DSA-65 signature over `message` against `pq_pubkey`.
 /// Returns `false` on signature mismatch, malformed pubkey bytes, or any
 /// internal fips204 decode failure.
-#[must_use] 
+#[must_use]
 pub fn verify_pq_signature(
     pq_pubkey: &PqPublicKey,
     message: &[u8],
@@ -308,7 +308,7 @@ pub struct AgentId(VerifyingKey);
 pub type NodeId = iroh::EndpointId;
 
 impl AgentId {
-    #[must_use] 
+    #[must_use]
     pub const fn from_key(key: VerifyingKey) -> Self {
         Self(key)
     }
@@ -317,12 +317,12 @@ impl AgentId {
         VerifyingKey::from_bytes(bytes).map(Self)
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn as_key(&self) -> &VerifyingKey {
         &self.0
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn as_bytes(&self) -> &[u8; 32] {
         self.0.as_bytes()
     }
@@ -387,17 +387,17 @@ impl AgentKeypair {
         Self(SigningKey::from_bytes(&bytes))
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn from_signing_key(key: SigningKey) -> Self {
         Self(key)
     }
 
-    #[must_use] 
+    #[must_use]
     pub fn id(&self) -> AgentId {
         AgentId(self.0.verifying_key())
     }
 
-    #[must_use] 
+    #[must_use]
     pub const fn signing_key(&self) -> &SigningKey {
         &self.0
     }

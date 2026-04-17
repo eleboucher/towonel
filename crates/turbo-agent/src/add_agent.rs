@@ -23,7 +23,8 @@ pub async fn run(
     )?;
     let tenant_id = tenant_kp.id();
 
-    let agent_key_path: PathBuf = agent_key_path.map_or_else(|| defaults.agent_key.clone(), Path::to_path_buf);
+    let agent_key_path: PathBuf =
+        agent_key_path.map_or_else(|| defaults.agent_key.clone(), Path::to_path_buf);
     if agent_key_path.exists() {
         return Err(anyhow!(
             "agent key file {} already exists. Pass --agent-key to a fresh \

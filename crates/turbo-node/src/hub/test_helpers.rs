@@ -67,9 +67,7 @@ impl TestHub {
             public_url: "https://hub.test.example".to_string(),
             invite_lock: tokio::sync::Mutex::new(()),
             federation: FederationState {
-                trusted_peers: Arc::new(tokio::sync::RwLock::new(
-                    std::collections::HashSet::new(),
-                )),
+                trusted_peers: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
                 nonces: super::federation::new_nonce_cache(),
                 outbound: outbound_federation,
                 sync_invite_redeem,

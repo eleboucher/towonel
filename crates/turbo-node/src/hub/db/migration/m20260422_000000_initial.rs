@@ -36,22 +36,29 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Invites::Name).string().not_null())
                     .col(ColumnDef::new(Invites::SecretHash).binary().not_null())
-                    .col(ColumnDef::new(Invites::ExpiresAtMs).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(Invites::ExpiresAtMs)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(Invites::Status)
                             .string()
                             .not_null()
                             .default("pending")
-                            .check(Expr::col(Invites::Status).is_in([
-                                "pending",
-                                "redeemed",
-                                "revoked",
-                            ])),
+                            .check(
+                                Expr::col(Invites::Status)
+                                    .is_in(["pending", "redeemed", "revoked"]),
+                            ),
                     )
                     .col(ColumnDef::new(Invites::TenantId).binary().null())
                     .col(ColumnDef::new(Invites::TenantPqPublicKey).binary().null())
                     .col(ColumnDef::new(Invites::RedeemedAtMs).big_integer().null())
-                    .col(ColumnDef::new(Invites::CreatedAtMs).big_integer().not_null())
+                    .col(
+                        ColumnDef::new(Invites::CreatedAtMs)
+                            .big_integer()
+                            .not_null(),
+                    )
                     .to_owned(),
             )
             .await?;
@@ -60,13 +67,21 @@ impl MigrationTrait for Migration {
             .create_table(
                 Table::create()
                     .table(InviteHostnames::Table)
-                    .col(ColumnDef::new(InviteHostnames::InviteId).binary().not_null())
+                    .col(
+                        ColumnDef::new(InviteHostnames::InviteId)
+                            .binary()
+                            .not_null(),
+                    )
                     .col(
                         ColumnDef::new(InviteHostnames::HostnameLower)
                             .string()
                             .not_null(),
                     )
-                    .col(ColumnDef::new(InviteHostnames::Hostname).string().not_null())
+                    .col(
+                        ColumnDef::new(InviteHostnames::Hostname)
+                            .string()
+                            .not_null(),
+                    )
                     .primary_key(
                         Index::create()
                             .col(InviteHostnames::InviteId)
@@ -136,11 +151,10 @@ impl MigrationTrait for Migration {
                             .string()
                             .not_null()
                             .default("pending")
-                            .check(Expr::col(EdgeInvites::Status).is_in([
-                                "pending",
-                                "redeemed",
-                                "revoked",
-                            ])),
+                            .check(
+                                Expr::col(EdgeInvites::Status)
+                                    .is_in(["pending", "redeemed", "revoked"]),
+                            ),
                     )
                     .col(ColumnDef::new(EdgeInvites::EdgeNodeId).binary().null())
                     .col(

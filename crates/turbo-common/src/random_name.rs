@@ -13,7 +13,7 @@ const ANIMALS: &[&str] = &[
     "tiger", "viper", "walrus", "wolf", "wren",
 ];
 
-#[must_use] 
+#[must_use]
 pub fn random_name() -> String {
     let adj = ADJECTIVES[random_index(ADJECTIVES.len())];
     let animal = ANIMALS[random_index(ANIMALS.len())];

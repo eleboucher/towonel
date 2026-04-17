@@ -103,9 +103,10 @@ fn model_to_entry(model: entities::entries::Model) -> anyhow::Result<SignedConfi
         .tenant_id
         .try_into()
         .map_err(|_| anyhow::anyhow!("tenant_id in DB is not 32 bytes"))?;
-    let signature_arr: [u8; PQ_SIGNATURE_LEN] = model.signature.try_into().map_err(|_| {
-        anyhow::anyhow!("signature in DB is not {PQ_SIGNATURE_LEN} bytes")
-    })?;
+    let signature_arr: [u8; PQ_SIGNATURE_LEN] = model
+        .signature
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("signature in DB is not {PQ_SIGNATURE_LEN} bytes"))?;
     Ok(SignedConfigEntry {
         tenant_id: TenantId::from_bytes(&tenant_arr),
         payload_cbor: model.payload_cbor,
