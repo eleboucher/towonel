@@ -131,6 +131,7 @@ impl Router {
 }
 
 #[cfg(test)]
+#[allow(clippy::doc_markdown)]
 mod tests {
     use super::*;
     use iroh::SecretKey;

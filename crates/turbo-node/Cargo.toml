@@ -2,6 +2,7 @@
 name = "turbo-node"
 version = "0.0.1"
 edition = "2024"
+publish = false
 
 [[bin]]
 name = "turbo-node"
@@ -12,7 +13,6 @@ turbo-common = { path = "../turbo-common" }
 iroh = { workspace = true }
 sea-orm = { workspace = true }
 sea-orm-migration = { workspace = true }
-sea-query = { workspace = true }
 async-trait = { workspace = true }
 url = { workspace = true }
 ciborium = { workspace = true }
@@ -43,7 +43,6 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 instant-acme = { workspace = true }
-rcgen = { workspace = true }
 arc-swap = { workspace = true }
 moka = { workspace = true }
 zeroize = { workspace = true }

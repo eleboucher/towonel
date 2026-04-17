@@ -98,9 +98,9 @@ impl Db {
         rows.into_iter().map(model_to_entry).collect()
     }
 
-    /// Same as [`get_all_entries`] but also returns the stored sequence for
-    /// each entry. Used by federation push, which needs the sequence without
-    /// paying for an ML-DSA signature verify per row.
+    /// Same as [`Self::get_all_entries`] but also returns the stored sequence
+    /// for each entry. Used by federation push, which needs the sequence
+    /// without paying for an ML-DSA signature verify per row.
     pub async fn list_entries_with_sequence(
         &self,
     ) -> anyhow::Result<Vec<(SignedConfigEntry, u64)>> {

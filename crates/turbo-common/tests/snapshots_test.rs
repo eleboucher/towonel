@@ -1,3 +1,5 @@
+#![allow(clippy::manual_assert, clippy::unwrap_used, clippy::panic)]
+
 use std::path::{Path, PathBuf};
 
 use turbo_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};

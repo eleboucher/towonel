@@ -5,11 +5,20 @@ no-default-features = false
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+  # Transitive via iroh → iroh-metrics → postcard → heapless. No safe upgrade.
+  "RUSTSEC-2023-0089", # atomic-polyfill unmaintained
+  # Transitive via iroh. No safe upgrade.
+  "RUSTSEC-2024-0384", # instant unmaintained
+  # Transitive via netdev/netwatch → netlink-packet-*. No safe upgrade.
+  "RUSTSEC-2024-0436", # paste unmaintained
+]
 
 [licenses]
 version = 2
 confidence-threshold = 0.9
+# Internal workspace crates (turbo-*) are never published, so skip license checks.
+private = { ignore = true }
 allow = [
   "MIT",
   "Apache-2.0",
@@ -18,11 +27,13 @@ allow = [
   "BSD-3-Clause",
   "ISC",
   "Unicode-3.0",
-  "Unicode-DFS-2016",
   "CC0-1.0",
   "Zlib",
   "MPL-2.0",
-  "OpenSSL",
+  # webpki-roots ships the Mozilla CA bundle under this license.
+  "CDLA-Permissive-2.0",
+  # ws_stream_wasm / pharos / async_io_stream (transitive iroh WASM relay deps).
+  "Unlicense",
 ]
 exceptions = []
 
@@ -34,12 +45,52 @@ license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace path deps don't have a version — ignore them.
+allow-wildcard-paths = true
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
 deny = []
-skip = []
+# Duplicates pulled in by the iroh networking stack. Transitive, no upstream fix.
+skip = [
+  { crate = "block-buffer" },
+  { crate = "core-foundation" },
+  { crate = "cpufeatures" },
+  { crate = "crypto-common" },
+  { crate = "curve25519-dalek" },
+  { crate = "digest" },
+  { crate = "ed25519" },
+  { crate = "ed25519-dalek" },
+  { crate = "fiat-crypto" },
+  { crate = "getrandom" },
+  { crate = "hashbrown" },
+  { crate = "r-efi" },
+  { crate = "rand" },
+  { crate = "rand_chacha" },
+  { crate = "rand_core" },
+  { crate = "reqwest" },
+  { crate = "rustls-platform-verifier" },
+  { crate = "sha2" },
+  { crate = "signature" },
+  { crate = "socket2" },
+  { crate = "spin" },
+  { crate = "thiserror" },
+  { crate = "thiserror-impl" },
+  { crate = "toml_datetime" },
+  { crate = "toml_edit" },
+  { crate = "webpki-root-certs" },
+  { crate = "windows-sys" },
+  { crate = "windows-targets" },
+  { crate = "windows_aarch64_gnullvm" },
+  { crate = "windows_aarch64_msvc" },
+  { crate = "windows_i686_gnu" },
+  { crate = "windows_i686_msvc" },
+  { crate = "windows_x86_64_gnu" },
+  { crate = "windows_x86_64_gnullvm" },
+  { crate = "windows_x86_64_msvc" },
+  { crate = "winnow" },
+]
 skip-tree = []
 
 [sources]

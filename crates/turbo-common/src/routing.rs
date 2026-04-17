@@ -183,6 +183,7 @@ struct TenantState {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_closure_for_method_calls, clippy::similar_names)]
 mod tests {
     use super::*;
     use crate::config_entry::ConfigPayload;

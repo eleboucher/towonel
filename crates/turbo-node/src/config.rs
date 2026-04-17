@@ -320,10 +320,12 @@ impl Default for EdgeConfig {
     }
 }
 
+type StringListSetter = fn(&mut NodeConfig, Vec<String>);
+
 /// String-list env vars that figment can't natively parse because the
 /// prefixed-env provider treats every value as a scalar. Each entry names
 /// both the env var and where to assign the result on [`NodeConfig`].
-const STRING_LIST_ENVS: &[(&str, fn(&mut NodeConfig, Vec<String>))] = &[
+const STRING_LIST_ENVS: &[(&str, StringListSetter)] = &[
     ("TURBO_EDGE__PUBLIC_ADDRESSES", |c, v| {
         c.edge.public_addresses = v;
     }),

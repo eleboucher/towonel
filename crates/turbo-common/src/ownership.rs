@@ -84,6 +84,7 @@ impl OwnershipPolicy {
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_closure_for_method_calls)]
 mod tests {
     use super::*;
     use crate::identity::TenantKeypair;

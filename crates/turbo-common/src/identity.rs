@@ -476,6 +476,7 @@ pub fn load_tenant_keypair(path: &Path) -> anyhow::Result<TenantKeypair> {
 }
 
 #[cfg(test)]
+#[allow(clippy::uninlined_format_args)]
 mod tests {
     use super::*;
 

@@ -1,3 +1,5 @@
+#![allow(clippy::doc_markdown, clippy::significant_drop_tightening)]
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde_json::{Value, json};

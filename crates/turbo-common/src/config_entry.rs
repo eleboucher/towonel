@@ -264,6 +264,7 @@ fn from_canonical_cbor(bytes: &[u8]) -> Result<ConfigPayload, ConfigEntryError> 
 }
 
 #[cfg(test)]
+#[allow(clippy::manual_let_else)]
 mod tests {
     use super::*;
 

@@ -27,8 +27,8 @@ pub async fn write_hostname_header(
 
 /// Reads a hostname header: `[u16 BE length]` then that many bytes of UTF-8.
 ///
-/// Returns an error if the length exceeds [`MAX_HOSTNAME_LEN`] or the bytes are
-/// not valid UTF-8.
+/// Returns an error if the length exceeds the RFC 1035 maximum (253 bytes) or
+/// the bytes are not valid UTF-8.
 pub async fn read_hostname_header(
     stream: &mut (impl AsyncRead + Unpin),
 ) -> std::io::Result<String> {
