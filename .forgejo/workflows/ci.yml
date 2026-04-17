@@ -34,7 +34,8 @@ jobs:
         with:
           toolchain: "1.94.0"
           components: clippy
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
+      - uses: https://github.com/Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
           shared-key: clippy
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -46,7 +47,8 @@ jobs:
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.94.0"
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
+      - uses: https://github.com/Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
           shared-key: test
       - uses: https://github.com/taiki-e/install-action@v2
@@ -61,7 +63,8 @@ jobs:
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.94.0"
-      - uses: https://github.com/Swatinem/rust-cache@v2
+      # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
+      - uses: https://github.com/Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
         with:
           shared-key: doc
       - run: cargo doc --workspace --all-features --no-deps
@@ -75,7 +78,7 @@ jobs:
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: cargo deny --all-features check
+      - run: cargo-deny --all-features check
 
   machete:
     runs-on: docker
@@ -84,7 +87,7 @@ jobs:
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-machete
-      - run: cargo machete
+      - run: cargo-machete
 
   typos:
     runs-on: docker
