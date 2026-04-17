@@ -1,3 +1,4 @@
+mod admin;
 mod edge_invites;
 mod entries;
 mod invites;
@@ -148,6 +149,11 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
             delete(edge_invites::delete_edge_invite),
         )
         .route("/v1/dns/records", get(subscribe::get_dns_records))
+        .route(
+            "/v1/admin/federation/snapshot",
+            get(admin::snapshot),
+        )
+        .route("/v1/admin/resync", post(admin::resync))
         .layer(middleware::from_fn_with_state(state.clone(), operator_auth));
 
     let public_write = Router::new()

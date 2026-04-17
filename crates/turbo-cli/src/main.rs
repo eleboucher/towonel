@@ -1,4 +1,5 @@
 mod entry_cmds;
+mod hub_cmds;
 mod invite_cmds;
 mod tenant_cmds;
 
@@ -64,6 +65,31 @@ enum Command {
     EdgeInvite {
         #[command(subcommand)]
         action: EdgeInviteAction,
+    },
+    /// Operator-only: hub-level administrative operations.
+    Hub {
+        #[command(subcommand)]
+        action: HubAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum HubAction {
+    /// Disaster-recovery resync: pull federation state (tenants, removals,
+    /// entries) from `--from-peer` into the local hub. Idempotent.
+    Resync {
+        /// Local hub URL. Defaults to state.toml / `TURBO_HUB_URL`.
+        #[arg(long)]
+        hub_url: Option<String>,
+        /// Operator key for the LOCAL hub. Defaults to `$TURBO_OPERATOR_KEY`.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Peer hub URL to pull state from.
+        #[arg(long)]
+        from_peer: String,
+        /// Operator key for the PEER hub (needed to fetch its snapshot).
+        #[arg(long)]
+        peer_key: String,
     },
 }
 
@@ -307,6 +333,14 @@ async fn main() -> anyhow::Result<()> {
                 api_key,
                 id,
             } => invite_cmds::cmd_invite_revoke(hub_url, api_key, id).await,
+        },
+        Command::Hub { action } => match action {
+            HubAction::Resync {
+                hub_url,
+                api_key,
+                from_peer,
+                peer_key,
+            } => hub_cmds::cmd_hub_resync(hub_url, api_key, from_peer, peer_key).await,
         },
         Command::EdgeInvite { action } => match action {
             EdgeInviteAction::Create {

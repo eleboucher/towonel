@@ -4,6 +4,8 @@ pub mod db;
 pub mod federation;
 
 #[cfg(test)]
+mod admin_tests;
+#[cfg(test)]
 mod api_tests;
 #[cfg(test)]
 mod federation_tests;
