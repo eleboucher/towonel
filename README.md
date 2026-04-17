@@ -405,4 +405,4 @@ CI runs on Forgejo Actions (`.forgejo/workflows/`). Tag `v*` to trigger a releas
 
 ## License
 
-TBD
+MIT. See [LICENSE](LICENSE).
