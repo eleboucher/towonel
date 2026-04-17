@@ -344,14 +344,14 @@ async fn maybe_sync_push(
     if !state.federation.sync_invite_redeem {
         return;
     }
-    let Some(outbound) = state.federation.outbound.as_ref() else {
+    if state.federation.outbound.is_none() {
         return;
-    };
+    }
     let body = TenantPush {
         tenant_id: tenant_id.to_string(),
         pq_public_key: pq_public_key.to_string(),
         hostnames: hostnames.to_vec(),
         registered_at_ms: now_ms(),
     };
-    push_tenant_sync(&state.http_client, outbound, &body).await;
+    push_tenant_sync(state, &body).await;
 }

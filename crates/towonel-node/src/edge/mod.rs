@@ -265,35 +265,35 @@ async fn handle_connection_inner(
     peer_addr: std::net::SocketAddr,
     ctx: &ConnCtx,
 ) -> anyhow::Result<()> {
-    let start = Instant::now();
+    let span = info_span!("conn", peer = %peer_addr);
+    async move {
+        let start = Instant::now();
 
-    let mut peek_buf = vec![0u8; PEEK_BUF_SIZE];
-    let n = tcp_stream.peek(&mut peek_buf).await?;
+        let mut peek_buf = vec![0u8; PEEK_BUF_SIZE];
+        let n = tcp_stream.peek(&mut peek_buf).await?;
 
-    let hostname = extract_sni(&peek_buf[..n])
-        .ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?;
+        let hostname = extract_sni(&peek_buf[..n])
+            .ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?;
+        info!(%hostname, "SNI extracted");
 
-    debug!(%hostname, "extracted SNI");
+        let candidates = ctx
+            .router
+            .lookup(&hostname)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
+        let policy = ctx.router.tls_policy(&hostname).await;
+        info!(
+            %hostname,
+            candidates = candidates.len(),
+            mode = policy.label(),
+            "route matched"
+        );
 
-    let candidates = ctx
-        .router
-        .lookup(&hostname)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
+        let (agent_addr, send_stream, recv_stream) =
+            pick_agent_and_open_stream(ctx, candidates).await?;
+        let agent_short = agent_addr.id.fmt_short();
+        info!(agent = %agent_short, "agent selected, stream opened");
 
-    let policy = ctx.router.tls_policy(&hostname).await;
-
-    let (agent_addr, send_stream, recv_stream) =
-        pick_agent_and_open_stream(ctx, candidates).await?;
-
-    let span = info_span!("conn",
-        %hostname,
-        peer = %peer_addr,
-        agent = %agent_addr.id.fmt_short(),
-        mode = policy.label(),
-    );
-
-    async {
         let client_addrs = ClientAddrs {
             src: peer_addr,
             dst: tcp_stream.local_addr()?,
@@ -329,7 +329,15 @@ async fn handle_connection_inner(
         // truncation intentional:
         #[allow(clippy::cast_possible_truncation)]
         let duration_ms = start.elapsed().as_millis() as u64;
-        info!(bytes_in, bytes_out, duration_ms, "connection closed");
+        info!(
+            %hostname,
+            agent = %agent_short,
+            mode = policy.label(),
+            bytes_in,
+            bytes_out,
+            duration_ms,
+            "connection closed"
+        );
         Ok(())
     }
     .instrument(span)
@@ -388,9 +396,9 @@ async fn pipe_terminate(
     }
 
     let tls_stream = acceptor.accept(tcp_stream).await?;
+    info!(%hostname, "TLS handshake complete");
     let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
 
-    debug!(%hostname, "TLS terminated");
     write_hostname_header(&mut send_stream, hostname).await?;
     write_client_addrs(&mut send_stream, client_addrs).await?;
 

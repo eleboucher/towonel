@@ -17,7 +17,7 @@ use towonel_common::time::now_ms;
 use tracing::{info, warn};
 
 use super::api::AppState;
-use super::api::{OutboundFederation, internal_error, invalid_request, json_ok, unauthorized};
+use super::api::{internal_error, invalid_request, json_ok, unauthorized};
 use super::db::FederatedTenant;
 
 const FEDERATION_AUTH_DOMAIN: &str = "towonel/federation/v1";
@@ -310,6 +310,37 @@ async fn fetch_node_id(client: &reqwest::Client, health_url: &str) -> anyhow::Re
         .map_err(|e| anyhow::anyhow!("peer node_id is not 32 hex bytes: {e}"))
 }
 
+/// What kind of push succeeded. Used to bump the right per-peer counter.
+enum PushKind {
+    Tenant,
+    Removal,
+    Entry,
+}
+
+#[allow(clippy::significant_drop_tightening)]
+async fn record_push_ok(state: &AppState, peer_url: &str, kind: PushKind) {
+    let now = now_ms();
+    state.metrics.record_peer_push_success(peer_url, now);
+    let mut map = state.peer_statuses.write().await;
+    let entry = map.entry(peer_url.to_string()).or_default();
+    entry.last_push_ok_ms = Some(now);
+    entry.last_err_message = None;
+    match kind {
+        PushKind::Tenant => entry.tenants_pushed += 1,
+        PushKind::Removal => entry.removals_pushed += 1,
+        PushKind::Entry => entry.entries_pushed += 1,
+    }
+}
+
+#[allow(clippy::significant_drop_tightening)]
+async fn record_push_err(state: &AppState, peer_url: &str, err: &anyhow::Error) {
+    state.metrics.record_peer_push_failure(peer_url);
+    let mut map = state.peer_statuses.write().await;
+    let entry = map.entry(peer_url.to_string()).or_default();
+    entry.last_push_err_ms = Some(now_ms());
+    entry.set_err_message(&err.to_string());
+}
+
 // Held read-guard covers the entire entries loop to avoid repeated lock/clone.
 // `pub` (not `pub(crate)`) so federation_tests can drive it without the
 // redundant_pub_crate lint firing on this privately-rooted module.
@@ -337,14 +368,19 @@ pub async fn push_round(
             hostnames: tenant.hostnames,
             registered_at_ms: 0, // not tracked locally; peer doesn't care
         };
-        post_signed(
+        if let Err(e) = post_signed(
             client,
             peer_url,
             "/v1/federation/tenants",
             secret_key,
             &body,
         )
-        .await?;
+        .await
+        {
+            record_push_err(state, peer_url, &e).await;
+            return Err(e);
+        }
+        record_push_ok(state, peer_url, PushKind::Tenant).await;
         state
             .db
             .mark_federation_tenant_pushed(peer_node_id, &tenant.tenant_id)
@@ -359,14 +395,19 @@ pub async fn push_round(
             tenant_id: tid.to_string(),
             removed_at_ms: 0,
         };
-        post_signed(
+        if let Err(e) = post_signed(
             client,
             peer_url,
             "/v1/federation/tenant-removals",
             secret_key,
             &body,
         )
-        .await?;
+        .await
+        {
+            record_push_err(state, peer_url, &e).await;
+            return Err(e);
+        }
+        record_push_ok(state, peer_url, PushKind::Removal).await;
         state
             .db
             .mark_federation_removal_pushed(peer_node_id, &tid)
@@ -386,7 +427,13 @@ pub async fn push_round(
         }
         let mut body = Vec::new();
         ciborium::into_writer(&entry, &mut body)?;
-        post_signed_cbor(client, peer_url, "/v1/federation/entries", secret_key, body).await?;
+        if let Err(e) =
+            post_signed_cbor(client, peer_url, "/v1/federation/entries", secret_key, body).await
+        {
+            record_push_err(state, peer_url, &e).await;
+            return Err(e);
+        }
+        record_push_ok(state, peer_url, PushKind::Entry).await;
         state
             .db
             .mark_federation_entry_pushed(peer_node_id, &entry.tenant_id, sequence)
@@ -447,14 +494,13 @@ const SYNC_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
 /// that is unreachable or returns an error is logged and skipped, but the
 /// caller still succeeds. The async `run_peer` loop retries failures on its
 /// normal 15 s cadence, so this only closes the happy-path consistency gap.
-pub async fn push_tenant_sync(
-    client: &reqwest::Client,
-    outbound: &OutboundFederation,
-    body: &TenantPush,
-) {
+pub async fn push_tenant_sync(state: &AppState, body: &TenantPush) {
+    let Some(outbound) = state.federation.outbound.as_ref() else {
+        return;
+    };
     for peer_url in &outbound.peer_urls {
         let push = post_signed(
-            client,
+            &state.http_client,
             peer_url,
             "/v1/federation/tenants",
             &outbound.signing_key,
@@ -462,12 +508,16 @@ pub async fn push_tenant_sync(
         );
         match tokio::time::timeout(SYNC_PUSH_TIMEOUT, push).await {
             Ok(Ok(())) => {
+                record_push_ok(state, peer_url, PushKind::Tenant).await;
                 info!(peer = %peer_url, tenant = %body.tenant_id, "federation: sync-pushed tenant");
             }
             Ok(Err(e)) => {
+                record_push_err(state, peer_url, &e).await;
                 warn!(peer = %peer_url, error = %e, "federation: sync tenant push failed");
             }
             Err(_) => {
+                let err = anyhow::anyhow!("sync tenant push timed out");
+                record_push_err(state, peer_url, &err).await;
                 warn!(peer = %peer_url, "federation: sync tenant push timed out");
             }
         }

@@ -74,6 +74,8 @@ impl TestHub {
             },
             dns_webhook_url: None,
             prev_hostnames: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+            metrics: super::metrics::HubMetrics::new(),
+            peer_statuses: super::peer_status::new_peer_status_map(&[]),
         });
 
         let app = router_unlimited(state.clone());

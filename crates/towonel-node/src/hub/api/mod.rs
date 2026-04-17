@@ -1,7 +1,9 @@
 mod admin;
 mod edge_invites;
 mod entries;
+mod federation_status;
 mod invites;
+mod metrics_handler;
 mod subscribe;
 
 use std::sync::Arc;
@@ -16,12 +18,17 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock, broadcast};
-use tower_http::trace::TraceLayer;
+use tower_http::ServiceBuilderExt;
+use tower_http::request_id::MakeRequestUuid;
+use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use towonel_common::invite::INVITE_ID_LEN;
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
+use tracing::Level;
 
 use super::db;
+use super::metrics::HubMetrics;
+use super::peer_status::PeerStatusMap;
 use db::Db;
 
 pub(super) use towonel_common::CBOR_CONTENT_TYPE;
@@ -54,6 +61,10 @@ pub struct AppState {
     pub dns_webhook_url: Option<String>,
     /// Hostnames present in the last broadcasted route table.
     pub prev_hostnames: RwLock<std::collections::HashSet<String>>,
+    /// Prometheus metrics surface exposed on `/metrics`.
+    pub metrics: HubMetrics,
+    /// Per-peer federation push status, surfaced via `/v1/federation/status`.
+    pub peer_statuses: PeerStatusMap,
 }
 
 /// Federation-related runtime state.
@@ -151,6 +162,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         .route("/v1/dns/records", get(subscribe::get_dns_records))
         .route("/v1/admin/federation/snapshot", get(admin::snapshot))
         .route("/v1/admin/resync", post(admin::resync))
+        .route("/v1/federation/status", get(federation_status::get_status))
         .layer(middleware::from_fn_with_state(state.clone(), operator_auth));
 
     let public_write = Router::new()
@@ -190,7 +202,8 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
 
     let unlimited_public = Router::new()
         .route("/v1/health", get(entries::health))
-        .route("/v1/edges", get(entries::list_edges));
+        .route("/v1/edges", get(entries::list_edges))
+        .route("/metrics", get(metrics_handler::metrics));
 
     let federation_routes = Router::new()
         .route(
@@ -206,12 +219,33 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
             post(super::federation::push_entry),
         );
 
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(|req: &axum::http::Request<_>| {
+            let request_id = req
+                .headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .map_or_else(|| "-".to_string(), ToString::to_string);
+            tracing::info_span!(
+                "http",
+                method = %req.method(),
+                uri = %req.uri(),
+                request_id = %request_id,
+            )
+        })
+        .on_response(DefaultOnResponse::new().level(Level::INFO));
+    let correlated = tower::ServiceBuilder::new()
+        .set_x_request_id(MakeRequestUuid)
+        .layer(trace_layer)
+        .propagate_x_request_id()
+        .into_inner();
+
     Router::new()
         .merge(public_write)
         .merge(unlimited_public)
         .merge(federation_routes)
         .merge(operator_routes)
-        .layer(TraceLayer::new_for_http())
+        .layer(correlated)
         .with_state(state)
 }
 

@@ -11,6 +11,7 @@ use tracing::warn;
 
 use towonel_common::time::now_ms;
 
+use super::super::metrics::reject_reason;
 use super::{
     AppState, PROTOCOL_VERSION, broadcast_routes, cbor_response, hostname_not_owned,
     internal_error, invalid_request, invalid_signature, json_ok, sequence_conflict,
@@ -36,24 +37,36 @@ struct PostEntryResponse {
 pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let entry: SignedConfigEntry = match ciborium::from_reader(body.as_ref()) {
         Ok(e) => e,
-        Err(e) => return invalid_request(format!("invalid CBOR body: {e}")),
+        Err(e) => {
+            state.metrics.record_reject(reject_reason::INVALID_CBOR);
+            return invalid_request(format!("invalid CBOR body: {e}"));
+        }
     };
 
     let policy = state.policy.read().await;
 
     let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
+        state
+            .metrics
+            .record_reject(reject_reason::TENANT_NOT_ALLOWED);
         return tenant_not_allowed("tenant is not on the operator's allowlist");
     };
 
     let payload: ConfigPayload = match entry.verify(pq_pubkey) {
         Ok(p) => p,
         Err(e) => {
+            state
+                .metrics
+                .record_reject(reject_reason::INVALID_SIGNATURE);
             warn!(error = %e, "rejected entry: signature or tenant_id mismatch");
             return invalid_signature(format!("signature verification failed: {e}"));
         }
     };
 
     if payload.version != PROTOCOL_VERSION {
+        state
+            .metrics
+            .record_reject(reject_reason::UNSUPPORTED_VERSION);
         return unsupported_version(format!(
             "payload version {} is not supported by this hub (expected {PROTOCOL_VERSION})",
             payload.version
@@ -64,9 +77,13 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         &payload.op
     {
         if let Err(e) = towonel_common::hostname::validate_hostname(hostname) {
+            state.metrics.record_reject(reject_reason::INVALID_HOSTNAME);
             return invalid_request(format!("invalid hostname `{hostname}`: {e}"));
         }
         if !policy.is_hostname_allowed(&payload.tenant_id, hostname) {
+            state
+                .metrics
+                .record_reject(reject_reason::HOSTNAME_NOT_OWNED);
             return hostname_not_owned(format!(
                 "tenant is not authorized for hostname: {hostname}"
             ));
@@ -77,11 +94,17 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
 
     if let Err(e) = state.db.insert(&entry, sequence).await {
         if super::db::is_unique_violation(&e) {
+            state
+                .metrics
+                .record_reject(reject_reason::SEQUENCE_CONFLICT);
             return sequence_conflict("sequence number already used by this tenant");
         }
+        state.metrics.record_reject(reject_reason::INTERNAL);
         warn!(error = %e, "failed to insert entry");
         return internal_error();
     }
+
+    state.metrics.entries_accepted.inc();
 
     let policy_snapshot = policy.clone();
     drop(policy);

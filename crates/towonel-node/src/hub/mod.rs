@@ -2,6 +2,8 @@ pub mod api;
 pub mod auth;
 pub mod db;
 pub mod federation;
+pub mod metrics;
+pub mod peer_status;
 
 #[cfg(test)]
 mod admin_tests;
@@ -9,6 +11,8 @@ mod admin_tests;
 mod api_tests;
 #[cfg(test)]
 mod federation_tests;
+#[cfg(test)]
+mod observability_tests;
 #[cfg(test)]
 mod test_helpers;
 
@@ -148,6 +152,8 @@ impl Hub {
             peer_urls: self.p.peer_urls.clone(),
             signing_key: iroh::SecretKey::from(self.p.secret_key.to_bytes()),
         });
+        let metrics = metrics::HubMetrics::new();
+        let peer_statuses = peer_status::new_peer_status_map(&self.p.peer_urls);
         let state = Arc::new(api::AppState {
             db,
             route_tx: self.p.route_tx.clone(),
@@ -170,6 +176,8 @@ impl Hub {
             },
             dns_webhook_url: self.p.dns_webhook_url.clone(),
             prev_hostnames: RwLock::new(std::collections::HashSet::new()),
+            metrics,
+            peer_statuses,
         });
 
         for peer_url in &self.p.peer_urls {
@@ -183,6 +191,8 @@ impl Hub {
             });
         }
 
+        tokio::spawn(refresh_metrics_loop(state.clone()));
+
         let app = api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
 
         let listener = tokio::net::TcpListener::bind(&self.p.listen_addr).await?;
@@ -190,5 +200,33 @@ impl Hub {
 
         axum::serve(listener, app).await?;
         Ok(())
+    }
+}
+
+/// Periodically refresh metrics gauges derived from DB/policy state.
+/// Keeps `invites_pending` and `tenants_total` within ~15 s of the truth
+/// without instrumenting every code path that might change them.
+async fn refresh_metrics_loop(state: Arc<api::AppState>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+    loop {
+        tick.tick().await;
+        match state.db.list_invites().await {
+            Ok(rows) => {
+                let pending = rows
+                    .iter()
+                    .filter(|r| matches!(r.status, db::InviteStatus::Pending))
+                    .count();
+                state
+                    .metrics
+                    .invites_pending
+                    .set(i64::try_from(pending).unwrap_or(i64::MAX));
+            }
+            Err(e) => tracing::debug!(error = %e, "metrics refresh: list_invites failed"),
+        }
+        let tenants = state.policy.read().await.iter_patterns().count();
+        state
+            .metrics
+            .tenants_total
+            .set(i64::try_from(tenants).unwrap_or(i64::MAX));
     }
 }

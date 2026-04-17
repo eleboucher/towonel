@@ -5533,6 +5533,7 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -5677,6 +5678,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-stream",
  "toml 1.1.2+spec-1.1.0",
+ "tower",
  "tower-http",
  "tower_governor",
  "towonel-common",

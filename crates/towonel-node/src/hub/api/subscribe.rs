@@ -52,6 +52,18 @@ fn route_event(table: &RouteTable) -> axum::response::sse::Event {
         .data(B64.encode(&buf))
 }
 
+/// Drops a connected-subscriber gauge by one when the stream future is dropped.
+/// Works for both normal client disconnect and task cancellation.
+struct SubscriberGuard {
+    gauge: prometheus_client::metrics::gauge::Gauge,
+}
+
+impl Drop for SubscriberGuard {
+    fn drop(&mut self) {
+        self.gauge.dec();
+    }
+}
+
 pub(super) async fn routes_subscribe(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -78,7 +90,13 @@ pub(super) async fn routes_subscribe(
 
     let mut rx = state.route_tx.subscribe();
 
+    state.metrics.sse_subscribers_connected.inc();
+    let guard = SubscriberGuard {
+        gauge: state.metrics.sse_subscribers_connected.clone(),
+    };
+
     let stream = async_stream::stream! {
+        let _guard = guard;
         yield Ok::<_, Infallible>(route_event(&initial_table));
         loop {
             match rx.recv().await {
