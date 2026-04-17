@@ -89,7 +89,7 @@ rand_core = { version = "0.9.5" }
 getrandom = "0.4"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 eventsource-stream = "0.2"
-prometheus-client = "0.22"
+prometheus-client = "0.24"
 base64 = "0.22"
 sha2 = "0.10"
 url = "2"
