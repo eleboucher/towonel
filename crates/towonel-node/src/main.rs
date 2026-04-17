@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use iroh::endpoint::Endpoint;
+use iroh::endpoint::{Endpoint, presets::N0};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
@@ -267,7 +267,7 @@ async fn build_edge(
     tenants: &[config::TenantEntry],
     edge_config: &config::EdgeConfig,
 ) -> anyhow::Result<(Arc<edge::router::Router>, edge::Edge, String, Vec<String>)> {
-    let ep = Endpoint::builder().secret_key(secret_key).bind().await?;
+    let ep = Endpoint::builder(N0).secret_key(secret_key).bind().await?;
 
     let edge_node_id = ep.id().to_string();
     let edge_addresses: Vec<String> = ep

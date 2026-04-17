@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use iroh::{Endpoint, EndpointId};
+use iroh::{Endpoint, EndpointId, endpoint::presets::N0};
 use towonel_common::client_state::{ClientState, DefaultPaths};
 use towonel_common::protocol::ALPN_TUNNEL;
 use tracing::{error, info, warn};
@@ -156,7 +156,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         .context("failed to load or generate agent identity key")?;
     info!(node_id = %secret_key.public(), "loaded agent identity");
 
-    let endpoint = Endpoint::builder()
+    let endpoint = Endpoint::builder(N0)
         .secret_key(secret_key)
         .alpns(vec![ALPN_TUNNEL.to_vec()])
         .bind()

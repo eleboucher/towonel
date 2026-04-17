@@ -45,8 +45,9 @@ towonel-common = { path = "crates/towonel-common" }
 iroh = { workspace = true }
 tokio = { workspace = true }
 
+
 [workspace.dependencies]
-iroh = "0.97"
+iroh = "0.97.0"
 ed25519-dalek = { version = "2.2", features = ["serde", "rand_core"] }
 ciborium = "0.2"
 sea-orm = { version = "1", features = [
@@ -83,41 +84,29 @@ clienthello = "0.1"
 anyhow = "1"
 axum = "0.8"
 tower-http = { version = "0.6", features = ["trace"] }
-# Pinned to 0.6 for ed25519-dalek 2.x compatibility. If a newer dep
-# needs rand_core 0.9, resolve the version conflict at that point.
 rand_core = { version = "0.10.0" }
 getrandom = "0.4"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 eventsource-stream = "0.2"
 prometheus-client = "0.24"
 base64 = "0.22"
-sha2 = "0.11"
+sha2 = "0.10"
 url = "2"
-# Post-quantum signatures (ML-DSA-65, FIPS 204). Pure Rust, no C deps.
-# `default-features = false` drops ml-dsa-44 / ml-dsa-87 we don't use.
 fips204 = { version = "0.4", default-features = false, features = [
   "ml-dsa-65",
   "default-rng",
 ] }
-# Stream helpers (BroadcastStream) for the hub's SSE route-subscribe endpoint.
 tokio-stream = { version = "0.1", features = ["sync"] }
 async-stream = "0.3"
-# Per-IP rate limiting on the hub's public endpoints.
 tower_governor = { version = "0.8", default-features = false, features = [
   "axum",
 ] }
-# Layered config (TOML file + TOWONEL_*  env-var overrides).
 figment = { version = "0.10", features = ["toml", "env"] }
-# Passphrase-based key backup (towonel-cli tenant export-key / import-key).
 aes-gcm = "0.10"
 argon2 = "0.5"
-# Audited constant-time operations (replaces hand-rolled constant_time_eq).
 subtle = "2.6"
-# Secure memory zeroing for seeds, passphrases, and derived keys.
 zeroize = { version = "1", features = ["derive"] }
-# Read passphrases without terminal echo (key export/import).
 rpassword = "7"
-# TLS termination at the edge.
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = [
   "std",
@@ -125,13 +114,9 @@ rustls = { version = "0.23", default-features = false, features = [
   "ring",
 ] }
 rustls-pemfile = "2"
-# ACME (Let's Encrypt) automatic certificate provisioning.
 instant-acme = "0.8"
 rcgen = "0.14"
 webpki-roots = "1.0"
-# Lock-free snapshot for the hot path (rustls cert resolver).
 arc-swap = "1.7"
-# Bounded TTL cache for federation nonce replay protection.
 moka = { version = "0.12", features = ["future"] }
-# Exponential backoff with jitter (ACME retry, peer bootstrap).
 backon = "1"

@@ -12,8 +12,8 @@ const ARGON2_SALT_LEN: usize = 16;
 const AES_GCM_NONCE_LEN: usize = 12;
 
 fn read_passphrase(prompt: &str) -> anyhow::Result<String> {
-    let passphrase = rpassword::prompt_password_stderr(prompt)
-        .context("failed to read passphrase from terminal")?;
+    let passphrase =
+        rpassword::prompt_password(prompt).context("failed to read passphrase from terminal")?;
     if passphrase.trim().is_empty() {
         return Err(anyhow!("passphrase must not be empty"));
     }

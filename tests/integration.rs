@@ -36,7 +36,8 @@ async fn tunnel_echo_roundtrip() {
     let origin_addr = start_echo_server().await;
 
     // 2. Create agent-side endpoint (accepts connections).
-    let agent_ep = Endpoint::empty_builder(RelayMode::Disabled)
+    let agent_ep = Endpoint::empty_builder()
+        .relay_mode(RelayMode::Disabled)
         .alpns(vec![ALPN_TUNNEL.to_vec()])
         .bind()
         .await
@@ -46,7 +47,8 @@ async fn tunnel_echo_roundtrip() {
     let agent_sockets = agent_ep.bound_sockets();
 
     // 3. Create edge-side endpoint (connects to agent).
-    let edge_ep = Endpoint::empty_builder(RelayMode::Disabled)
+    let edge_ep = Endpoint::empty_builder()
+        .relay_mode(RelayMode::Disabled)
         .bind()
         .await
         .expect("edge endpoint bind");
