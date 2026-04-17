@@ -29,12 +29,12 @@ jobs:
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
 
-      - name: Build and push turbo-node
+      - name: Build and push towonel-node
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
           context: .
@@ -43,20 +43,20 @@ jobs:
           push: true
           tags: ${{ steps.meta-node.outputs.tags }}
           labels: ${{ steps.meta-node.outputs.labels }}
-          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node:buildcache
-          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node:buildcache,mode=max
+          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node:buildcache
+          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node:buildcache,mode=max
 
       - name: Compute agent image metadata
         id: meta-agent
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
 
-      - name: Build and push turbo-agent
+      - name: Build and push towonel-agent
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
           context: .
@@ -65,5 +65,5 @@ jobs:
           push: true
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}
-          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent:buildcache
-          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent:buildcache,mode=max
+          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent:buildcache
+          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent:buildcache,mode=max

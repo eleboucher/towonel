@@ -3,7 +3,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 build:
-	cargo build --release -p turbo-agent -p turbo-node -p turbo-cli
+	cargo build --release -p towonel-agent -p towonel-node -p towonel-cli
 
 test:
 	cargo test --all-targets
@@ -17,13 +17,13 @@ fmt:
 check: fmt lint test
 
 docker:
-	docker build -t turbo-tunnel:$(VERSION) .
+	docker build -t towonel:$(VERSION) .
 
 docker-agent:
-	docker build -f Dockerfile.agent -t turbo-agent:$(VERSION) .
+	docker build -f Dockerfile.agent -t towonel-agent:$(VERSION) .
 
 docker-node:
-	docker build -f Dockerfile.node -t turbo-node:$(VERSION) .
+	docker build -f Dockerfile.node -t towonel-node:$(VERSION) .
 
 up:
 	docker compose up --build -d

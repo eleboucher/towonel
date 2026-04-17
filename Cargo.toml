@@ -1,5 +1,5 @@
 [package]
-name = "turbo-tunnel"
+name = "towonel"
 version = "0.0.1"
 edition = "2024"
 publish = false
@@ -30,10 +30,10 @@ missing_panics_doc = "allow"
 [workspace]
 resolver = "2"
 members = [
-  "crates/turbo-common",
-  "crates/turbo-agent",
-  "crates/turbo-node",
-  "crates/turbo-cli",
+  "crates/towonel-common",
+  "crates/towonel-agent",
+  "crates/towonel-node",
+  "crates/towonel-cli",
 ]
 
 [profile.release]
@@ -41,7 +41,7 @@ strip = true
 lto = "thin"
 
 [dev-dependencies]
-turbo-common = { path = "crates/turbo-common" }
+towonel-common = { path = "crates/towonel-common" }
 iroh = { workspace = true }
 tokio = { workspace = true }
 
@@ -106,9 +106,9 @@ async-stream = "0.3"
 tower_governor = { version = "0.8", default-features = false, features = [
   "axum",
 ] }
-# Layered config (TOML file + TURBO_*  env-var overrides).
+# Layered config (TOML file + TOWONEL_*  env-var overrides).
 figment = { version = "0.10", features = ["toml", "env"] }
-# Passphrase-based key backup (turbo-cli tenant export-key / import-key).
+# Passphrase-based key backup (towonel-cli tenant export-key / import-key).
 aes-gcm = "0.10"
 argon2 = "0.5"
 # Audited constant-time operations (replaces hand-rolled constant_time_eq).

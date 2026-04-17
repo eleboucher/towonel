@@ -6,8 +6,8 @@ use tokio::io;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
-use turbo_common::protocol::ALPN_TUNNEL;
-use turbo_common::tunnel::{read_hostname_header, write_hostname_header};
+use towonel_common::protocol::ALPN_TUNNEL;
+use towonel_common::tunnel::{read_hostname_header, write_hostname_header};
 
 /// Start a TCP echo server on a random port. Returns the bound address.
 async fn start_echo_server() -> SocketAddr {
@@ -105,7 +105,7 @@ async fn tunnel_echo_roundtrip() {
     };
 
     // 5. Edge connects to agent, sends hostname header + test data.
-    let test_payload = b"hello turbo-tunnel integration test!";
+    let test_payload = b"hello towonel integration test!";
 
     let conn = edge_ep
         .connect(agent_addr, ALPN_TUNNEL)

@@ -9,15 +9,15 @@ services:
       - "9090:9090"
     environment:
       RUST_LOG: info
-      TURBO_IDENTITY__KEY_PATH: /var/lib/turbo-tunnel/node.key
-      TURBO_HUB__DB_PATH: /var/lib/turbo-tunnel/hub.db
-      TURBO_HUB__LISTEN_ADDR: 0.0.0.0:8443
-      # TURBO_HUB__PUBLIC_URL: https://hub.example.eu:8443
-      # TURBO_HUB__DNS_WEBHOOK_URL: https://dns-sidecar.internal/update
-      TURBO_EDGE__LISTEN_ADDR: 0.0.0.0:443
-      TURBO_EDGE__HEALTH_LISTEN_ADDR: 0.0.0.0:9090
+      TOWONEL_IDENTITY__KEY_PATH: /var/lib/towonel/node.key
+      TOWONEL_HUB__DB_PATH: /var/lib/towonel/hub.db
+      TOWONEL_HUB__LISTEN_ADDR: 0.0.0.0:8443
+      # TOWONEL_HUB__PUBLIC_URL: https://hub.example.eu:8443
+      # TOWONEL_HUB__DNS_WEBHOOK_URL: https://dns-sidecar.internal/update
+      TOWONEL_EDGE__LISTEN_ADDR: 0.0.0.0:443
+      TOWONEL_EDGE__HEALTH_LISTEN_ADDR: 0.0.0.0:9090
     volumes:
-      - node-data:/var/lib/turbo-tunnel
+      - node-data:/var/lib/towonel
     restart: unless-stopped
 
   agent:
@@ -27,7 +27,7 @@ services:
     environment:
       RUST_LOG: info
     volumes:
-      - agent-data:/root/.turbo-tunnel
+      - agent-data:/root/.towonel
     restart: unless-stopped
 
 volumes:

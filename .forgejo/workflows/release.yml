@@ -50,12 +50,12 @@ jobs:
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Build and push turbo-node
+      - name: Build and push towonel-node
         uses: https://data.forgejo.org/docker/build-push-action@v7
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.BUILDCACHE_S3_KEY_ID }}
@@ -67,20 +67,20 @@ jobs:
           push: true
           tags: ${{ steps.meta-node.outputs.tags }}
           labels: ${{ steps.meta-node.outputs.labels }}
-          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=turbo-node
-          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=turbo-node,mode=max
+          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=towonel-node
+          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=towonel-node,mode=max
 
       - name: Compute agent image metadata
         id: meta-agent
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
-      - name: Build and push turbo-agent
+      - name: Build and push towonel-agent
         uses: https://data.forgejo.org/docker/build-push-action@v7
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.BUILDCACHE_S3_KEY_ID }}
@@ -92,5 +92,5 @@ jobs:
           push: true
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}
-          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=turbo-agent
-          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=turbo-agent,mode=max
+          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=towonel-agent
+          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=towonel-agent,mode=max

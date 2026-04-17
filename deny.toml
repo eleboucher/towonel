@@ -17,7 +17,7 @@ ignore = [
 [licenses]
 version = 2
 confidence-threshold = 0.9
-# Internal workspace crates (turbo-*) are never published, so skip license checks.
+# Internal workspace crates (towonel-*) are never published, so skip license checks.
 private = { ignore = true }
 allow = [
   "MIT",

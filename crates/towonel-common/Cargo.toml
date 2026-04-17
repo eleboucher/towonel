@@ -1,0 +1,30 @@
+[package]
+name = "towonel-common"
+version = "0.0.1"
+edition = "2024"
+publish = false
+
+[dependencies]
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+fips204 = { workspace = true }
+sha2 = { workspace = true }
+toml = { workspace = true }
+iroh = { workspace = true }
+ciborium = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+hex = { workspace = true }
+clienthello = { workspace = true }
+anyhow = { workspace = true }
+getrandom = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

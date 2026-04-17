@@ -11,14 +11,14 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
-RUN cargo build --release -p turbo-agent -p turbo-node -p turbo-cli && \
+RUN cargo build --release -p towonel-agent -p towonel-node -p towonel-cli && \
     mkdir -p /out && \
-    cp target/release/turbo-agent target/release/turbo-node target/release/turbo-cli /out/
+    cp target/release/towonel-agent target/release/towonel-node target/release/towonel-cli /out/
 
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /out/turbo-agent /usr/local/bin/
-COPY --from=builder /out/turbo-node  /usr/local/bin/
-COPY --from=builder /out/turbo-cli   /usr/local/bin/
+COPY --from=builder /out/towonel-agent /usr/local/bin/
+COPY --from=builder /out/towonel-node  /usr/local/bin/
+COPY --from=builder /out/towonel-cli   /usr/local/bin/

@@ -1,4 +1,4 @@
-# turbo-tunnel
+# towonel
 
 > **Status: Alpha** -- Functional and tested, but APIs and wire format may change between versions.
 
@@ -10,9 +10,9 @@ Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbou
                        Internet                        Your Network
                     (public VPS)                   (homelab / k8s / VM)
 
- Client               turbo-node                    turbo-agent
+ Client               towonel-node                    towonel-agent
    |                  ┌──────────┐                       |
-   | TLS ClientHello  │ hub  API │◄─── turbo-cli         |
+   | TLS ClientHello  │ hub  API │◄─── towonel-cli         |
    | ──────────────►  │ (SQLite/ │     (invites)         |
    |  (SNI: app.eu)   │ Postgres)│                       |
    |  (SNI: app.eu)   │          │                       |
@@ -29,7 +29,7 @@ Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbou
 
  Federation (optional):
 
-   turbo-node A ◄──── HTTPS push ────► turbo-node B
+   towonel-node A ◄──── HTTPS push ────► towonel-node B
        │          (tenants, entries,        │
        │           removals)                │
        ▼                                    ▼
@@ -41,21 +41,21 @@ Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbou
 ### From source
 
 ```bash
-cargo build --release -p turbo-agent -p turbo-node -p turbo-cli
+cargo build --release -p towonel-agent -p towonel-node -p towonel-cli
 ```
 
 ### Docker
 
 ```bash
-docker pull git.erwanleboucher.dev/eleboucher/turbo-node:latest
-docker pull git.erwanleboucher.dev/eleboucher/turbo-agent:latest
+docker pull git.erwanleboucher.dev/eleboucher/towonel-node:latest
+docker pull git.erwanleboucher.dev/eleboucher/towonel-agent:latest
 ```
 
 Or build locally:
 
 ```bash
-docker build -f Dockerfile.node  -t turbo-node:latest .
-docker build -f Dockerfile.agent -t turbo-agent:latest .
+docker build -f Dockerfile.node  -t towonel-node:latest .
+docker build -f Dockerfile.agent -t towonel-agent:latest .
 ```
 
 ## Quick start
@@ -66,7 +66,7 @@ docker build -f Dockerfile.agent -t turbo-agent:latest .
 
 
 ```bash
-  turbo-node
+  towonel-node
 ```
 
 On first run, `node.key` and `operator.key` are auto-generated. Save the operator key — you'll need it to create invites. To generate keys ahead of time, any tool that writes 32 random bytes works:
@@ -79,7 +79,7 @@ chmod 600 node.key
 ### 2. Invite a tenant (operator)
 
 ```bash
-turbo-cli invite create \
+towonel-cli invite create \
   --hub-url https://node.example.eu:8443 \
   --name alice \
   --hostnames "app.alice.example.eu,*.alice.example.eu" \
@@ -92,16 +92,16 @@ Send the token to Alice through a trusted channel.
 ### 3. Join and start the agent (Alice, behind NAT)
 
 ```bash
-turbo-agent init --invite tt_inv_1_...
+towonel-agent init --invite tt_inv_1_...
 ```
 
 
 ```bash
-TURBO_AGENT_SERVICES='[
+TOWONEL_AGENT_SERVICES='[
   {"hostname":"app.alice.example.eu","origin":"127.0.0.1:8443"},
   {"hostname":"*.alice.example.eu","origin":"127.0.0.1:8080",
    "tls_mode":{"mode":"terminate"}}
-]' turbo-agent
+]' towonel-agent
 ```
 
 - First service: passthrough (default). The origin terminates TLS.
@@ -126,9 +126,9 @@ All keys auto-generate on first run. Every key is a 32-byte random seed file —
 openssl rand 32 > tenant.key && chmod 600 tenant.key
 openssl rand 32 > agent.key  && chmod 600 agent.key
 
-# Or with turbo-cli (also prints the derived public identity)
-turbo-cli tenant init --key-path tenant.key   # prints tenant_id + PQ public key
-turbo-cli agent init --key-path agent.key     # prints agent_id
+# Or with towonel-cli (also prints the derived public identity)
+towonel-cli tenant init --key-path tenant.key   # prints tenant_id + PQ public key
+towonel-cli agent init --key-path agent.key     # prints agent_id
 ```
 
 The tenant seed derives an ML-DSA-65 (post-quantum) signing keypair; the agent seed derives an Ed25519 keypair for iroh transport.
@@ -136,10 +136,10 @@ The tenant seed derives an ML-DSA-65 (post-quantum) signing keypair; the agent s
 ### Key backup
 
 ```bash
-turbo-cli tenant export-key
-# Prints: turbo-key-v1:<encrypted-backup>  (AES-256-GCM + argon2id)
+towonel-cli tenant export-key
+# Prints: towonel-key-v1:<encrypted-backup>  (AES-256-GCM + argon2id)
 
-turbo-cli tenant import-key --backup 'turbo-key-v1:...' --key-path tenant.key
+towonel-cli tenant import-key --backup 'towonel-key-v1:...' --key-path tenant.key
 ```
 
 ## Manage tenants
@@ -147,15 +147,15 @@ turbo-cli tenant import-key --backup 'turbo-key-v1:...' --key-path tenant.key
 Tenants are managed through the CLI and the hub's database — no config file edits.
 
 ```bash
-turbo-cli invite create --name bob --hostnames "*.bob.example.eu" --expires 48h
-turbo-cli invite list
-turbo-cli invite revoke --id <invite-id>
+towonel-cli invite create --name bob --hostnames "*.bob.example.eu" --expires 48h
+towonel-cli invite list
+towonel-cli invite revoke --id <invite-id>
 
 # Operator evicts a tenant
-turbo-cli tenant remove --tenant-id <hex-tenant-id>
+towonel-cli tenant remove --tenant-id <hex-tenant-id>
 
 # Tenant leaves voluntarily
-turbo-cli tenant leave
+towonel-cli tenant leave
 ```
 
 ## Add an agent to an existing tenant
@@ -163,7 +163,7 @@ turbo-cli tenant leave
 When a tenant runs services on multiple machines:
 
 ```bash
-turbo-agent add-agent --tenant-key ~/.turbo-tunnel/tenant.key --hub https://hub.example.eu:8443
+towonel-agent add-agent --tenant-key ~/.towonel/tenant.key --hub https://hub.example.eu:8443
 ```
 
 ## Add edge nodes
@@ -172,11 +172,11 @@ Scale out edge capacity by inviting VPS operators:
 
 ```bash
 # Operator
-turbo-cli edge-invite create --name charlie-fra1
+towonel-cli edge-invite create --name charlie-fra1
 
 # Charlie, on his VPS
-turbo-node init --edge-invite tt_edge_1_...
-turbo-node --config /etc/turbo-tunnel/node.toml
+towonel-node init --edge-invite tt_edge_1_...
+towonel-node --config /etc/towonel/node.toml
 ```
 
 The edge subscribes to the hub's route stream and receives updates as tenants come and go.
@@ -186,11 +186,11 @@ The edge subscribes to the hub's route stream and receives updates as tenants co
 Tenants manage their own hostnames and agents without operator intervention:
 
 ```bash
-turbo-cli entry submit --op upsert-hostname --hostname new.alice.example.eu
-turbo-cli entry submit --op upsert-agent --agent-id <hex-agent-id>
-turbo-cli entry submit --op delete-hostname --hostname old.alice.example.eu
-turbo-cli entry submit --op revoke-agent --agent-id <hex-agent-id>
-turbo-cli entry list
+towonel-cli entry submit --op upsert-hostname --hostname new.alice.example.eu
+towonel-cli entry submit --op upsert-agent --agent-id <hex-agent-id>
+towonel-cli entry submit --op delete-hostname --hostname old.alice.example.eu
+towonel-cli entry submit --op revoke-agent --agent-id <hex-agent-id>
+towonel-cli entry list
 ```
 
 ## TLS handling
@@ -226,7 +226,7 @@ Cert lifecycle:
 
 - First request for a hostname triggers HTTP-01 issuance against Let's Encrypt. Subsequent requests reuse the cached cert. Renewed lazily.
 - Transient failures (network blips, ACME rate limits, challenge propagation) are retried with exponential backoff + jitter up to 3 attempts per request before the hostname enters a 5-minute failure cooldown.
-- Requires `TURBO_EDGE__TLS__ACME_EMAIL` on the node and inbound :80 reachable for ACME challenges.
+- Requires `TOWONEL_EDGE__TLS__ACME_EMAIL` on the node and inbound :80 reachable for ACME challenges.
 - Wildcards (`*.bob.example`) issue per exact subdomain on first contact — no DNS-01 required. Subject to Let's Encrypt rate limits (50 certs/week/registered domain).
 - The community member just needs a CNAME from their domain (e.g. `*.bob.example`) to an edge hostname; no DNS provider API access needed.
 
@@ -242,42 +242,42 @@ All configuration is via env vars in `docker-compose.yml`. Keys auto-generate on
 
 ### Configuration
 
-All settings are configurable via `TURBO_*` env vars (double underscore separates sections). A TOML file is optional — you can run purely from env vars.
+All settings are configurable via `TOWONEL_*` env vars (double underscore separates sections). A TOML file is optional — you can run purely from env vars.
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `TURBO_IDENTITY__KEY_PATH` | `node.key` | Node identity key |
-| `TURBO_HUB__ENABLED` | `true` | Enable the hub API |
-| `TURBO_HUB__LISTEN_ADDR` | `0.0.0.0:8443` | Hub API bind address |
-| `TURBO_HUB__DATABASE__DRIVER` | `sqlite` | `sqlite` or `postgres` |
-| `TURBO_HUB__DATABASE__DSN` | `hub.db` (sqlite) | Connection string. Required for `postgres` (e.g. `postgres://user:pass@host/db`); for `sqlite` it's a file path or `sqlite://...` URL |
-| `TURBO_HUB__DATABASE__MAX_OPEN_CONNS` | `4` sqlite / `25` postgres | Max open pool connections |
-| `TURBO_HUB__DATABASE__MAX_IDLE_CONNS` | `4` sqlite / `10` postgres | Max idle pool connections |
-| `TURBO_HUB__PUBLIC_URL` | `https://<listen_addr>` | URL embedded in invite tokens |
-| `TURBO_HUB__OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file |
-| `TURBO_HUB__DNS_WEBHOOK_URL` | | POST hostname changes to this URL |
-| `TURBO_HUB__PEER_URLS` | | Federation peer URLs. CSV: `https://a,https://b` — or JSON |
-| `TURBO_EDGE__ENABLED` | `true` | Enable the edge listener |
-| `TURBO_EDGE__LISTEN_ADDR` | `0.0.0.0:443` | Edge TCP bind address (TLS passthrough + termination share this port) |
-| `TURBO_EDGE__HEALTH_LISTEN_ADDR` | `0.0.0.0:9090` | Health + Prometheus metrics |
-| `TURBO_EDGE__HUB_URLS` | | Remote hub URLs (edge-only mode). CSV or JSON list |
-| `TURBO_EDGE__PUBLIC_ADDRESSES` | | Addresses this edge advertises to agents. CSV or JSON list |
-| `TURBO_EDGE__TLS__ACME_EMAIL` | | Enables on-demand Let's Encrypt issuance |
-| `TURBO_EDGE__TLS__CERT_DIR` | `/data/certs` | Where PEMs are cached |
-| `TURBO_EDGE__TLS__ACME_STAGING` | `false` | Use LE staging (avoids rate limits while testing) |
-| `TURBO_EDGE__TLS__HTTP_LISTEN_ADDR` | `0.0.0.0:80` | HTTP-01 challenge responder |
+| `TOWONEL_IDENTITY__KEY_PATH` | `node.key` | Node identity key |
+| `TOWONEL_HUB__ENABLED` | `true` | Enable the hub API |
+| `TOWONEL_HUB__LISTEN_ADDR` | `0.0.0.0:8443` | Hub API bind address |
+| `TOWONEL_HUB__DATABASE__DRIVER` | `sqlite` | `sqlite` or `postgres` |
+| `TOWONEL_HUB__DATABASE__DSN` | `hub.db` (sqlite) | Connection string. Required for `postgres` (e.g. `postgres://user:pass@host/db`); for `sqlite` it's a file path or `sqlite://...` URL |
+| `TOWONEL_HUB__DATABASE__MAX_OPEN_CONNS` | `4` sqlite / `25` postgres | Max open pool connections |
+| `TOWONEL_HUB__DATABASE__MAX_IDLE_CONNS` | `4` sqlite / `10` postgres | Max idle pool connections |
+| `TOWONEL_HUB__PUBLIC_URL` | `https://<listen_addr>` | URL embedded in invite tokens |
+| `TOWONEL_HUB__OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file |
+| `TOWONEL_HUB__DNS_WEBHOOK_URL` | | POST hostname changes to this URL |
+| `TOWONEL_HUB__PEER_URLS` | | Federation peer URLs. CSV: `https://a,https://b` — or JSON |
+| `TOWONEL_EDGE__ENABLED` | `true` | Enable the edge listener |
+| `TOWONEL_EDGE__LISTEN_ADDR` | `0.0.0.0:443` | Edge TCP bind address (TLS passthrough + termination share this port) |
+| `TOWONEL_EDGE__HEALTH_LISTEN_ADDR` | `0.0.0.0:9090` | Health + Prometheus metrics |
+| `TOWONEL_EDGE__HUB_URLS` | | Remote hub URLs (edge-only mode). CSV or JSON list |
+| `TOWONEL_EDGE__PUBLIC_ADDRESSES` | | Addresses this edge advertises to agents. CSV or JSON list |
+| `TOWONEL_EDGE__TLS__ACME_EMAIL` | | Enables on-demand Let's Encrypt issuance |
+| `TOWONEL_EDGE__TLS__CERT_DIR` | `/data/certs` | Where PEMs are cached |
+| `TOWONEL_EDGE__TLS__ACME_STAGING` | `false` | Use LE staging (avoids rate limits while testing) |
+| `TOWONEL_EDGE__TLS__HTTP_LISTEN_ADDR` | `0.0.0.0:80` | HTTP-01 challenge responder |
 
-**Lists in env vars** — string-valued lists (`PEER_URLS`, `HUB_URLS`, `PUBLIC_ADDRESSES`) accept either comma-separated values (preferred in Kubernetes YAML) or a JSON array. Complex structured lists like `TURBO_TENANTS` require JSON.
+**Lists in env vars** — string-valued lists (`PEER_URLS`, `HUB_URLS`, `PUBLIC_ADDRESSES`) accept either comma-separated values (preferred in Kubernetes YAML) or a JSON array. Complex structured lists like `TOWONEL_TENANTS` require JSON.
 
-turbo-agent (`TURBO_AGENT_*`):
+towonel-agent (`TOWONEL_AGENT_*`):
 
 | Env var | Description |
 |---------|-------------|
-| `TURBO_AGENT_SERVICES` | JSON array — see below |
-| `TURBO_AGENT_IDENTITY__KEY_PATH` | Agent key path |
-| `TURBO_AGENT_TRUSTED_EDGES` | JSON array of hex endpoint IDs |
+| `TOWONEL_AGENT_SERVICES` | JSON array — see below |
+| `TOWONEL_AGENT_IDENTITY__KEY_PATH` | Agent key path |
+| `TOWONEL_AGENT_TRUSTED_EDGES` | JSON array of hex endpoint IDs |
 
-`TURBO_AGENT_SERVICES` shape:
+`TOWONEL_AGENT_SERVICES` shape:
 
 ```json
 [
@@ -297,13 +297,13 @@ turbo-agent (`TURBO_AGENT_*`):
 
 `tls_mode` is optional; missing means passthrough. On startup the agent POSTs a signed `SetHostnameTls` entry per service to the hub — edges pick it up via the existing route broadcast.
 
-turbo-cli:
+towonel-cli:
 
 | Env var | Description |
 |---------|-------------|
-| `TURBO_HUB_URL` | Default `--hub-url` for all commands |
-| `TURBO_OPERATOR_KEY` | Default `--api-key` for operator commands |
-| `TURBO_STATE` | Override `state.toml` path (default: `~/.turbo-tunnel/state.toml`) |
+| `TOWONEL_HUB_URL` | Default `--hub-url` for all commands |
+| `TOWONEL_OPERATOR_KEY` | Default `--api-key` for operator commands |
+| `TOWONEL_STATE` | Override `state.toml` path (default: `~/.towonel/state.toml`) |
 
 ### Database
 
@@ -317,7 +317,7 @@ TOML:
 ```toml
 [hub.database]
 driver = "postgres"
-dsn = "postgres://turbo:secret@db.internal:5432/turbo_hub"
+dsn = "postgres://towonel:secret@db.internal:5432/towonel_hub"
 maxOpenConns = 25
 maxIdleConns = 10
 ```
@@ -325,8 +325,8 @@ maxIdleConns = 10
 Or env vars:
 
 ```bash
-TURBO_HUB__DATABASE__DRIVER=postgres
-TURBO_HUB__DATABASE__DSN='postgres://turbo:secret@db.internal:5432/turbo_hub'
+TOWONEL_HUB__DATABASE__DRIVER=postgres
+TOWONEL_HUB__DATABASE__DSN='postgres://towonel:secret@db.internal:5432/towonel_hub'
 ```
 
 Migrations run automatically at boot via `sea-orm-migration`. The same schema applies to both drivers — no backend-specific branches.
@@ -337,7 +337,7 @@ Replicate tenants and entries across hub instances. Peers are bidirectional over
 
 ```bash
 # CSV — best for Kubernetes env vars
-TURBO_HUB__PEER_URLS=https://hub-b.example.eu:8443,https://hub-c.example.eu:8443
+TOWONEL_HUB__PEER_URLS=https://hub-b.example.eu:8443,https://hub-c.example.eu:8443
 ```
 
 Or in TOML:
@@ -354,7 +354,7 @@ Push state (which tenants/entries have been delivered to which peer) is persiste
 The hub POSTs a diff to a webhook whenever the set of active hostnames changes:
 
 ```bash
-TURBO_HUB__DNS_WEBHOOK_URL=https://dns-sidecar.internal/update
+TOWONEL_HUB__DNS_WEBHOOK_URL=https://dns-sidecar.internal/update
 ```
 
 Payload:
