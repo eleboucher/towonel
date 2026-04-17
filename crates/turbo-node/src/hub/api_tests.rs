@@ -1,126 +1,17 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
-
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, broadcast};
 use turbo_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
-use turbo_common::identity::{AgentKeypair, TenantKeypair};
+use turbo_common::identity::TenantKeypair;
 use turbo_common::invite::{INVITE_ID_LEN, InviteToken, hash_invite_secret};
-use turbo_common::ownership::OwnershipPolicy;
 
-use super::api::{AppState, router_unlimited};
-use super::db::{PendingInvite, temp_db};
+use turbo_common::identity::AgentKeypair;
 
-const OPERATOR_KEY: &str = "test-operator-api-key";
-/// Fake 64-hex node id for places that only need a string (no iroh endpoint
-/// is spun up for these tests).
-const FAKE_NODE_ID: &str = "0000000000000000000000000000000000000000000000000000000000000001";
-
-/// A running hub bound to an ephemeral port, plus the pieces the tests need
-/// to poke at its internal state.
-struct TestHub {
-    base_url: String,
-    state: Arc<AppState>,
-    _task: tokio::task::JoinHandle<()>,
-}
-
-impl TestHub {
-    async fn start() -> Self {
-        let db = temp_db().await;
-        let (route_tx, _route_rx) = broadcast::channel(16);
-        let policy = Arc::new(RwLock::new(OwnershipPolicy::new()));
-
-        let state = Arc::new(AppState {
-            db,
-            route_tx,
-            policy,
-            http_client: reqwest::Client::new(),
-            identity: super::HubIdentity {
-                node_id: FAKE_NODE_ID.to_string(),
-                edge_addresses: vec!["127.0.0.1:4443".to_string()],
-                edge_node_id: Some(FAKE_NODE_ID.to_string()),
-                software_version: "0.0.0-test",
-            },
-            operator_api_key: OPERATOR_KEY.to_string(),
-            public_url: "https://hub.test.example".to_string(),
-            invite_lock: tokio::sync::Mutex::new(()),
-            federation: super::api::FederationState {
-                trusted_peers: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
-                nonces: super::federation::new_nonce_cache(),
-            },
-            dns_webhook_url: None,
-            prev_hostnames: tokio::sync::RwLock::new(std::collections::HashSet::new()),
-        });
-
-        let app = router_unlimited(state.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr: SocketAddr = listener.local_addr().unwrap();
-        let base_url = format!("http://{addr}");
-
-        let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        Self {
-            base_url,
-            state,
-            _task: task,
-        }
-    }
-
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.base_url, path)
-    }
-}
-
-/// Shortcut: POST JSON to a path, returning (status, body as JSON).
-async fn post_json(
-    client: &reqwest::Client,
-    url: &str,
-    body: Value,
-    bearer: Option<&str>,
-) -> (reqwest::StatusCode, Value) {
-    let mut req = client.post(url).json(&body);
-    if let Some(k) = bearer {
-        req = req.bearer_auth(k);
-    }
-    let resp = req.send().await.unwrap();
-    let status = resp.status();
-    let json = resp.json::<Value>().await.unwrap();
-    (status, json)
-}
-
-async fn get_json(
-    client: &reqwest::Client,
-    url: &str,
-    bearer: Option<&str>,
-) -> (reqwest::StatusCode, Value) {
-    let mut req = client.get(url);
-    if let Some(k) = bearer {
-        req = req.bearer_auth(k);
-    }
-    let resp = req.send().await.unwrap();
-    let status = resp.status();
-    let json = resp.json::<Value>().await.unwrap();
-    (status, json)
-}
-
-async fn delete_json(
-    client: &reqwest::Client,
-    url: &str,
-    bearer: Option<&str>,
-) -> (reqwest::StatusCode, Value) {
-    let mut req = client.delete(url);
-    if let Some(k) = bearer {
-        req = req.bearer_auth(k);
-    }
-    let resp = req.send().await.unwrap();
-    let status = resp.status();
-    let json = resp.json::<Value>().await.unwrap();
-    (status, json)
-}
+use super::db::PendingInvite;
+use super::test_helpers::{
+    FAKE_NODE_ID, OPERATOR_KEY, TestHub, create_invite, delete_json, get_json, post_json,
+    redeem_body,
+};
 
 // POST /v1/invites (create)
 
@@ -441,37 +332,6 @@ async fn revoke_invite_bad_id_returns_400() {
 }
 
 // POST /v1/invites/redeem
-
-/// Create a pending invite via the API, returning the parsed token + invite_id.
-async fn create_invite(
-    hub: &TestHub,
-    client: &reqwest::Client,
-    name: &str,
-    hostnames: &[&str],
-) -> InviteToken {
-    let (status, body) = post_json(
-        client,
-        &hub.url("/v1/invites"),
-        json!({
-            "name": name,
-            "hostnames": hostnames,
-            "expires_in_secs": 3600,
-        }),
-        Some(OPERATOR_KEY),
-    )
-    .await;
-    assert_eq!(status, 200, "create_invite failed: {body}");
-    InviteToken::decode(body["token"].as_str().unwrap()).unwrap()
-}
-
-fn redeem_body(token: &InviteToken, tenant: &TenantKeypair, agent: &AgentKeypair) -> Value {
-    json!({
-        "invite_id": B64.encode(token.invite_id),
-        "invite_secret": B64.encode(token.invite_secret),
-        "tenant_pq_public_key": tenant.public_key().to_string(),
-        "agent_node_id": agent.id().to_string(),
-    })
-}
 
 #[tokio::test]
 async fn redeem_invite_happy_path() {

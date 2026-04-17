@@ -335,11 +335,11 @@ async fn fetch_node_id(client: &reqwest::Client, health_url: &str) -> anyhow::Re
         .map_err(|_| anyhow::anyhow!("peer node_id is not 32 bytes"))
 }
 
-// The policy read guard is held for the entire entries loop to avoid repeated lock/unlock
-// and repeated policy clones. The significant_drop_tightening lint suggests narrowing the
-// scope, but doing so here would require cloning or repeated locking — both wasteful.
+// Held read-guard covers the entire entries loop to avoid repeated lock/clone.
+// `pub` (not `pub(crate)`) so federation_tests can drive it without the
+// redundant_pub_crate lint firing on this privately-rooted module.
 #[allow(clippy::significant_drop_tightening)]
-async fn push_round(
+pub async fn push_round(
     client: &reqwest::Client,
     peer_url: &str,
     secret_key: &iroh::SecretKey,

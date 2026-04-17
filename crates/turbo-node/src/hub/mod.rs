@@ -5,6 +5,10 @@ pub mod federation;
 
 #[cfg(test)]
 mod api_tests;
+#[cfg(test)]
+mod federation_tests;
+#[cfg(test)]
+mod test_helpers;
 
 use std::path::Path;
 use std::sync::Arc;
