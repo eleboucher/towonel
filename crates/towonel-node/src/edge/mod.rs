@@ -19,7 +19,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use towonel_common::protocol::ALPN_TUNNEL;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
-use towonel_common::tunnel::write_hostname_header;
+use towonel_common::tunnel::{ClientAddrs, write_client_addrs, write_hostname_header};
 
 use self::acme::AcmeCoordinator;
 use self::health::EdgeMetrics;
@@ -87,7 +87,7 @@ type AgentHealthMap = Mutex<HashMap<iroh::EndpointId, Arc<AgentHealthState>>>;
 ///   - `Passthrough`: raw TLS bytes forwarded to the agent (agent/origin handles TLS)
 ///   - `Terminate`: edge handshakes TLS here, forwards plaintext to the agent
 ///
-/// A single port serves both modes. Community members pick per-hostname.
+/// A single port serves both modes. Tenants pick per-hostname.
 pub struct Edge {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
@@ -220,6 +220,46 @@ async fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentH
         .clone()
 }
 
+/// Score `candidates` by agent health, then dial them in order until one
+/// succeeds. Records success/failure into the health map as a side effect.
+/// Returns the chosen agent plus an open bidirectional QUIC stream.
+async fn pick_agent_and_open_stream(
+    ctx: &ConnCtx,
+    candidates: Vec<EndpointAddr>,
+) -> anyhow::Result<(
+    EndpointAddr,
+    iroh::endpoint::SendStream,
+    iroh::endpoint::RecvStream,
+)> {
+    let mut scored: Vec<(EndpointAddr, (u32, u64))> = Vec::with_capacity(candidates.len());
+    for addr in candidates {
+        let h = get_health(&ctx.health, addr.id).await;
+        scored.push((addr, h.score()));
+    }
+    scored.sort_by_key(|(_, score)| *score);
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for (agent_addr, _) in scored {
+        let health_state = get_health(&ctx.health, agent_addr.id).await;
+        match open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr.clone()).await {
+            Ok((send, recv)) => {
+                health_state.record_success();
+                return Ok((agent_addr, send, recv));
+            }
+            Err(e) => {
+                health_state.record_failure();
+                debug!(
+                    agent = %agent_addr.id.fmt_short(),
+                    error = %e,
+                    "agent stream open failed, trying next"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("all agents failed")))
+}
+
 async fn handle_connection_inner(
     tcp_stream: TcpStream,
     peer_addr: std::net::SocketAddr,
@@ -235,76 +275,51 @@ async fn handle_connection_inner(
 
     debug!(%hostname, "extracted SNI");
 
-    let mut agents = ctx
+    let candidates = ctx
         .router
         .lookup(&hostname)
         .await
         .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
 
-    {
-        let mut scored: Vec<(EndpointAddr, (u32, u64))> = Vec::with_capacity(agents.len());
-        for addr in agents {
-            let h = get_health(&ctx.health, addr.id).await;
-            scored.push((addr, h.score()));
-        }
-        scored.sort_by_key(|(_, score)| *score);
-        agents = scored.into_iter().map(|(addr, _)| addr).collect();
-    }
-
-    if agents.is_empty() {
-        anyhow::bail!("agent list empty for hostname: {hostname}");
-    }
-
     let policy = ctx.router.tls_policy(&hostname).await;
 
-    let mut last_err: Option<anyhow::Error> = None;
-    let mut chosen: Option<(
-        EndpointAddr,
-        iroh::endpoint::SendStream,
-        iroh::endpoint::RecvStream,
-    )> = None;
-
-    for agent_addr in agents {
-        let agent_health_state = get_health(&ctx.health, agent_addr.id).await;
-        match open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr.clone()).await {
-            Ok((send, recv)) => {
-                agent_health_state.record_success();
-                chosen = Some((agent_addr, send, recv));
-                break;
-            }
-            Err(e) => {
-                agent_health_state.record_failure();
-                debug!(
-                    agent = %agent_addr.id.fmt_short(),
-                    error = %e,
-                    "agent stream open failed, trying next"
-                );
-                last_err = Some(e);
-            }
-        }
-    }
-
-    let (agent_addr, send_stream_chosen, recv_stream_chosen) =
-        chosen.ok_or_else(|| last_err.unwrap_or_else(|| anyhow::anyhow!("all agents failed")))?;
-
-    let agent_id = agent_addr.id;
+    let (agent_addr, send_stream, recv_stream) =
+        pick_agent_and_open_stream(ctx, candidates).await?;
 
     let span = info_span!("conn",
         %hostname,
         peer = %peer_addr,
-        agent = %agent_id.fmt_short(),
+        agent = %agent_addr.id.fmt_short(),
         mode = policy.label(),
     );
 
     async {
-        let (send_stream, recv_stream) = (send_stream_chosen, recv_stream_chosen);
+        let client_addrs = ClientAddrs {
+            src: peer_addr,
+            dst: tcp_stream.local_addr()?,
+        };
 
         let (bytes_in, bytes_out) = match policy {
             TlsMode::Passthrough => {
-                pipe_passthrough(tcp_stream, &hostname, send_stream, recv_stream).await?
+                pipe_passthrough(
+                    tcp_stream,
+                    &hostname,
+                    client_addrs,
+                    send_stream,
+                    recv_stream,
+                )
+                .await?
             }
             TlsMode::Terminate => {
-                pipe_terminate(tcp_stream, &hostname, send_stream, recv_stream, ctx).await?
+                pipe_terminate(
+                    tcp_stream,
+                    &hostname,
+                    client_addrs,
+                    send_stream,
+                    recv_stream,
+                    ctx,
+                )
+                .await?
             }
         };
 
@@ -324,10 +339,12 @@ async fn handle_connection_inner(
 async fn pipe_passthrough(
     tcp_stream: TcpStream,
     hostname: &str,
+    client_addrs: ClientAddrs,
     mut send_stream: iroh::endpoint::SendStream,
     mut recv_stream: iroh::endpoint::RecvStream,
 ) -> anyhow::Result<(u64, u64)> {
     write_hostname_header(&mut send_stream, hostname).await?;
+    write_client_addrs(&mut send_stream, client_addrs).await?;
 
     let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
 
@@ -349,6 +366,7 @@ async fn pipe_passthrough(
 async fn pipe_terminate(
     tcp_stream: TcpStream,
     hostname: &str,
+    client_addrs: ClientAddrs,
     mut send_stream: iroh::endpoint::SendStream,
     mut recv_stream: iroh::endpoint::RecvStream,
     ctx: &ConnCtx,
@@ -374,6 +392,7 @@ async fn pipe_terminate(
 
     debug!(%hostname, "TLS terminated");
     write_hostname_header(&mut send_stream, hostname).await?;
+    write_client_addrs(&mut send_stream, client_addrs).await?;
 
     let c2a = async {
         let res = tokio::io::copy(&mut tls_read, &mut send_stream).await;

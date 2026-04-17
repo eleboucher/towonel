@@ -25,6 +25,7 @@ ciborium = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
+ppp = { workspace = true }
 
 [lints]
 workspace = true

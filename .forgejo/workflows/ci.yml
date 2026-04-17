@@ -22,7 +22,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.94.0"
+          toolchain: "1.95.0"
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -32,7 +32,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.94.0"
+          toolchain: "1.95.0"
           components: clippy
       # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
       - uses: https://github.com/Swatinem/rust-cache@469cb0e24707e1f169c4501c23d77da83a83fce8
@@ -46,7 +46,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.94.0"
+          toolchain: "1.95.0"
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -62,7 +62,7 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
-          toolchain: "1.94.0"
+          toolchain: "1.95.0"
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-deny

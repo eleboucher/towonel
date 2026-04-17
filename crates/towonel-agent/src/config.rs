@@ -24,6 +24,18 @@ pub struct IdentityConfig {
     pub key_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyProtocol {
+    /// Do not prepend any PROXY header.
+    None,
+    /// Prepend `HAProxy` PROXY v2 header to the origin stream.
+    #[default]
+    V2,
+}
+
+/// A service the agent exposes. The edge routes to it by SNI-matching
+/// `hostname` on its TLS listeners.
 #[derive(Debug, Deserialize)]
 pub struct ServiceConfig {
     /// The hostname this service handles (SNI match at the edge).
@@ -37,11 +49,15 @@ pub struct ServiceConfig {
     #[serde(default)]
     pub origin_server_name: Option<String>,
     /// How the edge should handle TLS for this hostname. Defaults to
-    /// passthrough — the agent/origin terminates. Set to `terminate` to have
-    /// the edge handshake and forward plaintext. The agent pushes this to
-    /// the hub on startup as a `SetHostnameTls` config entry.
+    /// passthrough — the agent/origin terminates. Set to `terminate` to
+    /// have the edge handshake and forward plaintext.
     #[serde(default)]
     pub tls_mode: towonel_common::tls_policy::TlsMode,
+    /// PROXY protocol header prepended to the origin connection. Use
+    /// `v2` when the origin is a TCP load balancer like Envoy Gateway
+    /// configured with `ClientTrafficPolicy.proxyProtocol`.
+    #[serde(default)]
+    pub proxy_protocol: ProxyProtocol,
 }
 
 /// Fully resolved agent settings after merging `agent.toml` and `state.toml`.
@@ -126,9 +142,13 @@ mod tests {
     }
 
     #[test]
-    fn services_json_without_tls_mode_defaults_passthrough() {
-        let json = r#"[{"hostname":"app.example.eu","origin":"127.0.0.1:8080"}]"#;
+    fn services_json_parses_proxy_protocol() {
+        let json = r#"[
+            {"hostname":"app.a","origin":"127.0.0.1:80","proxy_protocol":"none"},
+            {"hostname":"app.b","origin":"127.0.0.1:80"}
+        ]"#;
         let services: Vec<ServiceConfig> = serde_json::from_str(json).unwrap();
-        assert_eq!(services[0].tls_mode, TlsMode::Passthrough);
+        assert_eq!(services[0].proxy_protocol, ProxyProtocol::None);
+        assert_eq!(services[1].proxy_protocol, ProxyProtocol::V2);
     }
 }

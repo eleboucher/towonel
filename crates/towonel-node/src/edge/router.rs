@@ -9,9 +9,6 @@ use towonel_common::identity::AgentId;
 use towonel_common::routing::RouteTable;
 use towonel_common::tls_policy::{TlsMode, TlsPolicyTable};
 
-// Static TOML tenants only carry hostname ownership; TLS mode is published
-// by the agent via `SetHostnameTls` and arrives through the route broadcast.
-
 use crate::config::TenantEntry;
 
 /// Thin adapter around [`RouteTable`] that provides async-safe access and
@@ -111,22 +108,24 @@ impl Router {
     /// in the returned [`EndpointAddr`] so the edge can connect without relay.
     pub async fn lookup(&self, hostname: &str) -> Option<Vec<EndpointAddr>> {
         let table = self.table.read().await;
-        table.lookup(hostname).and_then(|agents| {
-            let addrs: Vec<EndpointAddr> = agents
-                .iter()
-                .filter_map(|aid| {
-                    let eid = EndpointId::from_bytes(aid.as_bytes()).ok()?;
-                    let mut addr = EndpointAddr::new(eid);
-                    if let Some(sockets) = self.direct_addrs.get(aid) {
-                        for sock in sockets {
-                            addr = addr.with_ip_addr(*sock);
-                        }
+        self.agents_to_addrs(table.lookup(hostname)?)
+    }
+
+    fn agents_to_addrs(&self, agents: &HashSet<AgentId>) -> Option<Vec<EndpointAddr>> {
+        let addrs: Vec<EndpointAddr> = agents
+            .iter()
+            .filter_map(|aid| {
+                let eid = EndpointId::from_bytes(aid.as_bytes()).ok()?;
+                let mut addr = EndpointAddr::new(eid);
+                if let Some(sockets) = self.direct_addrs.get(aid) {
+                    for sock in sockets {
+                        addr = addr.with_ip_addr(*sock);
                     }
-                    Some(addr)
-                })
-                .collect();
-            if addrs.is_empty() { None } else { Some(addrs) }
-        })
+                }
+                Some(addr)
+            })
+            .collect();
+        (!addrs.is_empty()).then_some(addrs)
     }
 }
 

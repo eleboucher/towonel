@@ -394,6 +394,14 @@ Write a small HTTP handler that receives this and calls your DNS provider (Cloud
 | `DELETE` | `/v1/tenants/{id}` | operator | Remove tenant |
 | `GET` | `/v1/dns/records` | operator | Active hostnames + edge addresses |
 
+## Roadmap
+
+- [ ] **`towonel-access` client** for non-HTTPS protocols (SSH, Postgres, RDP).
+  Wraps raw TCP in a TLS connection to the edge with `SNI=target-hostname`,
+  the same way `cloudflared access` does. Lets multiple tenants share a
+  single listener port (e.g. 2222) since routing stays SNI-based. Without
+  this, SSH through the tunnel needs a per-tenant port exposed elsewhere.
+
 ## Contributing
 
 ```bash

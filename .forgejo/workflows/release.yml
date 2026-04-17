@@ -22,10 +22,11 @@ jobs:
       - name: Setup Rust
         uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: Run GoReleaser
-        run: curl -sfL https://goreleaser.com/static/run | VERSION=v2.15.2 bash -s -- release --clean
+        run: curl -sfL https://goreleaser.com/static/run | VERSION=v2.15.2 bash -s --
+          release --clean
         env:
           GORELEASER_FORCE_TOKEN: gitea
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}

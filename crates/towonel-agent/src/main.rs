@@ -211,15 +211,15 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     ) {
         (Some(hub_url), Some(tenant_key_path)) if !resolved.services.is_empty() => {
             #[allow(clippy::large_futures)]
-            let publish_result =
+            let publish_tls_result =
                 publish_tls::publish(hub_url, tenant_key_path, &resolved.services).await;
-            if let Err(e) = publish_result {
-                warn!(error = %e, "TLS policy publish failed; edge will use passthrough defaults");
+            if let Err(e) = publish_tls_result {
+                warn!(error = %e, "TLS policy publish_tls failed; edge will use passthrough defaults");
             }
         }
         _ => {
             info!(
-                "skipping TLS policy publish (hub URL or tenant key missing; run \
+                "skipping TLS policy publish_tls (hub URL or tenant key missing; run \
                  `towonel-agent init` to bootstrap)"
             );
         }

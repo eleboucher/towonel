@@ -4,17 +4,33 @@ use std::time::Instant;
 
 use anyhow::Context;
 use iroh::EndpointId;
-use tokio::io::{self, AsyncWriteExt};
+use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{Instrument, info, info_span, warn};
 
-use towonel_common::tunnel::read_hostname_header;
+use towonel_common::tunnel::{ClientAddrs, read_client_addrs, read_hostname_header};
 
-use crate::config::ServiceConfig;
+use crate::config::{ProxyProtocol, ServiceConfig};
+
+mod proxy_protocol;
+
+async fn write_proxy_header(
+    stream: &mut (impl AsyncWrite + Unpin),
+    mode: ProxyProtocol,
+    addrs: ClientAddrs,
+) -> anyhow::Result<()> {
+    if mode != ProxyProtocol::V2 {
+        return Ok(());
+    }
+    let bytes = proxy_protocol::encode_v2(addrs)?;
+    stream.write_all(&bytes).await?;
+    Ok(())
+}
 
 struct OriginTarget {
     address: String,
     server_name: Option<String>,
+    proxy_protocol: ProxyProtocol,
 }
 
 pub struct ServiceMap {
@@ -33,6 +49,7 @@ impl ServiceMap {
                 OriginTarget {
                     address: svc.origin.clone(),
                     server_name: svc.origin_server_name.clone(),
+                    proxy_protocol: svc.proxy_protocol,
                 },
             );
         }
@@ -152,6 +169,10 @@ async fn handle_stream(
         .await
         .context("failed to read hostname header")?;
 
+    let client_addrs = read_client_addrs(&mut quic_recv)
+        .await
+        .context("failed to read client-addrs header")?;
+
     let target = service_map
         .lookup(&hostname)
         .ok_or_else(|| anyhow::anyhow!("no service configured for hostname {hostname}"))?;
@@ -160,6 +181,7 @@ async fn handle_stream(
         %hostname,
         origin = %target.address,
         edge = %edge_id.fmt_short(),
+        client = ?client_addrs.src,
     );
 
     async {
@@ -175,12 +197,23 @@ async fn handle_stream(
                     tcp_stream,
                     sni,
                     Arc::clone(&service_map.tls_config),
+                    target.proxy_protocol,
+                    client_addrs,
                     &mut quic_recv,
                     &mut quic_send,
                 )
                 .await
             }
-            None => forward_plain(tcp_stream, &mut quic_recv, &mut quic_send).await,
+            None => {
+                forward_plain(
+                    tcp_stream,
+                    target.proxy_protocol,
+                    client_addrs,
+                    &mut quic_recv,
+                    &mut quic_send,
+                )
+                .await
+            }
         }?;
 
         // truncation is intentional: streams won't last 584 million years
@@ -195,10 +228,14 @@ async fn handle_stream(
 
 async fn forward_plain(
     origin: TcpStream,
+    proxy: ProxyProtocol,
+    addrs: ClientAddrs,
     quic_recv: &mut iroh::endpoint::RecvStream,
     quic_send: &mut iroh::endpoint::SendStream,
 ) -> anyhow::Result<()> {
     let (mut origin_read, mut origin_write) = origin.into_split();
+
+    write_proxy_header(&mut origin_write, proxy, addrs).await?;
 
     let q2o = async {
         let res = io::copy(quic_recv, &mut origin_write).await;
@@ -222,12 +259,18 @@ async fn forward_plain(
 }
 
 async fn forward_tls(
-    origin: TcpStream,
+    mut origin: TcpStream,
     server_name: &str,
     tls_config: Arc<rustls::ClientConfig>,
+    proxy: ProxyProtocol,
+    addrs: ClientAddrs,
     quic_recv: &mut iroh::endpoint::RecvStream,
     quic_send: &mut iroh::endpoint::SendStream,
 ) -> anyhow::Result<()> {
+    // PROXY v2 must precede the TLS ClientHello so the origin's TLS layer
+    // sees a normal handshake after consuming the header.
+    write_proxy_header(&mut origin, proxy, addrs).await?;
+
     let connector = tokio_rustls::TlsConnector::from(tls_config);
     let dns_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
         .map_err(|e| anyhow::anyhow!("invalid origin_server_name `{server_name}`: {e}"))?;
@@ -258,4 +301,36 @@ async fn forward_tls(
         warn!("origin(tls)->edge: {e}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v4_addrs() -> ClientAddrs {
+        ClientAddrs {
+            src: "203.0.113.7:54321".parse().unwrap(),
+            dst: "192.0.2.1:443".parse().unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_header_written_when_disabled() {
+        let mut buf = Vec::new();
+        write_proxy_header(&mut buf, ProxyProtocol::None, v4_addrs())
+            .await
+            .unwrap();
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn writes_v2_when_enabled() {
+        let mut buf = Vec::new();
+        write_proxy_header(&mut buf, ProxyProtocol::V2, v4_addrs())
+            .await
+            .unwrap();
+        let header = ppp::v2::Header::try_from(buf.as_slice()).unwrap();
+        assert_eq!(header.command, ppp::v2::Command::Proxy);
+        assert!(matches!(header.addresses, ppp::v2::Addresses::IPv4(_)));
+    }
 }
