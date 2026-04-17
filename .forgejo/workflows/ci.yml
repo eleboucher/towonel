@@ -35,7 +35,7 @@ jobs:
           toolchain: "1.94.0"
           components: clippy
       # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
-      - uses: https://github.com/Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: https://github.com/Swatinem/rust-cache@469cb0e24707e1f169c4501c23d77da83a83fce8
         with:
           shared-key: clippy
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -51,7 +51,7 @@ jobs:
         with:
           tool: cargo-nextest
       # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
-      - uses: https://github.com/Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: https://github.com/Swatinem/rust-cache@469cb0e24707e1f169c4501c23d77da83a83fce8
         with:
           shared-key: test
       - run: cargo nextest run --workspace --all-features --no-fail-fast
@@ -64,7 +64,7 @@ jobs:
         with:
           toolchain: "1.94.0"
       # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
-      - uses: https://github.com/Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4
+      - uses: https://github.com/Swatinem/rust-cache@469cb0e24707e1f169c4501c23d77da83a83fce8
         with:
           shared-key: doc
       - run: cargo doc --workspace --all-features --no-deps
