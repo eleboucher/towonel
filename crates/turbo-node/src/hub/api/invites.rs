@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 use turbo_common::identity::{PqPublicKey, TenantId};
 use turbo_common::invite::{InviteToken, hash_invite_secret};
+use zeroize::Zeroizing;
 
 use turbo_common::time::now_ms;
 
@@ -208,7 +209,7 @@ pub(super) async fn redeem_invite(
     let Some(invite_id) = parse_invite_id(&req.invite_id) else {
         return invalid_request("invite_id is not valid base64url");
     };
-    let Ok(invite_secret) = B64.decode(&req.invite_secret) else {
+    let Ok(invite_secret) = B64.decode(&req.invite_secret).map(Zeroizing::new) else {
         return invalid_request("invite_secret is not valid base64url");
     };
     let pq_public_key: PqPublicKey = match req.tenant_pq_public_key.parse() {

@@ -145,7 +145,7 @@ impl Hub {
             invite_lock: tokio::sync::Mutex::new(()),
             federation: api::FederationState {
                 trusted_peers: trusted_peers.clone(),
-                nonces: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+                nonces: federation::new_nonce_cache(),
             },
             dns_webhook_url: self.p.dns_webhook_url.clone(),
             prev_hostnames: RwLock::new(std::collections::HashSet::new()),

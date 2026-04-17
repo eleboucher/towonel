@@ -20,12 +20,21 @@ pub fn random_name() -> String {
     format!("{adj}-{animal}")
 }
 
+/// Uniform random index in `0..len` using rejection sampling to avoid the
+/// modulo bias of a naive `% len`.
 fn random_index(len: usize) -> usize {
-    let mut buf = [0u8; 8];
-    // OS RNG failure is unrecoverable at this layer.
-    #[allow(clippy::expect_used)]
-    {
-        getrandom::fill(&mut buf).expect("getrandom failed");
+    assert!(len > 0, "random_index requires len > 0");
+    let threshold = usize::MAX - (usize::MAX % len);
+    loop {
+        let mut buf = [0u8; 8];
+        // OS RNG failure is unrecoverable at this layer.
+        #[allow(clippy::expect_used)]
+        {
+            getrandom::fill(&mut buf).expect("getrandom failed");
+        }
+        let n = usize::from_ne_bytes(buf);
+        if n < threshold {
+            return n % len;
+        }
     }
-    usize::from_ne_bytes(buf) % len
 }

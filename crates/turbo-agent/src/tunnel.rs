@@ -19,6 +19,9 @@ struct OriginTarget {
 
 pub struct ServiceMap {
     services: HashMap<String, OriginTarget>,
+    /// Shared rustls client config for TLS-wrapped origin connections. Built
+    /// once at startup from the webpki roots and reused for every stream.
+    tls_config: Arc<rustls::ClientConfig>,
 }
 
 impl ServiceMap {
@@ -33,7 +36,19 @@ impl ServiceMap {
                 },
             );
         }
-        Self { services: map }
+
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let tls_config = Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth(),
+        );
+
+        Self {
+            services: map,
+            tls_config,
+        }
     }
 
     fn lookup(&self, hostname: &str) -> Option<&OriginTarget> {
@@ -155,7 +170,16 @@ async fn handle_stream(
             .with_context(|| format!("failed to connect to origin {}", target.address))?;
 
         match &target.server_name {
-            Some(sni) => forward_tls(tcp_stream, sni, &mut quic_recv, &mut quic_send).await,
+            Some(sni) => {
+                forward_tls(
+                    tcp_stream,
+                    sni,
+                    Arc::clone(&service_map.tls_config),
+                    &mut quic_recv,
+                    &mut quic_send,
+                )
+                .await
+            }
             None => forward_plain(tcp_stream, &mut quic_recv, &mut quic_send).await,
         }?;
 
@@ -200,17 +224,11 @@ async fn forward_plain(
 async fn forward_tls(
     origin: TcpStream,
     server_name: &str,
+    tls_config: Arc<rustls::ClientConfig>,
     quic_recv: &mut iroh::endpoint::RecvStream,
     quic_send: &mut iroh::endpoint::SendStream,
 ) -> anyhow::Result<()> {
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(tls_config));
+    let connector = tokio_rustls::TlsConnector::from(tls_config);
     let dns_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
         .map_err(|e| anyhow::anyhow!("invalid origin_server_name `{server_name}`: {e}"))?;
 

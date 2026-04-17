@@ -7,6 +7,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use turbo_common::invite::{EdgeInviteToken, hash_invite_secret};
+use zeroize::Zeroizing;
 
 use turbo_common::time::now_ms;
 
@@ -149,7 +150,7 @@ pub(super) async fn redeem_edge_invite(
     let Some(invite_id) = parse_invite_id(&req.invite_id) else {
         return invalid_request("invite_id is not valid base64url");
     };
-    let Ok(invite_secret) = B64.decode(&req.invite_secret) else {
+    let Ok(invite_secret) = B64.decode(&req.invite_secret).map(Zeroizing::new) else {
         return invalid_request("invite_secret is not valid base64url");
     };
     let edge_node_id: [u8; 32] = match hex::decode(&req.edge_node_id)

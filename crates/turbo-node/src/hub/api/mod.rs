@@ -60,7 +60,8 @@ pub struct FederationState {
     /// iroh `node_ids` of configured federation peers.
     pub trusted_peers: super::federation::TrustedPeerSet,
     /// Nonce cache for federation auth: prevents within-window replay.
-    pub nonces: Mutex<std::collections::HashSet<([u8; 32], u64)>>,
+    /// Bounded size + TTL eviction via moka.
+    pub nonces: super::federation::NonceCache,
 }
 
 /// Broadcast `table` to edges and fire the DNS webhook if hostnames changed.

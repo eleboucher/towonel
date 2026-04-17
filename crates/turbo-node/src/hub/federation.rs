@@ -23,10 +23,26 @@ use super::db::FederatedTenant;
 const FEDERATION_AUTH_DOMAIN: &str = "turbo-tunnel/federation/v1";
 /// Same ±60s window we use for edge subscriber auth.
 const FEDERATION_MAX_CLOCK_SKEW_MS: u64 = 60_000;
+/// Cap on concurrently remembered (`node_id`, timestamp) pairs. Entries expire
+/// naturally via TTL — this cap only matters under extreme traffic.
+const MAX_NONCE_ENTRIES: u64 = 10_000;
 
 /// Set of iroh `node_ids` we've discovered for our configured peers. Inbound
 /// federation pushes whose signing key isn't in here get rejected.
 pub type TrustedPeerSet = Arc<RwLock<HashSet<[u8; 32]>>>;
+
+/// Nonce replay-protection cache. Keyed by (`node_id`, `ts_ms`); values are
+/// unit. TTL is 2× the clock-skew window so any in-window retry is caught.
+pub type NonceCache = moka::future::Cache<([u8; 32], u64), ()>;
+
+/// Construct an empty `NonceCache` with the cap and TTL used by federation auth.
+#[must_use]
+pub fn new_nonce_cache() -> NonceCache {
+    moka::future::Cache::builder()
+        .max_capacity(MAX_NONCE_ENTRIES)
+        .time_to_live(Duration::from_millis(FEDERATION_MAX_CLOCK_SKEW_MS * 2))
+        .build()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenantPush {
@@ -62,18 +78,16 @@ async fn authenticate_peer(
         return Err("signing node_id is not a configured federation peer");
     }
 
-    {
-        const MAX_NONCE_ENTRIES: usize = 10_000;
-        let now = now_ms();
-        let evict_before = now.saturating_sub(FEDERATION_MAX_CLOCK_SKEW_MS * 2);
-        let mut nonces = state.federation.nonces.lock().await;
-        nonces.retain(|&(_, ts)| ts > evict_before);
-        if nonces.len() >= MAX_NONCE_ENTRIES {
-            return Err("nonce cache full — too many requests in window");
-        }
-        if !nonces.insert((node_id_bytes, ts_ms)) {
-            return Err("replayed (node_id, timestamp) pair");
-        }
+    let key = (node_id_bytes, ts_ms);
+    let inserted = state
+        .federation
+        .nonces
+        .entry(key)
+        .or_insert_with(async {})
+        .await
+        .is_fresh();
+    if !inserted {
+        return Err("replayed (node_id, timestamp) pair");
     }
 
     Ok(node_id_bytes)
@@ -209,7 +223,7 @@ pub async fn push_entry(
 
     let sequence = payload.sequence;
     if let Err(e) = state.db.insert(&entry, sequence).await {
-        if e.to_string().contains("UNIQUE constraint") {
+        if super::db::is_unique_violation(&e) {
             return ok();
         }
         warn!(error = %e, "federation: failed to insert entry");

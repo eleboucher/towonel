@@ -378,11 +378,11 @@ pub struct AgentKeypair(SigningKey);
 impl AgentKeypair {
     #[must_use]
     pub fn generate() -> Self {
-        let mut bytes = [0u8; 32];
+        let mut bytes = Zeroizing::new([0u8; 32]);
         // OS RNG failure is unrecoverable at this layer.
         #[allow(clippy::expect_used)]
         {
-            getrandom::fill(&mut bytes).expect("OS RNG failed");
+            getrandom::fill(bytes.as_mut()).expect("OS RNG failed");
         }
         Self(SigningKey::from_bytes(&bytes))
     }

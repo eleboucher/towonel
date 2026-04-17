@@ -41,6 +41,8 @@ rustls-pemfile = { workspace = true }
 instant-acme = { workspace = true }
 rcgen = { workspace = true }
 arc-swap = { workspace = true }
+moka = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 

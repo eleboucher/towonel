@@ -48,7 +48,7 @@ impl TestHub {
             invite_lock: tokio::sync::Mutex::new(()),
             federation: super::api::FederationState {
                 trusted_peers: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
-                nonces: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+                nonces: super::federation::new_nonce_cache(),
             },
             dns_webhook_url: None,
             prev_hostnames: tokio::sync::RwLock::new(std::collections::HashSet::new()),

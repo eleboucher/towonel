@@ -76,7 +76,7 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
     let sequence = payload.sequence;
 
     if let Err(e) = state.db.insert(&entry, sequence).await {
-        if e.to_string().contains("UNIQUE constraint") {
+        if super::db::is_unique_violation(&e) {
             return sequence_conflict("sequence number already used by this tenant");
         }
         warn!(error = %e, "failed to insert entry");

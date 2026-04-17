@@ -122,20 +122,24 @@ impl Db {
         &self,
         candidates_lower: &[String],
     ) -> anyhow::Result<Option<String>> {
-        let rows = sqlx::query("SELECT hostnames_json FROM invites WHERE status = 'pending'")
-            .fetch_all(&self.pool)
-            .await?;
-        for row in &rows {
-            let json: String = row.get("hostnames_json");
-            let stored: Vec<String> = serde_json::from_str(&json)?;
-            for pending in stored {
-                let pending_lower = pending.to_lowercase();
-                if candidates_lower.contains(&pending_lower) {
-                    return Ok(Some(pending_lower));
-                }
-            }
+        if candidates_lower.is_empty() {
+            return Ok(None);
         }
-        Ok(None)
+        let candidates_json = serde_json::to_string(candidates_lower)?;
+        let matched: Option<String> = sqlx::query_scalar(
+            "SELECT c.value \
+             FROM json_each($1) AS c \
+             WHERE EXISTS ( \
+                 SELECT 1 FROM invites, json_each(invites.hostnames_json) AS je \
+                 WHERE invites.status = 'pending' \
+                   AND lower(je.value) = c.value \
+             ) \
+             LIMIT 1",
+        )
+        .bind(&candidates_json)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(matched)
     }
 
     /// Record an operator decision to remove a tenant from service.

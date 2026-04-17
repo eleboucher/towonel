@@ -17,6 +17,16 @@ use turbo_common::identity::TenantId;
 /// applied, so a shipped migration cannot be edited in place.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Returns true when `e` wraps a `sqlx` UNIQUE-constraint violation.
+/// Used by handlers to map duplicate-sequence inserts to 409 / idempotent OK.
+pub fn is_unique_violation(e: &anyhow::Error) -> bool {
+    if let Some(sqlx::Error::Database(db)) = e.downcast_ref::<sqlx::Error>() {
+        db.is_unique_violation()
+    } else {
+        false
+    }
+}
+
 /// `SQLite` storage layer for signed config entries.
 pub struct Db {
     pool: sqlx::SqlitePool,
