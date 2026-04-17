@@ -3,6 +3,7 @@ pub mod edges;
 pub mod entries;
 pub mod federated_tenant_hostnames;
 pub mod federated_tenants;
+pub mod federation_push_state;
 pub mod invite_hostnames;
 pub mod invites;
 pub mod tenant_removals;

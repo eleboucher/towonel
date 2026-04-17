@@ -148,11 +148,13 @@ pub struct HubConfig {
     /// URL so tenants can resolve it.
     #[serde(default)]
     pub public_url: Option<String>,
-    /// Peer hubs for federation (option A — bidirectional HTTPS replication).
-    /// Each peer's iroh `node_id` authenticates inbound federation pushes; its
-    /// URL is where this hub pushes its own state.
+    /// Peer hub URLs for federation (option A — bidirectional HTTPS
+    /// replication). Each peer's iroh `node_id` is discovered at boot by
+    /// querying `GET /v1/health`; the URL is where this hub pushes its own
+    /// state. TOML: `peer_urls = ["https://hub-b.example.eu:8443"]`.
+    /// Env: `TURBO_HUB__PEER_URLS=https://a,https://b` (CSV or JSON).
     #[serde(default)]
-    pub peers: Vec<PeerConfig>,
+    pub peer_urls: Vec<String>,
     #[serde(default)]
     pub federation: FederationConfig,
     /// Optional webhook URL for DNS automation. When set, the hub POSTs a
@@ -196,19 +198,6 @@ impl FederationConfig {
 }
 
 const SYNC_OP_INVITE_REDEEM: &str = "invite_redeem";
-
-/// A federation peer: a remote hub that mirrors this hub's state.
-///
-/// The peer's iroh `node_id` is **not** configured by the operator — the
-/// hub discovers it on boot by querying the peer's `GET /v1/health`. This
-/// turns peering into a one-line config: just the URL. If the peer's
-/// `node_id` later changes (key rotation), federation rejects and the
-/// operator gets a clear error.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PeerConfig {
-    /// Base URL of the peer hub (e.g. `"https://hub-b.example.eu:8443"`).
-    pub url: String,
-}
 
 /// Edge-mode settings.
 #[derive(Debug, Deserialize)]
@@ -311,7 +300,7 @@ impl Default for HubConfig {
             listen_addr: default_hub_listen(),
             operator_api_key_path: default_operator_key_path(),
             public_url: None,
-            peers: Vec::new(),
+            peer_urls: Vec::new(),
             federation: FederationConfig::default(),
             dns_webhook_url: None,
         }
@@ -331,67 +320,99 @@ impl Default for EdgeConfig {
     }
 }
 
+/// String-list env vars that figment can't natively parse because the
+/// prefixed-env provider treats every value as a scalar. Each entry names
+/// both the env var and where to assign the result on [`NodeConfig`].
+const STRING_LIST_ENVS: &[(&str, fn(&mut NodeConfig, Vec<String>))] = &[
+    ("TURBO_EDGE__PUBLIC_ADDRESSES", |c, v| {
+        c.edge.public_addresses = v;
+    }),
+    ("TURBO_EDGE__HUB_URLS", |c, v| c.edge.hub_urls = v),
+    ("TURBO_HUB__PEER_URLS", |c, v| c.hub.peer_urls = v),
+];
+
+/// Parse a list-valued env var. Accepts JSON (`["a","b"]`) for backwards
+/// compat and CSV (`a,b,c`) for Kubernetes-friendly YAML. Empty strings and
+/// whitespace around commas are ignored.
+fn parse_list_env(value: &str) -> anyhow::Result<Vec<String>> {
+    let trimmed = value.trim();
+    if trimmed.starts_with('[') {
+        return serde_json::from_str(trimmed).map_err(Into::into);
+    }
+    Ok(trimmed
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+fn require_https(url: &str, context: &str) -> anyhow::Result<()> {
+    if !url.starts_with("https://") {
+        anyhow::bail!("{context} must use https://: got {url:?}");
+    }
+    Ok(())
+}
+
 impl NodeConfig {
-    /// Load config from TOML, then layer `TURBO_*` env-var overrides on
-    /// top. Section/field separator in env-var names is `__` (double
-    /// underscore), so single-underscore field names like `listen_addr`
-    /// stay readable. Examples:
+    /// Load config from TOML (optional — missing file is fine for env-only
+    /// deployments like Kubernetes), then layer `TURBO_*` env-var overrides
+    /// on top. Section/field separator is `__` so single-underscore field
+    /// names like `listen_addr` stay readable:
     ///
     /// ```text
-    /// TURBO_HUB__LISTEN_ADDR=0.0.0.0:8443
-    /// TURBO_HUB__OPERATOR_API_KEY_PATH=/run/secrets/operator.key
-    /// TURBO_HUB__PEERS='[{"url":"https://hub-b.example.eu:8443"}]'
-    /// TURBO_EDGE__HUB_URLS='["https://hub-a.example.eu:8443","https://hub-b.example.eu:8443"]'
     /// TURBO_IDENTITY__KEY_PATH=/var/lib/turbo-tunnel/node.key
+    /// TURBO_HUB__LISTEN_ADDR=0.0.0.0:8443
+    /// TURBO_HUB__DATABASE__DRIVER=postgres
+    /// TURBO_HUB__DATABASE__DSN=postgresql://...
+    /// # String lists: CSV (preferred in K8s) or JSON.
+    /// TURBO_HUB__PEER_URLS=https://hub-b.example.eu:8443,https://hub-c.example.eu:8443
+    /// TURBO_EDGE__HUB_URLS=https://hub-a.example.eu:8443
+    /// # Complex structured lists: JSON only.
+    /// TURBO_TENANTS='[{"name":"alice","hostnames":["app.alice.test"],...}]'
     /// ```
-    ///
-    /// Lists (`peers`, `tenants`, `hub_urls`) take JSON in a single env var.
-    /// Scalar fields take their natural string form.
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         use figment::Figment;
         use figment::providers::{Env, Format, Toml};
-        let json_keys = [
-            "edge.public_addresses",
-            "edge.hub_urls",
-            "hub.peers",
-            "tenants",
-        ];
+
+        let list_env_names: Vec<&str> = STRING_LIST_ENVS.iter().map(|(name, _)| *name).collect();
+        let figment_filter_keys: Vec<String> = list_env_names
+            .iter()
+            .chain(&["TURBO_TENANTS"])
+            .map(|name| {
+                name.trim_start_matches("TURBO_")
+                    .to_lowercase()
+                    .replace("__", ".")
+            })
+            .collect();
+
         let mut config: Self = Figment::new()
             .merge(Toml::file(path))
             .merge(
                 Env::prefixed("TURBO_")
                     .split("__")
-                    .filter(move |key| !json_keys.contains(&key.as_str())),
+                    .filter(move |key| !figment_filter_keys.contains(&key.to_string())),
             )
             .extract()
             .map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?;
 
-        if let Ok(v) = std::env::var("TURBO_EDGE__PUBLIC_ADDRESSES") {
-            config.edge.public_addresses = serde_json::from_str(&v)?;
-        }
-        if let Ok(v) = std::env::var("TURBO_HUB__PEERS") {
-            config.hub.peers = serde_json::from_str(&v)?;
-        }
-
-        if let Ok(v) = std::env::var("TURBO_EDGE__HUB_URLS") {
-            config.edge.hub_urls = serde_json::from_str(&v)?;
-        }
-
-        for peer in &config.hub.peers {
-            if !peer.url.starts_with("https://") {
-                anyhow::bail!("federation peer URL must use https://: got {:?}", peer.url);
+        for (name, setter) in STRING_LIST_ENVS {
+            if let Ok(v) = std::env::var(name) {
+                setter(&mut config, parse_list_env(&v)?);
             }
+        }
+        if let Ok(v) = std::env::var("TURBO_TENANTS") {
+            config.tenants = serde_json::from_str(&v)?;
+        }
+
+        for url in &config.hub.peer_urls {
+            require_https(url, "federation peer URL")?;
         }
         for url in &config.edge.hub_urls {
-            if !url.starts_with("https://") {
-                anyhow::bail!("hub_urls entry must use https://: got {url:?}");
-            }
+            require_https(url, "hub_urls entry")?;
         }
-
-        if let Some(ref url) = config.hub.dns_webhook_url
-            && !url.starts_with("https://")
-        {
-            anyhow::bail!("dns_webhook_url must use https://: got {url:?}");
+        if let Some(url) = &config.hub.dns_webhook_url {
+            require_https(url, "dns_webhook_url")?;
         }
 
         config.hub.federation.validate()?;
@@ -464,5 +485,42 @@ mod tests {
         };
         let err = cfg.validate().expect_err("unknown op must be rejected");
         assert!(err.to_string().contains("delete_tenant"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn parse_list_env_accepts_csv() {
+        let out =
+            parse_list_env("https://a.example.eu, https://b.example.eu , https://c.example.eu")
+                .expect("csv parses");
+        assert_eq!(
+            out,
+            vec![
+                "https://a.example.eu".to_string(),
+                "https://b.example.eu".to_string(),
+                "https://c.example.eu".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn parse_list_env_accepts_json() {
+        let out = parse_list_env(r#"["https://a.example.eu","https://b.example.eu"]"#)
+            .expect("json parses");
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], "https://a.example.eu");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn parse_list_env_ignores_empty_csv_entries() {
+        let out = parse_list_env(",a,,b,").expect("csv parses");
+        assert_eq!(out, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn parse_list_env_empty_string_is_empty_list() {
+        assert!(parse_list_env("").unwrap_or_default().is_empty());
     }
 }

@@ -31,10 +31,8 @@ pub fn verify_signature_header(
     let ts_str = parts.next().ok_or("missing timestamp segment")?;
     let sig_b64 = parts.next().ok_or("missing signature segment")?;
 
-    let node_id_bytes: [u8; 32] = hex::decode(node_id_hex)
-        .map_err(|_| "node_id is not hex")?
-        .try_into()
-        .map_err(|_| "node_id must be 32 bytes")?;
+    let node_id_bytes: [u8; 32] =
+        hex::FromHex::from_hex(node_id_hex).map_err(|_| "node_id is not 32 hex bytes")?;
 
     let ts_ms: u64 = ts_str.parse().map_err(|_| "timestamp is not a u64")?;
     if now_ms().abs_diff(ts_ms) > max_skew_ms {

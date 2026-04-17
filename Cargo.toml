@@ -108,3 +108,5 @@ webpki-roots = "0.26"
 arc-swap = "1.7"
 # Bounded TTL cache for federation nonce replay protection.
 moka = { version = "0.12", features = ["future"] }
+# Exponential backoff with jitter (ACME retry, peer bootstrap).
+backon = "1"

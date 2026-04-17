@@ -155,12 +155,9 @@ pub(super) async fn redeem_edge_invite(
     let Ok(invite_secret) = B64.decode(&req.invite_secret).map(Zeroizing::new) else {
         return invalid_request("invite_secret is not valid base64url");
     };
-    let edge_node_id: [u8; 32] = match hex::decode(&req.edge_node_id)
-        .ok()
-        .and_then(|bytes| bytes.try_into().ok())
-    {
-        Some(arr) => arr,
-        None => return invalid_request("edge_node_id must be 64 hex chars (32 bytes)"),
+    let edge_node_id: [u8; 32] = match hex::FromHex::from_hex(&req.edge_node_id) {
+        Ok(arr) => arr,
+        Err(_) => return invalid_request("edge_node_id must be 64 hex chars (32 bytes)"),
     };
 
     let invite = match state.db.get_edge_invite(&invite_id).await {

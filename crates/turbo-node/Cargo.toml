@@ -47,6 +47,7 @@ rcgen = { workspace = true }
 arc-swap = { workspace = true }
 moka = { workspace = true }
 zeroize = { workspace = true }
+backon = { workspace = true }
 
 [dev-dependencies]
 

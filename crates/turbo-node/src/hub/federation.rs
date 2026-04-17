@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -93,14 +93,6 @@ async fn authenticate_peer(
     Ok(node_id_bytes)
 }
 
-fn invalid(msg: impl Into<String>) -> Response {
-    invalid_request(msg)
-}
-
-fn internal() -> Response {
-    internal_error()
-}
-
 fn ok() -> Response {
     json_ok(serde_json::json!({"status": "ok"}))
 }
@@ -118,17 +110,17 @@ pub async fn push_tenant(
 
     let tenant_id: TenantId = match req.tenant_id.parse() {
         Ok(t) => t,
-        Err(e) => return invalid(format!("tenant_id: {e}")),
+        Err(e) => return invalid_request(format!("tenant_id: {e}")),
     };
     let pq_public_key: PqPublicKey = match req.pq_public_key.parse() {
         Ok(p) => p,
-        Err(e) => return invalid(format!("pq_public_key: {e}")),
+        Err(e) => return invalid_request(format!("pq_public_key: {e}")),
     };
     if TenantId::derive(&pq_public_key) != tenant_id {
-        return invalid("tenant_id does not equal sha256(pq_public_key)");
+        return invalid_request("tenant_id does not equal sha256(pq_public_key)");
     }
     if req.hostnames.is_empty() {
-        return invalid("at least one hostname required");
+        return invalid_request("at least one hostname required");
     }
 
     let federated = FederatedTenant {
@@ -140,7 +132,7 @@ pub async fn push_tenant(
 
     if let Err(e) = state.db.insert_federated_tenant(&federated, &peer).await {
         warn!(error = %e, "federation: failed to insert tenant");
-        return internal();
+        return internal_error();
     }
 
     {
@@ -175,12 +167,12 @@ pub async fn push_removal(
 
     let tenant_id: TenantId = match req.tenant_id.parse() {
         Ok(t) => t,
-        Err(e) => return invalid(format!("tenant_id: {e}")),
+        Err(e) => return invalid_request(format!("tenant_id: {e}")),
     };
 
     if let Err(e) = state.db.remove_tenant(&tenant_id, req.removed_at_ms).await {
         warn!(error = %e, "federation: failed to record removal");
-        return internal();
+        return internal_error();
     }
     {
         let mut policy = state.policy.write().await;
@@ -205,19 +197,19 @@ pub async fn push_entry(
 
     let entry: SignedConfigEntry = match ciborium::from_reader(body.as_ref()) {
         Ok(e) => e,
-        Err(e) => return invalid(format!("invalid CBOR body: {e}")),
+        Err(e) => return invalid_request(format!("invalid CBOR body: {e}")),
     };
 
     let policy = state.policy.read().await;
     let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
-        return invalid("entry references an unknown tenant; push tenant first");
+        return invalid_request("entry references an unknown tenant; push tenant first");
     };
     let payload = match entry.verify(pq_pubkey) {
         Ok(p) => p,
-        Err(e) => return invalid(format!("signature: {e}")),
+        Err(e) => return invalid_request(format!("signature: {e}")),
     };
     if payload.version != 1 {
-        return invalid(format!("unsupported payload version {}", payload.version));
+        return invalid_request(format!("unsupported payload version {}", payload.version));
     }
     drop(policy);
 
@@ -227,7 +219,7 @@ pub async fn push_entry(
             return ok();
         }
         warn!(error = %e, "federation: failed to insert entry");
-        return internal();
+        return internal_error();
     }
     info!(
         peer = %hex::encode(peer),
@@ -257,37 +249,22 @@ pub async fn run_peer(
     peer_url: String,
     secret_key: iroh::SecretKey,
     state: Arc<AppState>,
-    trusted_peers: TrustedPeerSet,
 ) -> anyhow::Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    let peer_node_id = bootstrap_peer(&client, &peer_url, &trusted_peers).await;
+    let peer_node_id = bootstrap_peer(&client, &peer_url, &state.federation.trusted_peers).await;
     info!(
         peer = %peer_url,
         node_id = %hex::encode(peer_node_id),
         "federation: peer bootstrapped"
     );
 
-    let mut sent_tenants: HashSet<TenantId> = HashSet::new();
-    let mut sent_removals: HashSet<TenantId> = HashSet::new();
-    let mut sent_seq: HashMap<TenantId, u64> = HashMap::new();
-
     let mut interval = tokio::time::interval(Duration::from_secs(15));
     loop {
         interval.tick().await;
-        if let Err(e) = push_round(
-            &client,
-            &peer_url,
-            &secret_key,
-            &state,
-            &mut sent_tenants,
-            &mut sent_removals,
-            &mut sent_seq,
-        )
-        .await
-        {
+        if let Err(e) = push_round(&client, &peer_url, &peer_node_id, &secret_key, &state).await {
             warn!(peer = %peer_url, error = %e, "federation: push round failed");
         }
     }
@@ -329,10 +306,8 @@ async fn fetch_node_id(client: &reqwest::Client, health_url: &str) -> anyhow::Re
         .error_for_status()?
         .json()
         .await?;
-    let bytes = hex::decode(&resp.node_id)?;
-    bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("peer node_id is not 32 bytes"))
+    hex::FromHex::from_hex(&resp.node_id)
+        .map_err(|e| anyhow::anyhow!("peer node_id is not 32 hex bytes: {e}"))
 }
 
 // Held read-guard covers the entire entries loop to avoid repeated lock/clone.
@@ -342,12 +317,16 @@ async fn fetch_node_id(client: &reqwest::Client, health_url: &str) -> anyhow::Re
 pub async fn push_round(
     client: &reqwest::Client,
     peer_url: &str,
+    peer_node_id: &[u8; 32],
     secret_key: &iroh::SecretKey,
     state: &AppState,
-    sent_tenants: &mut HashSet<TenantId>,
-    sent_removals: &mut HashSet<TenantId>,
-    sent_seq: &mut HashMap<TenantId, u64>,
 ) -> anyhow::Result<()> {
+    let super::db::FederationPushState {
+        tenants: sent_tenants,
+        removals: sent_removals,
+        entry_seq: sent_seq,
+    } = state.db.load_federation_push_state(peer_node_id).await?;
+
     for tenant in state.db.list_redeemed_tenants().await? {
         if sent_tenants.contains(&tenant.tenant_id) {
             continue;
@@ -366,7 +345,10 @@ pub async fn push_round(
             &body,
         )
         .await?;
-        sent_tenants.insert(tenant.tenant_id);
+        state
+            .db
+            .mark_federation_tenant_pushed(peer_node_id, &tenant.tenant_id)
+            .await?;
     }
 
     for tid in state.db.list_tenant_removals().await? {
@@ -385,26 +367,30 @@ pub async fn push_round(
             &body,
         )
         .await?;
-        sent_removals.insert(tid);
+        state
+            .db
+            .mark_federation_removal_pushed(peer_node_id, &tid)
+            .await?;
     }
 
-    let entries = state.db.get_all_entries().await?;
     let policy = state.policy.read().await;
-    for entry in entries {
+    for (entry, sequence) in state.db.list_entries_with_sequence().await? {
         let last_sent = sent_seq.get(&entry.tenant_id).copied().unwrap_or(0);
-        let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
+        if sequence <= last_sent {
             continue;
-        };
-        let Ok(payload) = entry.verify(pq_pubkey) else {
-            continue;
-        };
-        if payload.sequence <= last_sent {
+        }
+        // Skip entries whose tenant we no longer know locally — the peer
+        // would reject them with "unknown tenant" anyway.
+        if policy.pq_public_key(&entry.tenant_id).is_none() {
             continue;
         }
         let mut body = Vec::new();
         ciborium::into_writer(&entry, &mut body)?;
         post_signed_cbor(client, peer_url, "/v1/federation/entries", secret_key, body).await?;
-        sent_seq.insert(entry.tenant_id, payload.sequence);
+        state
+            .db
+            .mark_federation_entry_pushed(peer_node_id, &entry.tenant_id, sequence)
+            .await?;
     }
     Ok(())
 }
@@ -417,6 +403,31 @@ fn signed_auth_header(secret_key: &iroh::SecretKey) -> String {
     format!("Signature {node_id}.{ts}.{}", B64.encode(sig.to_bytes()))
 }
 
+fn peer_url_path(peer_url: &str, path: &str) -> String {
+    format!("{}{path}", peer_url.trim_end_matches('/'))
+}
+
+/// Send `request` with the federation signature header and bail on non-2xx.
+async fn send_signed(
+    request: reqwest::RequestBuilder,
+    secret_key: &iroh::SecretKey,
+    url: &str,
+) -> anyhow::Result<()> {
+    let resp = request
+        .header(
+            reqwest::header::AUTHORIZATION,
+            signed_auth_header(secret_key),
+        )
+        .send()
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("POST {url} returned {status}: {body}");
+    }
+    Ok(())
+}
+
 // T is not required to be Sync because we only pass &T to json().
 #[allow(clippy::future_not_send)]
 async fn post_signed<T: Serialize>(
@@ -426,22 +437,8 @@ async fn post_signed<T: Serialize>(
     secret_key: &iroh::SecretKey,
     body: &T,
 ) -> anyhow::Result<()> {
-    let url = format!("{}{path}", peer_url.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            signed_auth_header(secret_key),
-        )
-        .json(body)
-        .send()
-        .await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("POST {url} returned {status}: {body}");
-    }
-    Ok(())
+    let url = peer_url_path(peer_url, path);
+    send_signed(client.post(&url).json(body), secret_key, &url).await
 }
 
 const SYNC_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -484,24 +481,13 @@ async fn post_signed_cbor(
     secret_key: &iroh::SecretKey,
     body: Vec<u8>,
 ) -> anyhow::Result<()> {
-    let url = format!("{}{path}", peer_url.trim_end_matches('/'));
-    let resp = client
+    let url = peer_url_path(peer_url, path);
+    let request = client
         .post(&url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            signed_auth_header(secret_key),
-        )
         .header(
             reqwest::header::CONTENT_TYPE,
             turbo_common::CBOR_CONTENT_TYPE,
         )
-        .body(body)
-        .send()
-        .await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("POST {url} returned {status}: {body}");
-    }
-    Ok(())
+        .body(body);
+    send_signed(request, secret_key, &url).await
 }

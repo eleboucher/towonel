@@ -1,9 +1,19 @@
+use std::collections::{HashMap, HashSet};
+
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{ActiveValue, EntityTrait, TransactionTrait};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter, TransactionTrait};
 use turbo_common::identity::{PqPublicKey, TenantId};
 
-use super::entities::{federated_tenant_hostnames, federated_tenants};
+use super::entities::{federated_tenant_hostnames, federated_tenants, federation_push_state};
 use super::{Db, FederatedTenant, bytes_to_array, tenant_id_bytes};
+
+/// Per-peer snapshot of what this hub has already federated out.
+#[derive(Debug, Default, Clone)]
+pub struct FederationPushState {
+    pub tenants: HashSet<TenantId>,
+    pub removals: HashSet<TenantId>,
+    pub entry_seq: HashMap<TenantId, u64>,
+}
 
 impl Db {
     /// Insert a tenant learned from a peer hub. Idempotent on `tenant_id` —
@@ -48,10 +58,7 @@ impl Db {
             })
             .collect();
         if !host_rows.is_empty() {
-            // Child rows are equally idempotent: if the parent already
-            // existed, the same (tenant_id, hostname_lower) pair is also
-            // expected to already exist, so skip conflicts silently.
-            federated_tenant_hostnames::Entity::insert_many(host_rows)
+            let result = federated_tenant_hostnames::Entity::insert_many(host_rows)
                 .on_conflict(
                     OnConflict::columns([
                         federated_tenant_hostnames::Column::TenantId,
@@ -61,17 +68,77 @@ impl Db {
                     .to_owned(),
                 )
                 .exec(&txn)
-                .await
-                .or_else(|e| match e {
-                    sea_orm::DbErr::RecordNotInserted => Ok(sea_orm::InsertResult {
-                        last_insert_id: Default::default(),
-                    }),
-                    other => Err(other),
-                })?;
+                .await;
+            match result {
+                Ok(_) | Err(sea_orm::DbErr::RecordNotInserted) => {}
+                Err(e) => return Err(e.into()),
+            }
         }
 
         txn.commit().await?;
         Ok(())
+    }
+
+    /// Load what we've already pushed to `peer`. Used by `run_peer` at
+    /// startup so a hub restart does not redundantly re-push every tenant,
+    /// removal, and entry to every peer.
+    pub async fn load_federation_push_state(
+        &self,
+        peer_node_id: &[u8; 32],
+    ) -> anyhow::Result<FederationPushState> {
+        let rows = federation_push_state::Entity::find()
+            .filter(federation_push_state::Column::PeerNodeId.eq(peer_node_id.to_vec()))
+            .all(&self.conn)
+            .await?;
+
+        let mut state = FederationPushState::default();
+        for row in rows {
+            let arr = bytes_to_array::<32>(row.tenant_id, "push_state tenant_id")?;
+            let tid = TenantId::from_bytes(&arr);
+            if row.tenant_pushed {
+                state.tenants.insert(tid);
+            }
+            if row.removal_pushed {
+                state.removals.insert(tid);
+            }
+            if row.last_sent_sequence > 0 {
+                state
+                    .entry_seq
+                    .insert(tid, row.last_sent_sequence.cast_unsigned());
+            }
+        }
+        Ok(state)
+    }
+
+    pub async fn mark_federation_tenant_pushed(
+        &self,
+        peer_node_id: &[u8; 32],
+        tenant_id: &TenantId,
+    ) -> anyhow::Result<()> {
+        upsert_push_state(&self.conn, peer_node_id, tenant_id, PushMark::Tenant).await
+    }
+
+    pub async fn mark_federation_removal_pushed(
+        &self,
+        peer_node_id: &[u8; 32],
+        tenant_id: &TenantId,
+    ) -> anyhow::Result<()> {
+        upsert_push_state(&self.conn, peer_node_id, tenant_id, PushMark::Removal).await
+    }
+
+    pub async fn mark_federation_entry_pushed(
+        &self,
+        peer_node_id: &[u8; 32],
+        tenant_id: &TenantId,
+        sequence: u64,
+    ) -> anyhow::Result<()> {
+        upsert_push_state(
+            &self.conn,
+            peer_node_id,
+            tenant_id,
+            PushMark::Entry(sequence),
+        )
+        .await
     }
 
     /// Tenants federated from peers, used at hub boot to populate the
@@ -96,4 +163,45 @@ impl Db {
             })
             .collect()
     }
+}
+
+enum PushMark {
+    Tenant,
+    Removal,
+    Entry(u64),
+}
+
+async fn upsert_push_state(
+    conn: &sea_orm::DatabaseConnection,
+    peer_node_id: &[u8; 32],
+    tenant_id: &TenantId,
+    mark: PushMark,
+) -> anyhow::Result<()> {
+    let column = match mark {
+        PushMark::Tenant => federation_push_state::Column::TenantPushed,
+        PushMark::Removal => federation_push_state::Column::RemovalPushed,
+        PushMark::Entry(_) => federation_push_state::Column::LastSentSequence,
+    };
+    let on_conflict = OnConflict::columns([
+        federation_push_state::Column::PeerNodeId,
+        federation_push_state::Column::TenantId,
+    ])
+    .update_column(column)
+    .to_owned();
+
+    let row = federation_push_state::ActiveModel {
+        peer_node_id: ActiveValue::Set(peer_node_id.to_vec()),
+        tenant_id: ActiveValue::Set(tenant_id_bytes(tenant_id)),
+        tenant_pushed: ActiveValue::Set(matches!(mark, PushMark::Tenant)),
+        removal_pushed: ActiveValue::Set(matches!(mark, PushMark::Removal)),
+        last_sent_sequence: ActiveValue::Set(match mark {
+            PushMark::Entry(seq) => seq.cast_signed(),
+            _ => 0,
+        }),
+    };
+    federation_push_state::Entity::insert(row)
+        .on_conflict(on_conflict)
+        .exec(conn)
+        .await?;
+    Ok(())
 }

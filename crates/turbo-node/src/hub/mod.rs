@@ -176,9 +176,8 @@ impl Hub {
             let url = peer_url.clone();
             let sk = iroh::SecretKey::from(self.p.secret_key.to_bytes());
             let state_for_peer = state.clone();
-            let trusted = trusted_peers.clone();
             tokio::spawn(async move {
-                if let Err(e) = federation::run_peer(url, sk, state_for_peer, trusted).await {
+                if let Err(e) = federation::run_peer(url, sk, state_for_peer).await {
                     tracing::error!(error = %e, "federation peer task exited");
                 }
             });

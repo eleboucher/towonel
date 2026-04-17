@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::response::IntoResponse;
+use backon::{ExponentialBuilder, Retryable};
 use instant_acme::{
     Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
 };
@@ -16,7 +17,16 @@ pub type ChallengeTokens = Arc<RwLock<HashMap<String, String>>>;
 
 const FAILURE_COOLDOWN: Duration = Duration::from_secs(300);
 
-const ISSUANCE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Time budget for a single ACME order attempt. Three retry attempts with
+/// exponential backoff and jitter can cap total wall time at roughly
+/// `ATTEMPTS × ATTEMPT_TIMEOUT + cumulative backoff`.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ATTEMPTS: usize = 3;
+
+/// Total wait the follower allows while the leader retries. Must be bigger
+/// than `MAX_ATTEMPTS × ATTEMPT_TIMEOUT` plus backoff, or followers give up
+/// before the leader can declare success.
+const ISSUANCE_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub struct AcmeCoordinator {
     account: Account,
@@ -113,34 +123,24 @@ impl AcmeCoordinator {
             };
         }
 
-        let result = tokio::time::timeout(
-            ISSUANCE_TIMEOUT,
-            provision_cert(&self.account, hostname, &self.cert_store, &self.tokens),
-        )
-        .await;
+        let result =
+            issue_with_retry(&self.account, hostname, &self.cert_store, &self.tokens).await;
 
         // Reload the cert store before notify_waiters() so followers see has_cert() == true.
         let outcome = match result {
-            Ok(Ok(())) => {
+            Ok(()) => {
                 self.cert_store.reload().await;
                 self.failures.lock().await.remove(hostname);
                 info!(%hostname, "ACME cert issued");
                 Ok(())
             }
-            Ok(Err(e)) => {
+            Err(e) => {
                 self.failures
                     .lock()
                     .await
                     .insert(hostname.to_string(), Instant::now());
-                warn!(%hostname, error = %e, "ACME issuance failed");
+                warn!(%hostname, error = %e, "ACME issuance failed after retries");
                 Err(e)
-            }
-            Err(_) => {
-                self.failures
-                    .lock()
-                    .await
-                    .insert(hostname.to_string(), Instant::now());
-                Err(anyhow::anyhow!("ACME issuance timed out for {hostname}"))
             }
         };
 
@@ -190,6 +190,36 @@ pub async fn run_http01_server(listen_addr: &str, tokens: ChallengeTokens) -> an
 
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Drive `provision_cert` with exponential backoff + jitter. A single
+/// attempt is capped at [`ATTEMPT_TIMEOUT`]; the whole loop gives up after
+/// [`MAX_ATTEMPTS`] transient failures.
+async fn issue_with_retry(
+    account: &Account,
+    hostname: &str,
+    cert_store: &CertStore,
+    tokens: &ChallengeTokens,
+) -> anyhow::Result<()> {
+    let policy = ExponentialBuilder::default()
+        .with_min_delay(Duration::from_secs(2))
+        .with_max_delay(Duration::from_secs(30))
+        .with_max_times(MAX_ATTEMPTS - 1) // total attempts = initial + retries
+        .with_jitter();
+
+    (|| async {
+        tokio::time::timeout(
+            ATTEMPT_TIMEOUT,
+            provision_cert(account, hostname, cert_store, tokens),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("ACME attempt timed out for {hostname}")))
+    })
+    .retry(policy)
+    .notify(|err, dur| {
+        warn!(%hostname, error = %err, ?dur, "ACME attempt failed; retrying");
+    })
+    .await
 }
 
 async fn provision_cert(

@@ -67,10 +67,7 @@ impl FromStr for TenantId {
     type Err = IdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes: [u8; 32] = hex::decode(s)?
-            .try_into()
-            .map_err(|_| hex::FromHexError::InvalidStringLength)?;
-        Ok(Self(bytes))
+        Ok(Self(hex::FromHex::from_hex(s)?))
     }
 }
 
@@ -338,9 +335,7 @@ impl FromStr for AgentId {
     type Err = IdParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let bytes: [u8; 32] = hex::decode(s)?
-            .try_into()
-            .map_err(|_| hex::FromHexError::InvalidStringLength)?;
+        let bytes: [u8; 32] = hex::FromHex::from_hex(s)?;
         Ok(Self(VerifyingKey::from_bytes(&bytes)?))
     }
 }

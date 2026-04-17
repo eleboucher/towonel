@@ -523,17 +523,13 @@ async fn two_hubs_reach_consistency_after_push_round() {
         .expect("send");
     assert_eq!(resp.status(), 200);
 
-    let mut sent_tenants = std::collections::HashSet::new();
-    let mut sent_removals = std::collections::HashSet::new();
-    let mut sent_seq = std::collections::HashMap::new();
+    let b_node_id = node_id_bytes(&peer_secret(21)); // stable placeholder peer id
     push_round(
         &client,
         &hub_b.base_url,
+        &b_node_id,
         &a_key,
         hub_a.state.as_ref(),
-        &mut sent_tenants,
-        &mut sent_removals,
-        &mut sent_seq,
     )
     .await
     .expect("push round");
@@ -545,4 +541,110 @@ async fn two_hubs_reach_consistency_after_push_round() {
     let entries = hub_b.state.db.get_all_entries().await.expect("entries");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].tenant_id, tenant.id());
+}
+
+#[tokio::test]
+async fn conflicting_pubkey_push_is_first_writer_wins() {
+    // Two peers push the same `tenant_id` but with different pq_public_key
+    // values. The hub's `federated_tenants` PK on tenant_id means the second
+    // peer's row is silently dropped (see `insert_federated_tenant`'s
+    // `ON CONFLICT DO NOTHING`). This only matters under adversarial peers:
+    // under honest peers a `tenant_id` collision would require a SHA-256
+    // preimage on a distinct ML-DSA-65 public key, which is computationally
+    // infeasible. The test constructs the collision artificially by reusing
+    // `tenant.id()` with a second keypair's bytes — verifying the hub keeps
+    // the first writer and does not let a hostile peer overwrite state.
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let peer_one = peer_secret(101);
+    let peer_two = peer_secret(102);
+    trust(&hub, &peer_one).await;
+    trust(&hub, &peer_two).await;
+
+    let tenant_one = TenantKeypair::generate();
+    let tenant_two = TenantKeypair::generate();
+
+    // Peer 1 pushes the real (tenant_id, pubkey) pair.
+    let auth = signed_auth_header_at(&peer_one, now_ms().saturating_sub(2000));
+    let (s, _) = post_signed_json(
+        &client,
+        &hub.url("/v1/federation/tenants"),
+        &tenant_push_body(&tenant_one, "app.alice.test"),
+        &auth,
+    )
+    .await;
+    assert_eq!(s, 200);
+
+    // Peer 2 pushes the same tenant_id but with a different pubkey. The hub
+    // validates tenant_id == sha256(pubkey), so peer 2 has to claim the
+    // matching tenant_id for its own key. The interesting attack is when
+    // peer 2 tries to push tenant_one.id() alongside tenant_two's pubkey —
+    // the hub must reject it with 400.
+    let mut body = tenant_push_body(&tenant_two, "app.mallory.test");
+    body["tenant_id"] = serde_json::Value::String(tenant_one.id().to_string());
+    let auth = signed_auth_header_at(&peer_two, now_ms());
+    let (s, body_json) =
+        post_signed_json(&client, &hub.url("/v1/federation/tenants"), &body, &auth).await;
+    assert_eq!(s, 400, "mismatched tenant_id/pubkey must be rejected");
+    assert_eq!(body_json["error"]["code"], "invalid_request");
+
+    // And peer 1's record is still the sole source of truth.
+    let fed = hub.state.db.list_federated_tenants().await.expect("list");
+    assert_eq!(fed.len(), 1);
+    assert_eq!(fed[0].tenant_id, tenant_one.id());
+    assert_eq!(fed[0].pq_public_key, *tenant_one.public_key());
+}
+
+#[tokio::test]
+async fn push_round_persists_state_across_calls() {
+    let hub_a = TestHub::start().await;
+    let hub_b = TestHub::start().await;
+    let a_key = peer_secret(21);
+    trust(&hub_b, &a_key).await;
+
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let b_node_id = node_id_bytes(&peer_secret(77));
+    push_round(
+        &client,
+        &hub_b.base_url,
+        &b_node_id,
+        &a_key,
+        hub_a.state.as_ref(),
+    )
+    .await
+    .expect("first push");
+
+    let state = hub_a
+        .state
+        .db
+        .load_federation_push_state(&b_node_id)
+        .await
+        .expect("load push state");
+    assert!(state.tenants.contains(&tenant.id()));
+
+    // Kill hub_b so a second round without persisted state would re-push,
+    // but persisted state should skip it entirely (no peer contact needed).
+    drop(hub_b);
+
+    push_round(
+        &client,
+        "http://127.0.0.1:1",
+        &b_node_id,
+        &a_key,
+        hub_a.state.as_ref(),
+    )
+    .await
+    .expect("second push (no-op because state is persisted)");
 }

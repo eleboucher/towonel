@@ -202,7 +202,7 @@ fn build_hub_params(
     let policy = build_ownership_policy(&config.tenants)?;
     let operator_api_key = hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
     let public_url = default_public_url(&config.hub);
-    let peer_urls: Vec<String> = config.hub.peers.iter().map(|p| p.url.clone()).collect();
+    let peer_urls = config.hub.peer_urls.clone();
     Ok(hub::HubParams {
         listen_addr: config.hub.listen_addr.clone(),
         database: config.hub.database.clone(),

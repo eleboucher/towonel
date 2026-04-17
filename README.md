@@ -225,6 +225,7 @@ Set `tls_mode` on the service and the edge terminates TLS using an on-demand Let
 Cert lifecycle:
 
 - First request for a hostname triggers HTTP-01 issuance against Let's Encrypt. Subsequent requests reuse the cached cert. Renewed lazily.
+- Transient failures (network blips, ACME rate limits, challenge propagation) are retried with exponential backoff + jitter up to 3 attempts per request before the hostname enters a 5-minute failure cooldown.
 - Requires `TURBO_EDGE__TLS__ACME_EMAIL` on the node and inbound :80 reachable for ACME challenges.
 - Wildcards (`*.bob.example`) issue per exact subdomain on first contact — no DNS-01 required. Subject to Let's Encrypt rate limits (50 certs/week/registered domain).
 - The community member just needs a CNAME from their domain (e.g. `*.bob.example`) to an edge hostname; no DNS provider API access needed.
@@ -255,14 +256,18 @@ All settings are configurable via `TURBO_*` env vars (double underscore separate
 | `TURBO_HUB__PUBLIC_URL` | `https://<listen_addr>` | URL embedded in invite tokens |
 | `TURBO_HUB__OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file |
 | `TURBO_HUB__DNS_WEBHOOK_URL` | | POST hostname changes to this URL |
+| `TURBO_HUB__PEER_URLS` | | Federation peer URLs. CSV: `https://a,https://b` — or JSON |
 | `TURBO_EDGE__ENABLED` | `true` | Enable the edge listener |
 | `TURBO_EDGE__LISTEN_ADDR` | `0.0.0.0:443` | Edge TCP bind address (TLS passthrough + termination share this port) |
 | `TURBO_EDGE__HEALTH_LISTEN_ADDR` | `0.0.0.0:9090` | Health + Prometheus metrics |
-| `TURBO_EDGE__HUB_URL` | | Remote hub URL (edge-only mode) |
+| `TURBO_EDGE__HUB_URLS` | | Remote hub URLs (edge-only mode). CSV or JSON list |
+| `TURBO_EDGE__PUBLIC_ADDRESSES` | | Addresses this edge advertises to agents. CSV or JSON list |
 | `TURBO_EDGE__TLS__ACME_EMAIL` | | Enables on-demand Let's Encrypt issuance |
 | `TURBO_EDGE__TLS__CERT_DIR` | `/data/certs` | Where PEMs are cached |
 | `TURBO_EDGE__TLS__ACME_STAGING` | `false` | Use LE staging (avoids rate limits while testing) |
 | `TURBO_EDGE__TLS__HTTP_LISTEN_ADDR` | `0.0.0.0:80` | HTTP-01 challenge responder |
+
+**Lists in env vars** — string-valued lists (`PEER_URLS`, `HUB_URLS`, `PUBLIC_ADDRESSES`) accept either comma-separated values (preferred in Kubernetes YAML) or a JSON array. Complex structured lists like `TURBO_TENANTS` require JSON.
 
 turbo-agent (`TURBO_AGENT_*`):
 
@@ -328,11 +333,21 @@ Migrations run automatically at boot via `sea-orm-migration`. The same schema ap
 
 ### Federation
 
-Replicate tenants and entries across hub instances:
+Replicate tenants and entries across hub instances. Peers are bidirectional over HTTPS; each hub discovers the peer's iroh `node_id` at boot via `GET /v1/health`, so you only configure URLs:
 
 ```bash
-TURBO_HUB__PEERS='[{"url":"https://hub-b.example.eu:8443"}]'
+# CSV — best for Kubernetes env vars
+TURBO_HUB__PEER_URLS=https://hub-b.example.eu:8443,https://hub-c.example.eu:8443
 ```
+
+Or in TOML:
+
+```toml
+[hub]
+peer_urls = ["https://hub-b.example.eu:8443", "https://hub-c.example.eu:8443"]
+```
+
+Push state (which tenants/entries have been delivered to which peer) is persisted, so a hub restart does not re-push everything. Inbound pushes are Ed25519-signed with replay protection.
 
 ### DNS automation
 
