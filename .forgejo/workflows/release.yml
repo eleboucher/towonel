@@ -57,6 +57,9 @@ jobs:
 
       - name: Build and push turbo-node
         uses: https://data.forgejo.org/docker/build-push-action@v7
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.BUILDCACHE_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BUILDCACHE_S3_SECRET }}
         with:
           context: .
           file: Dockerfile.node
@@ -64,8 +67,8 @@ jobs:
           push: true
           tags: ${{ steps.meta-node.outputs.tags }}
           labels: ${{ steps.meta-node.outputs.labels }}
-          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node:buildcache
-          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-node:buildcache,mode=max
+          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,name=turbo-node
+          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,name=turbo-node,mode=max
 
       - name: Compute agent image metadata
         id: meta-agent
@@ -79,6 +82,9 @@ jobs:
 
       - name: Build and push turbo-agent
         uses: https://data.forgejo.org/docker/build-push-action@v7
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.BUILDCACHE_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.BUILDCACHE_S3_SECRET }}
         with:
           context: .
           file: Dockerfile.agent
@@ -86,5 +92,5 @@ jobs:
           push: true
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}
-          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent:buildcache
-          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/turbo-agent:buildcache,mode=max
+          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,name=turbo-agent
+          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,name=turbo-agent,mode=max
