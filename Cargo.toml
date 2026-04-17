@@ -87,7 +87,7 @@ tower-http = { version = "0.6", features = ["trace"] }
 # needs rand_core 0.9, resolve the version conflict at that point.
 rand_core = { version = "0.9.5" }
 getrandom = "0.4"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 eventsource-stream = "0.2"
 prometheus-client = "0.24"
 base64 = "0.22"
