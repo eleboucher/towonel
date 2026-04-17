@@ -214,6 +214,7 @@ fn build_hub_params(
         peer_urls,
         secret_key,
         dns_webhook_url: config.hub.dns_webhook_url.clone(),
+        sync_invite_redeem: config.hub.federation.sync_invite_redeem(),
     })
 }
 

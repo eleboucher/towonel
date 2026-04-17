@@ -12,7 +12,7 @@ use turbo_common::identity::{AgentKeypair, TenantKeypair};
 use turbo_common::invite::InviteToken;
 use turbo_common::ownership::OwnershipPolicy;
 
-use super::api::{AppState, FederationState, router_unlimited};
+use super::api::{AppState, FederationState, OutboundFederation, router_unlimited};
 use super::db::temp_db;
 
 pub(super) const OPERATOR_KEY: &str = "test-operator-api-key";
@@ -25,11 +25,32 @@ pub(super) struct TestHub {
     _task: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Default)]
+pub(super) struct OutboundConfig {
+    pub peer_urls: Vec<String>,
+    pub signing_key: Option<iroh::SecretKey>,
+    pub sync_invite_redeem: bool,
+}
+
 impl TestHub {
     pub(super) async fn start() -> Self {
+        Self::start_with(OutboundConfig::default()).await
+    }
+
+    pub(super) async fn start_with(outbound: OutboundConfig) -> Self {
         let db = temp_db().await;
         let (route_tx, _route_rx) = broadcast::channel(16);
         let policy = Arc::new(RwLock::new(OwnershipPolicy::new()));
+
+        let OutboundConfig {
+            peer_urls,
+            signing_key,
+            sync_invite_redeem,
+        } = outbound;
+        let outbound_federation = signing_key.map(|sk| OutboundFederation {
+            peer_urls,
+            signing_key: sk,
+        });
 
         let state = Arc::new(AppState {
             db,
@@ -50,6 +71,8 @@ impl TestHub {
                     std::collections::HashSet::new(),
                 )),
                 nonces: super::federation::new_nonce_cache(),
+                outbound: outbound_federation,
+                sync_invite_redeem,
             },
             dns_webhook_url: None,
             prev_hostnames: tokio::sync::RwLock::new(std::collections::HashSet::new()),

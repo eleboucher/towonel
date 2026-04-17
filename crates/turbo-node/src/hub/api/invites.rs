@@ -17,6 +17,7 @@ use super::{
     AppState, conflict, constant_time_eq, gone, internal_error, invalid_request, json_ok,
     not_found, parse_invite_id, unauthorized,
 };
+use crate::hub::federation::{TenantPush, push_tenant_sync};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct CreateInviteRequest {
@@ -259,6 +260,8 @@ pub(super) async fn redeem_invite(
                 invite.hostnames.iter().cloned(),
             );
 
+            maybe_sync_push(&state, &tenant_id, &pq_public_key, &invite.hostnames).await;
+
             return json_ok(RedeemResponse {
                 status: "ok",
                 tenant_id: tenant_id.to_string(),
@@ -320,6 +323,8 @@ pub(super) async fn redeem_invite(
         );
     }
 
+    maybe_sync_push(&state, &tenant_id, &pq_public_key, &invite.hostnames).await;
+
     json_ok(RedeemResponse {
         status: "ok",
         tenant_id: tenant_id.to_string(),
@@ -328,4 +333,25 @@ pub(super) async fn redeem_invite(
         edge_node_id: state.identity.edge_node_id.clone(),
         edge_addresses: state.identity.edge_addresses.clone(),
     })
+}
+
+async fn maybe_sync_push(
+    state: &AppState,
+    tenant_id: &TenantId,
+    pq_public_key: &PqPublicKey,
+    hostnames: &[String],
+) {
+    if !state.federation.sync_invite_redeem {
+        return;
+    }
+    let Some(outbound) = state.federation.outbound.as_ref() else {
+        return;
+    };
+    let body = TenantPush {
+        tenant_id: tenant_id.to_string(),
+        pq_public_key: pq_public_key.to_string(),
+        hostnames: hostnames.to_vec(),
+        registered_at_ms: now_ms(),
+    };
+    push_tenant_sync(&state.http_client, outbound, &body).await;
 }

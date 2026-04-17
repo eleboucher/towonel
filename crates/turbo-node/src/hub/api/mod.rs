@@ -62,6 +62,19 @@ pub struct FederationState {
     /// Nonce cache for federation auth: prevents within-window replay.
     /// Bounded size + TTL eviction via moka.
     pub nonces: super::federation::NonceCache,
+    /// Outbound peer surface for synchronous pushes. `None` when the hub
+    /// has no configured peers (federation disabled).
+    pub outbound: Option<OutboundFederation>,
+    /// Push the new tenant to all peers inside `redeem_invite` before
+    /// responding. Trades redemption latency for consistency on the op
+    /// operators care about most.
+    pub sync_invite_redeem: bool,
+}
+
+/// Outbound federation identity: the signing key + URLs of peer hubs.
+pub struct OutboundFederation {
+    pub peer_urls: Vec<String>,
+    pub signing_key: iroh::SecretKey,
 }
 
 /// Broadcast `table` to edges and fire the DNS webhook if hostnames changed.

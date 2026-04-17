@@ -17,7 +17,7 @@ use turbo_common::routing::RouteTable;
 use turbo_common::time::now_ms;
 
 use super::api::AppState;
-use super::api::{internal_error, invalid_request, json_ok, unauthorized};
+use super::api::{OutboundFederation, internal_error, invalid_request, json_ok, unauthorized};
 use super::db::FederatedTenant;
 
 const FEDERATION_AUTH_DOMAIN: &str = "turbo-tunnel/federation/v1";
@@ -442,6 +442,39 @@ async fn post_signed<T: Serialize>(
         anyhow::bail!("POST {url} returned {status}: {body}");
     }
     Ok(())
+}
+
+const SYNC_PUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Fan out a `TenantPush` to every peer in `outbound`. Best-effort: a peer
+/// that is unreachable or returns an error is logged and skipped, but the
+/// caller still succeeds. The async `run_peer` loop retries failures on its
+/// normal 15 s cadence, so this only closes the happy-path consistency gap.
+pub async fn push_tenant_sync(
+    client: &reqwest::Client,
+    outbound: &OutboundFederation,
+    body: &TenantPush,
+) {
+    for peer_url in &outbound.peer_urls {
+        let push = post_signed(
+            client,
+            peer_url,
+            "/v1/federation/tenants",
+            &outbound.signing_key,
+            body,
+        );
+        match tokio::time::timeout(SYNC_PUSH_TIMEOUT, push).await {
+            Ok(Ok(())) => {
+                info!(peer = %peer_url, tenant = %body.tenant_id, "federation: sync-pushed tenant");
+            }
+            Ok(Err(e)) => {
+                warn!(peer = %peer_url, error = %e, "federation: sync tenant push failed");
+            }
+            Err(_) => {
+                warn!(peer = %peer_url, "federation: sync tenant push timed out");
+            }
+        }
+    }
 }
 
 async fn post_signed_cbor(

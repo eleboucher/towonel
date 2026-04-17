@@ -10,7 +10,9 @@ use turbo_common::identity::{AgentKeypair, TenantKeypair};
 use turbo_common::time::now_ms;
 
 use super::federation::{RemovalPush, TenantPush, push_round};
-use super::test_helpers::{FAKE_NODE_ID, TestHub, create_invite, post_json, redeem_body};
+use super::test_helpers::{
+    FAKE_NODE_ID, OutboundConfig, TestHub, create_invite, post_json, redeem_body,
+};
 
 const FEDERATION_AUTH_DOMAIN: &str = "turbo-tunnel/federation/v1";
 
@@ -390,6 +392,93 @@ async fn push_entry_duplicate_sequence_is_idempotent() {
 
     let entries = hub.state.db.get_all_entries().await.expect("entries");
     assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn redeem_invite_with_sync_push_propagates_immediately() {
+    let hub_b = TestHub::start().await;
+    let a_key = peer_secret(22);
+    trust(&hub_b, &a_key).await;
+
+    let hub_a = TestHub::start_with(OutboundConfig {
+        peer_urls: vec![hub_b.base_url.clone()],
+        signing_key: Some(a_key),
+        sync_invite_redeem: true,
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let fed = hub_b.state.db.list_federated_tenants().await.expect("list");
+    assert_eq!(fed.len(), 1);
+    assert_eq!(fed[0].tenant_id, tenant.id());
+    assert_eq!(fed[0].hostnames, vec!["app.alice.test".to_string()]);
+}
+
+#[tokio::test]
+async fn redeem_invite_without_sync_flag_does_not_push() {
+    let hub_b = TestHub::start().await;
+    let a_key = peer_secret(23);
+    trust(&hub_b, &a_key).await;
+
+    let hub_a = TestHub::start_with(OutboundConfig {
+        peer_urls: vec![hub_b.base_url.clone()],
+        signing_key: Some(a_key),
+        sync_invite_redeem: false,
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let fed = hub_b.state.db.list_federated_tenants().await.expect("list");
+    assert!(fed.is_empty());
+}
+
+#[tokio::test]
+async fn redeem_invite_sync_push_survives_unreachable_peer() {
+    // Peer URL that will fail to connect (reserved loopback port we never bind).
+    let hub_a = TestHub::start_with(OutboundConfig {
+        peer_urls: vec!["http://127.0.0.1:1".to_string()],
+        signing_key: Some(peer_secret(24)),
+        sync_invite_redeem: true,
+    })
+    .await;
+
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "peer failure must not fail the redeem");
+    assert!(hub_a.state.policy.read().await.is_known_tenant(&tenant.id()));
 }
 
 #[tokio::test]

@@ -153,6 +153,8 @@ pub struct HubConfig {
     /// URL is where this hub pushes its own state.
     #[serde(default)]
     pub peers: Vec<PeerConfig>,
+    #[serde(default)]
+    pub federation: FederationConfig,
     /// Optional webhook URL for DNS automation. When set, the hub POSTs a
     /// JSON payload to this URL whenever the set of active hostnames changes
     /// (hostname added or removed). The operator points this at a small
@@ -162,6 +164,38 @@ pub struct HubConfig {
     #[serde(default)]
     pub dns_webhook_url: Option<String>,
 }
+
+/// Operator-selected operations that push state to peers before returning
+/// the HTTP response, rather than relying on the 15 s async reconciliation
+/// loop. Closes the consistency window for the named ops.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FederationConfig {
+    /// Known values: `"invite_redeem"`. Unknown values fail at load time.
+    #[serde(default)]
+    pub synchronous_operations: Vec<String>,
+}
+
+impl FederationConfig {
+    pub fn sync_invite_redeem(&self) -> bool {
+        self.synchronous_operations
+            .iter()
+            .any(|s| s == SYNC_OP_INVITE_REDEEM)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        for op in &self.synchronous_operations {
+            if op != SYNC_OP_INVITE_REDEEM {
+                anyhow::bail!(
+                    "hub.federation.synchronous_operations: unknown op {op:?}; known: [{SYNC_OP_INVITE_REDEEM:?}]"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+const SYNC_OP_INVITE_REDEEM: &str = "invite_redeem";
 
 /// A federation peer: a remote hub that mirrors this hub's state.
 ///
@@ -278,6 +312,7 @@ impl Default for HubConfig {
             operator_api_key_path: default_operator_key_path(),
             public_url: None,
             peers: Vec::new(),
+            federation: FederationConfig::default(),
             dns_webhook_url: None,
         }
     }
@@ -359,6 +394,8 @@ impl NodeConfig {
             anyhow::bail!("dns_webhook_url must use https://: got {url:?}");
         }
 
+        config.hub.federation.validate()?;
+
         Ok(config)
     }
 }
@@ -408,5 +445,24 @@ mod tests {
             msg.contains("hub_url"),
             "error should name the offending field, got: {msg}"
         );
+    }
+
+    #[test]
+    fn federation_sync_invite_redeem_recognised() {
+        let cfg = FederationConfig {
+            synchronous_operations: vec!["invite_redeem".to_string()],
+        };
+        assert!(cfg.validate().is_ok());
+        assert!(cfg.sync_invite_redeem());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn federation_unknown_sync_op_rejected() {
+        let cfg = FederationConfig {
+            synchronous_operations: vec!["delete_tenant".to_string()],
+        };
+        let err = cfg.validate().expect_err("unknown op must be rejected");
+        assert!(err.to_string().contains("delete_tenant"));
     }
 }

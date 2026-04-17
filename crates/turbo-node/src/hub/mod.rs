@@ -72,6 +72,7 @@ pub struct HubParams {
     pub peer_urls: Vec<String>,
     pub secret_key: iroh::SecretKey,
     pub dns_webhook_url: Option<String>,
+    pub sync_invite_redeem: bool,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -141,6 +142,10 @@ impl Hub {
         }
 
         let trusted_peers = Arc::new(RwLock::new(std::collections::HashSet::new()));
+        let outbound = (!self.p.peer_urls.is_empty()).then(|| api::OutboundFederation {
+            peer_urls: self.p.peer_urls.clone(),
+            signing_key: iroh::SecretKey::from(self.p.secret_key.to_bytes()),
+        });
         let state = Arc::new(api::AppState {
             db,
             route_tx: self.p.route_tx.clone(),
@@ -158,6 +163,8 @@ impl Hub {
             federation: api::FederationState {
                 trusted_peers: trusted_peers.clone(),
                 nonces: federation::new_nonce_cache(),
+                outbound,
+                sync_invite_redeem: self.p.sync_invite_redeem,
             },
             dns_webhook_url: self.p.dns_webhook_url.clone(),
             prev_hostnames: RwLock::new(std::collections::HashSet::new()),
