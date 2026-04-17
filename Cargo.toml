@@ -47,7 +47,7 @@ tokio = { workspace = true }
 
 
 [workspace.dependencies]
-iroh = "0.97.0"
+iroh = "0.98.0"
 ed25519-dalek = { version = "2.2", features = ["serde", "rand_core"] }
 ciborium = "0.2"
 sea-orm = { version = "1", features = [
