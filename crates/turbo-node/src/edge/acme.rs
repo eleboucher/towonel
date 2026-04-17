@@ -116,10 +116,8 @@ impl AcmeCoordinator {
         )
         .await;
 
-        self.inflight.lock().await.remove(hostname);
-        notify.notify_waiters();
-
-        match result {
+        // Reload the cert store before notify_waiters() so followers see has_cert() == true.
+        let outcome = match result {
             Ok(Ok(())) => {
                 self.cert_store.reload().await;
                 self.failures.lock().await.remove(hostname);
@@ -139,9 +137,14 @@ impl AcmeCoordinator {
                     .lock()
                     .await
                     .insert(hostname.to_string(), Instant::now());
-                anyhow::bail!("ACME issuance timed out for {hostname}")
+                Err(anyhow::anyhow!("ACME issuance timed out for {hostname}"))
             }
-        }
+        };
+
+        self.inflight.lock().await.remove(hostname);
+        notify.notify_waiters();
+
+        outcome
     }
 }
 
