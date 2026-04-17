@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.6
+# syntax=docker/dockerfile:1.23
 FROM rust:1.95-bookworm AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
