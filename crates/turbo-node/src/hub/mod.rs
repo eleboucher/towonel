@@ -59,7 +59,7 @@ pub struct HubIdentity {
 /// Everything the hub needs to start, grouped to keep the constructor lean.
 pub struct HubParams {
     pub listen_addr: String,
-    pub db_path: std::path::PathBuf,
+    pub database: crate::config::DatabaseConfig,
     pub route_tx: broadcast::Sender<RouteTable>,
     pub static_policy: OwnershipPolicy,
     pub identity: HubIdentity,
@@ -83,13 +83,21 @@ impl Hub {
 
     /// Run the hub. Opens the `SQLite` database and starts the HTTP management API.
     pub async fn run(&self) -> anyhow::Result<()> {
+        let db_url = self.p.database.connection_url()?;
         info!(
             listen = %self.p.listen_addr,
-            db = %self.p.db_path.display(),
+            db = %crate::config::redact_db_url(&db_url),
+            max_open = self.p.database.max_open(),
+            max_idle = self.p.database.max_idle(),
             "hub starting"
         );
 
-        let db = db::Db::open(&self.p.db_path).await?;
+        let db = db::Db::open(
+            &db_url,
+            self.p.database.max_open(),
+            self.p.database.max_idle(),
+        )
+        .await?;
 
         let removed: Vec<turbo_common::identity::TenantId> = db.list_tenant_removals().await?;
 

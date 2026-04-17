@@ -205,7 +205,7 @@ fn build_hub_params(
     let peer_urls: Vec<String> = config.hub.peers.iter().map(|p| p.url.clone()).collect();
     Ok(hub::HubParams {
         listen_addr: config.hub.listen_addr.clone(),
-        db_path: config.hub.db_path.clone(),
+        database: config.hub.database.clone(),
         route_tx,
         static_policy: policy,
         identity,

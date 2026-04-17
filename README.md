@@ -13,7 +13,8 @@ Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbou
  Client               turbo-node                    turbo-agent
    |                  ┌──────────┐                       |
    | TLS ClientHello  │ hub  API │◄─── turbo-cli         |
-   | ──────────────►  │ (SQLite) │     (invites)         |
+   | ──────────────►  │ (SQLite/ │     (invites)         |
+   |  (SNI: app.eu)   │ Postgres)│                       |
    |  (SNI: app.eu)   │          │                       |
    |                  │ edge :443│◄─ SetHostnameTls ──── + (signed, on agent start)
    |                  │  (peek   │                       |
@@ -247,7 +248,10 @@ All settings are configurable via `TURBO_*` env vars (double underscore separate
 | `TURBO_IDENTITY__KEY_PATH` | `node.key` | Node identity key |
 | `TURBO_HUB__ENABLED` | `true` | Enable the hub API |
 | `TURBO_HUB__LISTEN_ADDR` | `0.0.0.0:8443` | Hub API bind address |
-| `TURBO_HUB__DB_PATH` | `hub.db` | SQLite database path |
+| `TURBO_HUB__DATABASE__DRIVER` | `sqlite` | `sqlite` or `postgres` |
+| `TURBO_HUB__DATABASE__DSN` | `hub.db` (sqlite) | Connection string. Required for `postgres` (e.g. `postgres://user:pass@host/db`); for `sqlite` it's a file path or `sqlite://...` URL |
+| `TURBO_HUB__DATABASE__MAX_OPEN_CONNS` | `4` sqlite / `25` postgres | Max open pool connections |
+| `TURBO_HUB__DATABASE__MAX_IDLE_CONNS` | `4` sqlite / `10` postgres | Max idle pool connections |
 | `TURBO_HUB__PUBLIC_URL` | `https://<listen_addr>` | URL embedded in invite tokens |
 | `TURBO_HUB__OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file |
 | `TURBO_HUB__DNS_WEBHOOK_URL` | | POST hostname changes to this URL |
@@ -295,6 +299,32 @@ turbo-cli:
 | `TURBO_HUB_URL` | Default `--hub-url` for all commands |
 | `TURBO_OPERATOR_KEY` | Default `--api-key` for operator commands |
 | `TURBO_STATE` | Override `state.toml` path (default: `~/.turbo-tunnel/state.toml`) |
+
+### Database
+
+The hub stores invites, redeemed tenants, federated tenants, edge registrations, and signed config entries. Two drivers are supported:
+
+- **SQLite** (default): zero-config single-node deployments. The DB file is created on first boot.
+- **PostgreSQL**: recommended for multi-node operator setups or when you want external backups and HA on the storage layer.
+
+TOML:
+
+```toml
+[hub.database]
+driver = "postgres"
+dsn = "postgres://turbo:secret@db.internal:5432/turbo_hub"
+maxOpenConns = 25
+maxIdleConns = 10
+```
+
+Or env vars:
+
+```bash
+TURBO_HUB__DATABASE__DRIVER=postgres
+TURBO_HUB__DATABASE__DSN='postgres://turbo:secret@db.internal:5432/turbo_hub'
+```
+
+Migrations run automatically at boot via `sea-orm-migration`. The same schema applies to both drivers — no backend-specific branches.
 
 ### Federation
 

@@ -2,6 +2,117 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+/// Which database driver the hub talks to. `sqlite` is the single-node
+/// default; `postgres` is for multi-node deployments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DbDriver {
+    Sqlite,
+    Postgres,
+}
+
+impl DbDriver {
+    const fn default_max_open_conns(self) -> u32 {
+        match self {
+            Self::Sqlite => 4,
+            Self::Postgres => 25,
+        }
+    }
+
+    const fn default_max_idle_conns(self) -> u32 {
+        match self {
+            Self::Sqlite => 4,
+            Self::Postgres => 10,
+        }
+    }
+}
+
+/// Database section of the hub config.
+///
+/// Maps to the `[hub.database]` TOML table and the `TURBO_HUB__DATABASE__*`
+/// env vars. The `dsn` is required when `driver = "postgres"`; for `SQLite`
+/// it defaults to a local `hub.db` file.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DatabaseConfig {
+    #[serde(default = "default_driver")]
+    pub driver: DbDriver,
+    /// Postgres connection string (required when driver is `postgres`).
+    /// Ignored for `SQLite` unless you want to override the default path
+    /// (in which case pass a path or `sqlite://...` URL).
+    #[serde(default)]
+    pub dsn: Option<String>,
+    /// Max open connections. Defaults: 4 for sqlite, 25 for postgres.
+    #[serde(default)]
+    pub max_open_conns: Option<u32>,
+    /// Max idle connections. Defaults: 4 for sqlite, 10 for postgres.
+    #[serde(default)]
+    pub max_idle_conns: Option<u32>,
+}
+
+impl DatabaseConfig {
+    /// Resolve the driver URL fed to `SeaORM`'s `Database::connect`.
+    pub fn connection_url(&self) -> anyhow::Result<String> {
+        match self.driver {
+            DbDriver::Postgres => {
+                let dsn = self
+                    .dsn
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("database.dsn is required when driver is postgres"))?;
+                Ok(dsn.clone())
+            }
+            DbDriver::Sqlite => {
+                let raw = self.dsn.as_deref().unwrap_or("hub.db");
+                if raw.starts_with("sqlite:") {
+                    Ok(raw.to_string())
+                } else {
+                    Ok(format!("sqlite://{raw}?mode=rwc"))
+                }
+            }
+        }
+    }
+
+    pub fn max_open(&self) -> u32 {
+        self.max_open_conns
+            .unwrap_or_else(|| self.driver.default_max_open_conns())
+    }
+
+    pub fn max_idle(&self) -> u32 {
+        self.max_idle_conns
+            .unwrap_or_else(|| self.driver.default_max_idle_conns())
+    }
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            driver: default_driver(),
+            dsn: None,
+            max_open_conns: None,
+            max_idle_conns: None,
+        }
+    }
+}
+
+const fn default_driver() -> DbDriver {
+    DbDriver::Sqlite
+}
+
+/// Best-effort password redaction for Postgres URLs. Used for log lines
+/// only — never parse the result back into a connection URL.
+pub fn redact_db_url(url: &str) -> String {
+    if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+        return url.to_string();
+    }
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    if parsed.password().is_some() {
+        let _ = parsed.set_password(Some("***"));
+    }
+    parsed.to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct NodeConfig {
     pub identity: IdentityConfig,
@@ -23,8 +134,8 @@ pub struct IdentityConfig {
 pub struct HubConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_db_path")]
-    pub db_path: PathBuf,
+    #[serde(default)]
+    pub database: DatabaseConfig,
     #[serde(default = "default_hub_listen")]
     pub listen_addr: String,
     /// Path to a file containing the operator API key. If missing, a fresh
@@ -141,10 +252,6 @@ const fn default_true() -> bool {
     true
 }
 
-fn default_db_path() -> PathBuf {
-    PathBuf::from("hub.db")
-}
-
 fn default_hub_listen() -> String {
     "0.0.0.0:8443".to_string()
 }
@@ -165,7 +272,7 @@ impl Default for HubConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            db_path: default_db_path(),
+            database: DatabaseConfig::default(),
             listen_addr: default_hub_listen(),
             operator_api_key_path: default_operator_key_path(),
             public_url: None,

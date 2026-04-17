@@ -1,30 +1,41 @@
-use sqlx::Row;
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, TransactionTrait,
+};
 use turbo_common::identity::{PqPublicKey, TenantId};
 use turbo_common::invite::INVITE_ID_LEN;
 
-use super::{Db, blob, blob_opt, ms, ms_opt};
+use super::entities::{edge_invites, edges, invite_hostnames, invites, tenant_removals};
 use super::{
-    EdgeInviteRow, InviteRow, InviteStatus, PendingEdgeInvite, PendingInvite, RedeemedTenant,
+    Db, EdgeInviteRow, InviteRow, InviteStatus, PendingEdgeInvite, PendingInvite, RedeemedTenant,
+    bytes_to_array, tenant_id_bytes,
 };
 
 impl Db {
     /// Persist a fresh pending invite. Duplicate `invite_ids` fail via the
-    /// PRIMARY KEY constraint.
+    /// PRIMARY KEY constraint. Hostnames are stored in the normalized
+    /// `invite_hostnames` child table.
     pub async fn insert_invite(&self, invite: &PendingInvite<'_>) -> anyhow::Result<()> {
-        let hostnames_json = serde_json::to_string(invite.hostnames)?;
-        sqlx::query(
-            "INSERT INTO invites \
-             (invite_id, name, hostnames_json, secret_hash, expires_at_ms, status, created_at_ms) \
-             VALUES ($1, $2, $3, $4, $5, 'pending', $6)",
-        )
-        .bind(invite.invite_id.as_slice())
-        .bind(invite.name)
-        .bind(&hostnames_json)
-        .bind(invite.secret_hash.as_slice())
-        .bind(invite.expires_at_ms.cast_signed())
-        .bind(invite.created_at_ms.cast_signed())
-        .execute(&self.pool)
+        let txn = self.conn.begin().await?;
+
+        invites::ActiveModel {
+            invite_id: ActiveValue::Set(invite.invite_id.to_vec()),
+            name: ActiveValue::Set(invite.name.to_string()),
+            secret_hash: ActiveValue::Set(invite.secret_hash.to_vec()),
+            expires_at_ms: ActiveValue::Set(invite.expires_at_ms.cast_signed()),
+            status: ActiveValue::Set(InviteStatus::Pending.as_str().to_string()),
+            tenant_id: ActiveValue::Set(None),
+            tenant_pq_public_key: ActiveValue::Set(None),
+            redeemed_at_ms: ActiveValue::Set(None),
+            created_at_ms: ActiveValue::Set(invite.created_at_ms.cast_signed()),
+        }
+        .insert(&txn)
         .await?;
+
+        insert_hostnames(&txn, &invite.invite_id, invite.hostnames).await?;
+
+        txn.commit().await?;
         Ok(())
     }
 
@@ -32,33 +43,35 @@ impl Db {
         &self,
         invite_id: &[u8; INVITE_ID_LEN],
     ) -> anyhow::Result<Option<InviteRow>> {
-        let row = sqlx::query(
-            "SELECT invite_id, name, hostnames_json, secret_hash, expires_at_ms, status, \
-                    tenant_id, redeemed_at_ms, created_at_ms \
-             FROM invites WHERE invite_id = $1",
-        )
-        .bind(invite_id.as_slice())
-        .fetch_optional(&self.pool)
-        .await?;
-        row.as_ref().map(row_to_invite).transpose()
+        let Some(model) = invites::Entity::find_by_id(invite_id.to_vec())
+            .one(&self.conn)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let hostnames = load_invite_hostnames(&self.conn, invite_id).await?;
+        Ok(Some(model_to_invite_row(model, hostnames)?))
     }
 
     pub async fn list_invites(&self) -> anyhow::Result<Vec<InviteRow>> {
-        let rows = sqlx::query(
-            "SELECT invite_id, name, hostnames_json, secret_hash, expires_at_ms, status, \
-                    tenant_id, redeemed_at_ms, created_at_ms \
-             FROM invites ORDER BY created_at_ms DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(row_to_invite).collect()
+        let rows = invites::Entity::find()
+            .find_with_related(invite_hostnames::Entity)
+            .order_by_desc(invites::Column::CreatedAtMs)
+            .all(&self.conn)
+            .await?;
+        rows.into_iter()
+            .map(|(invite, hns)| {
+                let hostnames = hns.into_iter().map(|h| h.hostname).collect();
+                model_to_invite_row(invite, hostnames)
+            })
+            .collect()
     }
 
     /// Mark an invite as redeemed, recording the tenant that consumed it
     /// and their ML-DSA-65 public key.
     ///
     /// Returns true on success, false if the invite was already redeemed /
-    /// revoked / missing -- callers must treat a `false` return as the
+    /// revoked / missing — callers must treat a `false` return as the
     /// rejection path, not as an error.
     pub async fn redeem_invite(
         &self,
@@ -67,19 +80,28 @@ impl Db {
         pq_public_key: &PqPublicKey,
         redeemed_at_ms: u64,
     ) -> anyhow::Result<bool> {
-        let result = sqlx::query(
-            "UPDATE invites \
-             SET status = 'redeemed', tenant_id = $1, tenant_pq_public_key = $2, \
-                 redeemed_at_ms = $3 \
-             WHERE invite_id = $4 AND status = 'pending'",
-        )
-        .bind(tenant_id.as_bytes().as_slice())
-        .bind(pq_public_key.as_bytes().as_slice())
-        .bind(redeemed_at_ms.cast_signed())
-        .bind(invite_id.as_slice())
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() == 1)
+        let result = invites::Entity::update_many()
+            .col_expr(
+                invites::Column::Status,
+                sea_orm::sea_query::Expr::value(InviteStatus::Redeemed.as_str()),
+            )
+            .col_expr(
+                invites::Column::TenantId,
+                sea_orm::sea_query::Expr::value(tenant_id_bytes(tenant_id)),
+            )
+            .col_expr(
+                invites::Column::TenantPqPublicKey,
+                sea_orm::sea_query::Expr::value(pq_public_key.as_bytes().to_vec()),
+            )
+            .col_expr(
+                invites::Column::RedeemedAtMs,
+                sea_orm::sea_query::Expr::value(redeemed_at_ms.cast_signed()),
+            )
+            .filter(invites::Column::InviteId.eq(invite_id.to_vec()))
+            .filter(invites::Column::Status.eq(InviteStatus::Pending.as_str()))
+            .exec(&self.conn)
+            .await?;
+        Ok(result.rows_affected == 1)
     }
 
     pub async fn re_redeem_invite(
@@ -89,29 +111,37 @@ impl Db {
         pq_public_key: &PqPublicKey,
         redeemed_at_ms: u64,
     ) -> anyhow::Result<()> {
-        sqlx::query(
-            "UPDATE invites \
-             SET tenant_id = $1, tenant_pq_public_key = $2, redeemed_at_ms = $3 \
-             WHERE invite_id = $4 AND status = 'redeemed'",
-        )
-        .bind(tenant_id.as_bytes().as_slice())
-        .bind(pq_public_key.as_bytes().as_slice())
-        .bind(redeemed_at_ms.cast_signed())
-        .bind(invite_id.as_slice())
-        .execute(&self.pool)
-        .await?;
+        invites::Entity::update_many()
+            .col_expr(
+                invites::Column::TenantId,
+                sea_orm::sea_query::Expr::value(tenant_id_bytes(tenant_id)),
+            )
+            .col_expr(
+                invites::Column::TenantPqPublicKey,
+                sea_orm::sea_query::Expr::value(pq_public_key.as_bytes().to_vec()),
+            )
+            .col_expr(
+                invites::Column::RedeemedAtMs,
+                sea_orm::sea_query::Expr::value(redeemed_at_ms.cast_signed()),
+            )
+            .filter(invites::Column::InviteId.eq(invite_id.to_vec()))
+            .filter(invites::Column::Status.eq(InviteStatus::Redeemed.as_str()))
+            .exec(&self.conn)
+            .await?;
         Ok(())
     }
 
     pub async fn revoke_invite(&self, invite_id: &[u8; INVITE_ID_LEN]) -> anyhow::Result<bool> {
-        let result = sqlx::query(
-            "UPDATE invites SET status = 'revoked' \
-             WHERE invite_id = $1 AND status = 'pending'",
-        )
-        .bind(invite_id.as_slice())
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() == 1)
+        let result = invites::Entity::update_many()
+            .col_expr(
+                invites::Column::Status,
+                sea_orm::sea_query::Expr::value(InviteStatus::Revoked.as_str()),
+            )
+            .filter(invites::Column::InviteId.eq(invite_id.to_vec()))
+            .filter(invites::Column::Status.eq(InviteStatus::Pending.as_str()))
+            .exec(&self.conn)
+            .await?;
+        Ok(result.rows_affected == 1)
     }
 
     /// Return the first hostname in `candidates_lower` that is already
@@ -125,21 +155,13 @@ impl Db {
         if candidates_lower.is_empty() {
             return Ok(None);
         }
-        let candidates_json = serde_json::to_string(candidates_lower)?;
-        let matched: Option<String> = sqlx::query_scalar(
-            "SELECT c.value \
-             FROM json_each($1) AS c \
-             WHERE EXISTS ( \
-                 SELECT 1 FROM invites, json_each(invites.hostnames_json) AS je \
-                 WHERE invites.status = 'pending' \
-                   AND lower(je.value) = c.value \
-             ) \
-             LIMIT 1",
-        )
-        .bind(&candidates_json)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(matched)
+        let hit = invite_hostnames::Entity::find()
+            .join(JoinType::InnerJoin, invite_hostnames::Relation::Invite.def())
+            .filter(invites::Column::Status.eq(InviteStatus::Pending.as_str()))
+            .filter(invite_hostnames::Column::HostnameLower.is_in(candidates_lower.to_vec()))
+            .one(&self.conn)
+            .await?;
+        Ok(hit.map(|h| h.hostname_lower))
     }
 
     /// Record an operator decision to remove a tenant from service.
@@ -149,29 +171,28 @@ impl Db {
         tenant_id: &TenantId,
         removed_at_ms: u64,
     ) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO tenant_removals (tenant_id, removed_at_ms) VALUES ($1, $2) \
-             ON CONFLICT(tenant_id) DO UPDATE SET removed_at_ms = excluded.removed_at_ms",
-        )
-        .bind(tenant_id.as_bytes().as_slice())
-        .bind(removed_at_ms.cast_signed())
-        .execute(&self.pool)
-        .await?;
+        let model = tenant_removals::ActiveModel {
+            tenant_id: ActiveValue::Set(tenant_id_bytes(tenant_id)),
+            removed_at_ms: ActiveValue::Set(removed_at_ms.cast_signed()),
+        };
+        tenant_removals::Entity::insert(model)
+            .on_conflict(
+                OnConflict::column(tenant_removals::Column::TenantId)
+                    .update_column(tenant_removals::Column::RemovedAtMs)
+                    .to_owned(),
+            )
+            .exec(&self.conn)
+            .await?;
         Ok(())
     }
 
     /// All currently-removed tenants. Used at hub boot to filter the
     /// allowlist, and by tests.
     pub async fn list_tenant_removals(&self) -> anyhow::Result<Vec<TenantId>> {
-        let rows = sqlx::query("SELECT tenant_id FROM tenant_removals")
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter()
+        let rows = tenant_removals::Entity::find().all(&self.conn).await?;
+        rows.into_iter()
             .map(|row| {
-                let bytes: Vec<u8> = row.get("tenant_id");
-                let arr: [u8; 32] = bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("removed tenant_id is not 32 bytes"))?;
+                let arr = bytes_to_array::<32>(row.tenant_id, "removed tenant_id")?;
                 Ok(TenantId::from_bytes(&arr))
             })
             .collect()
@@ -181,30 +202,29 @@ impl Db {
     /// hub calls this at boot to populate the in-memory `OwnershipPolicy`
     /// so restart survives without a separate tenants table.
     pub async fn list_redeemed_tenants(&self) -> anyhow::Result<Vec<RedeemedTenant>> {
-        let rows = sqlx::query(
-            "SELECT tenant_id, hostnames_json, tenant_pq_public_key FROM invites \
-             WHERE status = 'redeemed' AND tenant_id IS NOT NULL \
-                                      AND tenant_pq_public_key IS NOT NULL",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = invites::Entity::find()
+            .filter(invites::Column::Status.eq(InviteStatus::Redeemed.as_str()))
+            .filter(invites::Column::TenantId.is_not_null())
+            .filter(invites::Column::TenantPqPublicKey.is_not_null())
+            .find_with_related(invite_hostnames::Entity)
+            .all(&self.conn)
+            .await?;
 
-        rows.iter()
-            .map(|row| {
-                let tenant_bytes: Vec<u8> = row.get("tenant_id");
-                let hostnames_json: String = row.get("hostnames_json");
-                let pq_bytes: Vec<u8> = row.get("tenant_pq_public_key");
-
-                let tenant_arr: [u8; 32] = tenant_bytes
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("redeemed tenant_id is not 32 bytes"))?;
-                let tenant_id = TenantId::from_bytes(&tenant_arr);
-                let hostnames: Vec<String> = serde_json::from_str(&hostnames_json)?;
+        rows.into_iter()
+            .map(|(invite, hns)| {
+                // NULL filter above guarantees these are Some.
+                let tenant_bytes = invite
+                    .tenant_id
+                    .ok_or_else(|| anyhow::anyhow!("redeemed invite missing tenant_id"))?;
+                let pq_bytes = invite
+                    .tenant_pq_public_key
+                    .ok_or_else(|| anyhow::anyhow!("redeemed invite missing tenant_pq_public_key"))?;
+                let tenant_arr = bytes_to_array::<32>(tenant_bytes, "redeemed tenant_id")?;
                 let pq_public_key = PqPublicKey::from_slice(&pq_bytes)
                     .map_err(|e| anyhow::anyhow!("invalid redeemed pq_public_key: {e}"))?;
                 Ok(RedeemedTenant {
-                    tenant_id,
-                    hostnames,
+                    tenant_id: TenantId::from_bytes(&tenant_arr),
+                    hostnames: hns.into_iter().map(|h| h.hostname).collect(),
                     pq_public_key,
                 })
             })
@@ -212,17 +232,17 @@ impl Db {
     }
 
     pub async fn insert_edge_invite(&self, invite: &PendingEdgeInvite<'_>) -> anyhow::Result<()> {
-        sqlx::query(
-            "INSERT INTO edge_invites \
-             (invite_id, name, secret_hash, expires_at_ms, status, created_at_ms) \
-             VALUES ($1, $2, $3, $4, 'pending', $5)",
-        )
-        .bind(invite.invite_id.as_slice())
-        .bind(invite.name)
-        .bind(invite.secret_hash.as_slice())
-        .bind(invite.expires_at_ms.cast_signed())
-        .bind(invite.created_at_ms.cast_signed())
-        .execute(&self.pool)
+        edge_invites::ActiveModel {
+            invite_id: ActiveValue::Set(invite.invite_id.to_vec()),
+            name: ActiveValue::Set(invite.name.to_string()),
+            secret_hash: ActiveValue::Set(invite.secret_hash.to_vec()),
+            expires_at_ms: ActiveValue::Set(invite.expires_at_ms.cast_signed()),
+            status: ActiveValue::Set(InviteStatus::Pending.as_str().to_string()),
+            edge_node_id: ActiveValue::Set(None),
+            redeemed_at_ms: ActiveValue::Set(None),
+            created_at_ms: ActiveValue::Set(invite.created_at_ms.cast_signed()),
+        }
+        .insert(&self.conn)
         .await?;
         Ok(())
     }
@@ -231,32 +251,24 @@ impl Db {
         &self,
         invite_id: &[u8; INVITE_ID_LEN],
     ) -> anyhow::Result<Option<EdgeInviteRow>> {
-        let row = sqlx::query(
-            "SELECT invite_id, name, secret_hash, expires_at_ms, status, \
-                    edge_node_id, redeemed_at_ms, created_at_ms \
-             FROM edge_invites WHERE invite_id = $1",
-        )
-        .bind(invite_id.as_slice())
-        .fetch_optional(&self.pool)
-        .await?;
-        row.as_ref().map(row_to_edge_invite).transpose()
+        let model = edge_invites::Entity::find_by_id(invite_id.to_vec())
+            .one(&self.conn)
+            .await?;
+        model.map(model_to_edge_invite_row).transpose()
     }
 
     pub async fn list_edge_invites(&self) -> anyhow::Result<Vec<EdgeInviteRow>> {
-        let rows = sqlx::query(
-            "SELECT invite_id, name, secret_hash, expires_at_ms, status, \
-                    edge_node_id, redeemed_at_ms, created_at_ms \
-             FROM edge_invites ORDER BY created_at_ms DESC",
-        )
-        .fetch_all(&self.pool)
-        .await?;
-        rows.iter().map(row_to_edge_invite).collect()
+        let rows = edge_invites::Entity::find()
+            .order_by_desc(edge_invites::Column::CreatedAtMs)
+            .all(&self.conn)
+            .await?;
+        rows.into_iter().map(model_to_edge_invite_row).collect()
     }
 
     /// Atomically flip a pending edge invite to `redeemed` and register the
-    /// edge's iroh `node_id`. Both rows land in the same implicit transaction
-    /// — either both succeed or neither. Returns false if the invite was not
-    /// pending (already redeemed, revoked, or missing).
+    /// edge's iroh `node_id`. Both rows land in the same transaction — either
+    /// both succeed or neither. Returns false if the invite was not pending
+    /// (already redeemed, revoked, or missing).
     pub async fn redeem_edge_invite(
         &self,
         invite_id: &[u8; INVITE_ID_LEN],
@@ -264,32 +276,45 @@ impl Db {
         name: &str,
         redeemed_at_ms: u64,
     ) -> anyhow::Result<bool> {
-        let mut tx = self.pool.begin().await?;
-        let updated = sqlx::query(
-            "UPDATE edge_invites \
-             SET status = 'redeemed', edge_node_id = $1, redeemed_at_ms = $2 \
-             WHERE invite_id = $3 AND status = 'pending'",
-        )
-        .bind(edge_node_id.as_slice())
-        .bind(redeemed_at_ms.cast_signed())
-        .bind(invite_id.as_slice())
-        .execute(&mut *tx)
-        .await?;
-        if updated.rows_affected() != 1 {
-            tx.rollback().await?;
+        let txn = self.conn.begin().await?;
+
+        let updated = edge_invites::Entity::update_many()
+            .col_expr(
+                edge_invites::Column::Status,
+                sea_orm::sea_query::Expr::value(InviteStatus::Redeemed.as_str()),
+            )
+            .col_expr(
+                edge_invites::Column::EdgeNodeId,
+                sea_orm::sea_query::Expr::value(edge_node_id.to_vec()),
+            )
+            .col_expr(
+                edge_invites::Column::RedeemedAtMs,
+                sea_orm::sea_query::Expr::value(redeemed_at_ms.cast_signed()),
+            )
+            .filter(edge_invites::Column::InviteId.eq(invite_id.to_vec()))
+            .filter(edge_invites::Column::Status.eq(InviteStatus::Pending.as_str()))
+            .exec(&txn)
+            .await?;
+        if updated.rows_affected != 1 {
+            txn.rollback().await?;
             return Ok(false);
         }
-        sqlx::query(
-            "INSERT INTO edges (edge_node_id, name, registered_at_ms) VALUES ($1, $2, $3) \
-             ON CONFLICT(edge_node_id) DO UPDATE \
-                 SET name = excluded.name, registered_at_ms = excluded.registered_at_ms",
-        )
-        .bind(edge_node_id.as_slice())
-        .bind(name)
-        .bind(redeemed_at_ms.cast_signed())
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
+
+        let edge = edges::ActiveModel {
+            edge_node_id: ActiveValue::Set(edge_node_id.to_vec()),
+            name: ActiveValue::Set(name.to_string()),
+            registered_at_ms: ActiveValue::Set(redeemed_at_ms.cast_signed()),
+        };
+        edges::Entity::insert(edge)
+            .on_conflict(
+                OnConflict::column(edges::Column::EdgeNodeId)
+                    .update_columns([edges::Column::Name, edges::Column::RegisteredAtMs])
+                    .to_owned(),
+            )
+            .exec(&txn)
+            .await?;
+
+        txn.commit().await?;
         Ok(true)
     }
 
@@ -297,52 +322,96 @@ impl Db {
         &self,
         invite_id: &[u8; INVITE_ID_LEN],
     ) -> anyhow::Result<bool> {
-        let result = sqlx::query(
-            "UPDATE edge_invites SET status = 'revoked' \
-             WHERE invite_id = $1 AND status = 'pending'",
-        )
-        .bind(invite_id.as_slice())
-        .execute(&self.pool)
-        .await?;
-        Ok(result.rows_affected() == 1)
+        let result = edge_invites::Entity::update_many()
+            .col_expr(
+                edge_invites::Column::Status,
+                sea_orm::sea_query::Expr::value(InviteStatus::Revoked.as_str()),
+            )
+            .filter(edge_invites::Column::InviteId.eq(invite_id.to_vec()))
+            .filter(edge_invites::Column::Status.eq(InviteStatus::Pending.as_str()))
+            .exec(&self.conn)
+            .await?;
+        Ok(result.rows_affected == 1)
     }
 
     /// Check if an edge is registered. Used for signature-auth on
     /// `/v1/routes/subscribe`.
     pub async fn edge_is_registered(&self, edge_node_id: &[u8; 32]) -> anyhow::Result<bool> {
-        let row = sqlx::query("SELECT 1 AS present FROM edges WHERE edge_node_id = $1 LIMIT 1")
-            .bind(edge_node_id.as_slice())
-            .fetch_optional(&self.pool)
+        let model = edges::Entity::find_by_id(edge_node_id.to_vec())
+            .one(&self.conn)
             .await?;
-        Ok(row.is_some())
+        Ok(model.is_some())
     }
 }
 
-fn row_to_invite(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<InviteRow> {
-    let hostnames_json: String = row.get("hostnames_json");
+async fn insert_hostnames(
+    conn: &impl sea_orm::ConnectionTrait,
+    invite_id: &[u8; INVITE_ID_LEN],
+    hostnames: &[String],
+) -> anyhow::Result<()> {
+    if hostnames.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<invite_hostnames::ActiveModel> = hostnames
+        .iter()
+        .map(|h| invite_hostnames::ActiveModel {
+            invite_id: ActiveValue::Set(invite_id.to_vec()),
+            hostname_lower: ActiveValue::Set(h.to_lowercase()),
+            hostname: ActiveValue::Set(h.clone()),
+        })
+        .collect();
+    invite_hostnames::Entity::insert_many(rows)
+        .exec(conn)
+        .await?;
+    Ok(())
+}
+
+async fn load_invite_hostnames(
+    conn: &DatabaseConnectionAlias,
+    invite_id: &[u8; INVITE_ID_LEN],
+) -> anyhow::Result<Vec<String>> {
+    let rows = invite_hostnames::Entity::find()
+        .filter(invite_hostnames::Column::InviteId.eq(invite_id.to_vec()))
+        .all(conn)
+        .await?;
+    Ok(rows.into_iter().map(|r| r.hostname).collect())
+}
+
+type DatabaseConnectionAlias = sea_orm::DatabaseConnection;
+
+fn model_to_invite_row(
+    model: invites::Model,
+    hostnames: Vec<String>,
+) -> anyhow::Result<InviteRow> {
     Ok(InviteRow {
-        invite_id: blob(row, "invite_id")?,
-        name: row.get("name"),
-        hostnames: serde_json::from_str(&hostnames_json)?,
-        secret_hash: blob(row, "secret_hash")?,
-        expires_at_ms: ms(row, "expires_at_ms"),
-        status: InviteStatus::parse(row.get("status"))?,
-        tenant_id: blob_opt::<32>(row, "tenant_id")?.map(|b| TenantId::from_bytes(&b)),
-        redeemed_at_ms: ms_opt(row, "redeemed_at_ms")?,
-        created_at_ms: ms(row, "created_at_ms"),
+        invite_id: bytes_to_array(model.invite_id, "invite_id")?,
+        name: model.name,
+        hostnames,
+        secret_hash: bytes_to_array(model.secret_hash, "secret_hash")?,
+        expires_at_ms: model.expires_at_ms.cast_unsigned(),
+        status: InviteStatus::parse(&model.status)?,
+        tenant_id: model
+            .tenant_id
+            .map(|b| bytes_to_array::<32>(b, "tenant_id").map(|a| TenantId::from_bytes(&a)))
+            .transpose()?,
+        redeemed_at_ms: model.redeemed_at_ms.map(i64::cast_unsigned),
+        created_at_ms: model.created_at_ms.cast_unsigned(),
     })
 }
 
-fn row_to_edge_invite(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<EdgeInviteRow> {
+fn model_to_edge_invite_row(model: edge_invites::Model) -> anyhow::Result<EdgeInviteRow> {
     Ok(EdgeInviteRow {
-        invite_id: blob(row, "invite_id")?,
-        name: row.get("name"),
-        secret_hash: blob(row, "secret_hash")?,
-        expires_at_ms: ms(row, "expires_at_ms"),
-        status: InviteStatus::parse(row.get("status"))?,
-        edge_node_id: blob_opt(row, "edge_node_id")?,
-        redeemed_at_ms: ms_opt(row, "redeemed_at_ms")?,
-        created_at_ms: ms(row, "created_at_ms"),
+        invite_id: bytes_to_array(model.invite_id, "invite_id")?,
+        name: model.name,
+        secret_hash: bytes_to_array(model.secret_hash, "secret_hash")?,
+        expires_at_ms: model.expires_at_ms.cast_unsigned(),
+        status: InviteStatus::parse(&model.status)?,
+        edge_node_id: model
+            .edge_node_id
+            .map(|b| bytes_to_array::<32>(b, "edge_node_id"))
+            .transpose()?,
+        redeemed_at_ms: model.redeemed_at_ms.map(i64::cast_unsigned),
+        created_at_ms: model.created_at_ms.cast_unsigned(),
     })
 }
 
@@ -397,7 +466,6 @@ mod tests {
 
         db.insert_invite(&pending).await.unwrap();
 
-        // Same invite_id with different payload -- PRIMARY KEY violation.
         let dup = make_pending(7, "b", &hostnames, [2; 32], 2_000_000_000_000);
         assert!(db.insert_invite(&dup).await.is_err());
     }
@@ -467,7 +535,6 @@ mod tests {
                 .unwrap()
         );
 
-        // tenant_id must still point at the first redeemer, not the second.
         let row = db.get_invite(&pending.invite_id).await.unwrap().unwrap();
         assert_eq!(row.tenant_id, Some(t1.id()));
     }
@@ -511,7 +578,6 @@ mod tests {
         let row = db.get_invite(&pending.invite_id).await.unwrap().unwrap();
         assert_eq!(row.status, InviteStatus::Revoked);
 
-        // Revoking twice must be a no-op returning false.
         assert!(!db.revoke_invite(&pending.invite_id).await.unwrap());
     }
 
@@ -529,7 +595,6 @@ mod tests {
                 .unwrap()
         );
 
-        // Redeemed invites cannot be revoked -- the tenant is already registered.
         assert!(!db.revoke_invite(&pending.invite_id).await.unwrap());
     }
 
@@ -541,14 +606,12 @@ mod tests {
         let pending = make_pending(20, "alice", &hs, [20; 32], 2_000_000_000_000);
         db.insert_invite(&pending).await.unwrap();
 
-        // Lookup with a lowercased candidate must match the mixed-case stored row.
         let got = db
             .any_pending_invite_claims(&["app.alice.example.eu".to_string()])
             .await
             .unwrap();
         assert_eq!(got.as_deref(), Some("app.alice.example.eu"));
 
-        // Non-overlapping: returns None.
         let got = db
             .any_pending_invite_claims(&["other.example.eu".to_string()])
             .await
@@ -564,8 +627,6 @@ mod tests {
         let inv = make_pending(21, "t", &hs, [21; 32], 2_000_000_000_000);
         db.insert_invite(&inv).await.unwrap();
 
-        // A redeemed invite should NOT show up here -- redeemed invites are
-        // covered by the in-memory policy, not by this DB scan.
         let tenant = TenantKeypair::generate();
         db.redeem_invite(&inv.invite_id, &tenant.id(), tenant.public_key(), 1)
             .await
@@ -577,7 +638,6 @@ mod tests {
             .unwrap();
         assert!(got.is_none());
 
-        // Revoked invites also don't count.
         let hs2 = vec!["revoked.example.eu".to_string()];
         let inv2 = make_pending(22, "t2", &hs2, [22; 32], 2_000_000_000_000);
         db.insert_invite(&inv2).await.unwrap();
@@ -609,7 +669,6 @@ mod tests {
         let db = temp_db().await;
         let tenant = TenantKeypair::generate();
 
-        // Repeat calls must not error (ON CONFLICT update).
         db.remove_tenant(&tenant.id(), 100).await.unwrap();
         db.remove_tenant(&tenant.id(), 200).await.unwrap();
 
@@ -640,7 +699,6 @@ mod tests {
         db.redeem_invite(&b.invite_id, &t_bob.id(), t_bob.public_key(), 2)
             .await
             .unwrap();
-        // c is left pending.
 
         let tenants = db.list_redeemed_tenants().await.unwrap();
         assert_eq!(tenants.len(), 2);

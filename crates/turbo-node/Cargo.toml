@@ -10,7 +10,11 @@ path = "src/main.rs"
 [dependencies]
 turbo-common = { path = "../turbo-common" }
 iroh = { workspace = true }
-sqlx = { workspace = true }
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
+sea-query = { workspace = true }
+async-trait = { workspace = true }
+url = { workspace = true }
 ciborium = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
