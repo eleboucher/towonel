@@ -128,7 +128,7 @@ rustls-pemfile = "2"
 # ACME (Let's Encrypt) automatic certificate provisioning.
 instant-acme = "0.8"
 rcgen = "0.14"
-webpki-roots = "0.26"
+webpki-roots = "1.0"
 # Lock-free snapshot for the hot path (rustls cert resolver).
 arc-swap = "1.7"
 # Bounded TTL cache for federation nonce replay protection.
