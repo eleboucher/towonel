@@ -14,7 +14,8 @@ pub async fn run(invite_str: &str, config_out: Option<&Path>) -> anyhow::Result<
     println!("Contacting hub at {}...", token.hub_url);
 
     let key_path = PathBuf::from(DEFAULT_NODE_KEY);
-    let config_path = config_out.map_or_else(|| PathBuf::from(DEFAULT_NODE_CONFIG), Path::to_path_buf);
+    let config_path =
+        config_out.map_or_else(|| PathBuf::from(DEFAULT_NODE_CONFIG), Path::to_path_buf);
 
     let secret_key = turbo_common::identity::load_or_generate_secret_key(&key_path)
         .with_context(|| format!("failed to load/generate node key at {}", key_path.display()))?;
@@ -92,8 +93,9 @@ fn write_node_config(path: &Path, key_path: &Path, hub_url: &str) -> anyhow::Res
         [edge]\n\
         enabled = true\n\
         listen_addr = \"0.0.0.0:443\"\n\
-        # Subscribe to this hub for route updates (user-stories.md §5).\n\
-        hub_url = \"{}\"\n",
+        # Subscribe to these hubs for route updates.\n\
+        # The edge rotates through the list on disconnect for hub failover.\n\
+        hub_urls = [\"{}\"]\n",
         key_path.display(),
         hub_url.trim_end_matches('/'),
     );

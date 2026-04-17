@@ -55,10 +55,9 @@ impl DatabaseConfig {
     pub fn connection_url(&self) -> anyhow::Result<String> {
         match self.driver {
             DbDriver::Postgres => {
-                let dsn = self
-                    .dsn
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("database.dsn is required when driver is postgres"))?;
+                let dsn = self.dsn.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("database.dsn is required when driver is postgres")
+                })?;
                 Ok(dsn.clone())
             }
             DbDriver::Sqlite => {
@@ -177,7 +176,9 @@ pub struct PeerConfig {
     pub url: String,
 }
 
+/// Edge-mode settings.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EdgeConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -306,7 +307,6 @@ impl NodeConfig {
     /// TURBO_HUB__OPERATOR_API_KEY_PATH=/run/secrets/operator.key
     /// TURBO_HUB__PEERS='[{"url":"https://hub-b.example.eu:8443"}]'
     /// TURBO_EDGE__HUB_URLS='["https://hub-a.example.eu:8443","https://hub-b.example.eu:8443"]'
-    /// TURBO_EDGE__HUB_URL=https://hub-a.example.eu:8443   # legacy scalar alias
     /// TURBO_IDENTITY__KEY_PATH=/var/lib/turbo-tunnel/node.key
     /// ```
     ///
@@ -340,10 +340,7 @@ impl NodeConfig {
 
         if let Ok(v) = std::env::var("TURBO_EDGE__HUB_URLS") {
             config.edge.hub_urls = serde_json::from_str(&v)?;
-        } else if let Ok(v) = std::env::var("TURBO_EDGE__HUB_URL")
-            && config.edge.hub_urls.is_empty() {
-                config.edge.hub_urls = vec![v];
-            }
+        }
 
         for peer in &config.hub.peers {
             if !peer.url.starts_with("https://") {
@@ -363,5 +360,53 @@ impl NodeConfig {
         }
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IDENTITY: &str = r#"
+        [identity]
+        key_path = "node.key"
+    "#;
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn hub_urls_array_loads() {
+        let toml_str = format!(
+            r#"{IDENTITY}
+            [edge]
+            hub_urls = ["https://hub-a.example.eu:8443", "https://hub-b.example.eu:8443"]
+            "#
+        );
+        let config: NodeConfig =
+            toml::from_str(&toml_str).expect("valid hub_urls array should parse");
+        assert_eq!(
+            config.edge.hub_urls,
+            vec![
+                "https://hub-a.example.eu:8443".to_string(),
+                "https://hub-b.example.eu:8443".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_hub_url_scalar_is_rejected() {
+        let toml_str = format!(
+            r#"{IDENTITY}
+            [edge]
+            hub_url = "https://legacy.example.eu:8443"
+            "#
+        );
+        let err =
+            toml::from_str::<NodeConfig>(&toml_str).expect_err("scalar hub_url must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("hub_url"),
+            "error should name the offending field, got: {msg}"
+        );
     }
 }
