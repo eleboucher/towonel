@@ -116,7 +116,7 @@ subtle = "2.6"
 # Secure memory zeroing for seeds, passphrases, and derived keys.
 zeroize = { version = "1", features = ["derive"] }
 # Read passphrases without terminal echo (key export/import).
-rpassword = "5"
+rpassword = "7"
 # TLS termination at the edge.
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = [
