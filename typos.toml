@@ -1,0 +1,13 @@
+[files]
+extend-exclude = [
+  "Cargo.lock",
+  "target/",
+  "dist/",
+  "*.sqlite",
+  "*.sqlite-journal",
+]
+
+[default]
+check-filename = true
+
+[default.extend-identifiers]

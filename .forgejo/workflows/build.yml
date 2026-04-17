@@ -46,8 +46,8 @@ jobs:
           push: true
           tags: ${{ steps.meta-node.outputs.tags }}
           labels: ${{ steps.meta-node.outputs.labels }}
-          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,name=turbo-node
-          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,name=turbo-node,mode=max
+          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=turbo-node
+          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=turbo-node,mode=max
 
       - name: Compute agent image metadata
         id: meta-agent
@@ -71,5 +71,5 @@ jobs:
           push: true
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}
-          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,name=turbo-agent
-          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,name=turbo-agent,mode=max
+          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=turbo-agent
+          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=turbo-agent,mode=max

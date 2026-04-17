@@ -1,0 +1,43 @@
+[tools]
+rust = "1.94.0"
+lefthook = "latest"
+
+"cargo:cargo-nextest" = "latest"
+"cargo:cargo-deny" = "latest"
+"cargo:cargo-machete" = "latest"
+"cargo:typos-cli" = "latest"
+"cargo:taplo-cli" = "latest"
+
+[env]
+RUST_BACKTRACE = "1"
+
+[tasks.fmt]
+description = "Format code (rustfmt + taplo)"
+run = ["cargo fmt --all", "taplo fmt"]
+
+[tasks.check]
+description = "Run all CI checks locally"
+depends = ["lint", "test", "audit"]
+
+[tasks.lint]
+description = "Run fmt, clippy, typos, taplo, machete"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "cargo machete",
+  "taplo fmt --check",
+  "typos",
+]
+
+[tasks.test]
+description = "Run tests with nextest"
+run = "cargo nextest run --workspace --all-features --no-fail-fast"
+
+[tasks.audit]
+description = "Run cargo-deny checks"
+run = "cargo deny --all-features check"
+
+[tasks.doc]
+description = "Build docs with warnings as errors"
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --workspace --all-features --no-deps"

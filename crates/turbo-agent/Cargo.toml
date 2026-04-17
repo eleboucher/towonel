@@ -18,11 +18,9 @@ toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-hex = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true }
 ciborium = { workspace = true }
-ed25519-dalek = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
