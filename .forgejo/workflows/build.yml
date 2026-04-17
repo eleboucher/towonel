@@ -43,8 +43,8 @@ jobs:
           push: true
           tags: ${{ steps.meta-node.outputs.tags }}
           labels: ${{ steps.meta-node.outputs.labels }}
-          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node:buildcache
-          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node:buildcache,mode=max
+          cache-from: type=gha,scope=towonel-node
+          cache-to: type=gha,scope=towonel-node,mode=max
 
       - name: Compute agent image metadata
         id: meta-agent
@@ -65,5 +65,5 @@ jobs:
           push: true
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}
-          cache-from: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent:buildcache
-          cache-to: type=registry,ref=git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent:buildcache,mode=max
+          cache-from: type=gha,scope=towonel-agent
+          cache-to: type=gha,scope=towonel-agent,mode=max
