@@ -18,15 +18,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Install git-cliff
+        env:
+          GIT_CLIFF_VERSION: "2.12.0"
+        run: |
+          set -euo pipefail
+          wget -qO- \
+            "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /tmp
+          install -m 0755 "/tmp/git-cliff-${GIT_CLIFF_VERSION}/git-cliff" /usr/local/bin/git-cliff
+
       - name: Generate release notes
         id: changelog
-        uses: https://github.com/orhun/git-cliff-action@v4
-        with:
-          config: cliff.toml
-          args: --latest --strip all
-        env:
-          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITEA_API_URL: https://git.erwanleboucher.dev/api/v1
+        run: |
+          set -euo pipefail
+          CONTENT="$(git-cliff --config cliff.toml --latest --strip all)"
+          printf 'content<<EOF\n%s\nEOF\n' "$CONTENT" >> "$GITHUB_OUTPUT"
 
       - name: Create Forgejo release
         env:
