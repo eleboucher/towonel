@@ -49,7 +49,7 @@ impl ServiceMap {
                 OriginTarget {
                     address: svc.origin.clone(),
                     server_name: svc.origin_server_name.clone(),
-                    proxy_protocol: svc.proxy_protocol,
+                    proxy_protocol: svc.resolved_proxy_protocol(),
                 },
             );
         }

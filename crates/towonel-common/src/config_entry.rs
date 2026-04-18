@@ -197,7 +197,7 @@ fn to_canonical_cbor(payload: &ConfigPayload) -> Result<Vec<u8>, ConfigEntryErro
             CborValue::Bytes(agent_id.as_bytes().to_vec()),
         ),
         ConfigOp::SetHostnameTls { hostname, mode } => {
-            let mode_cbor = tls_mode_to_cbor(mode);
+            let mode_cbor = tls_mode_to_cbor(*mode);
             CborValue::Map(vec![(
                 CborValue::Text("set_hostname_tls".into()),
                 CborValue::Map(vec![
@@ -246,7 +246,7 @@ fn op_with(variant: &str, field: &str, value: CborValue) -> CborValue {
 /// Canonical CBOR encoding of a `TlsMode`. Mirrors the `serde`
 /// internally-tagged representation (`{ mode = "passthrough" | "terminate" }`)
 /// so signatures are deterministic.
-fn tls_mode_to_cbor(mode: &TlsMode) -> CborValue {
+fn tls_mode_to_cbor(mode: TlsMode) -> CborValue {
     let tag = match mode {
         TlsMode::Passthrough => "passthrough",
         TlsMode::Terminate => "terminate",
@@ -473,7 +473,7 @@ mod tests {
                 timestamp: 1_700_000_000_000,
                 op: ConfigOp::SetHostnameTls {
                     hostname: "app.example.eu".into(),
-                    mode: mode.clone(),
+                    mode,
                 },
             };
             let a = SignedConfigEntry::sign(&payload, &kp).unwrap();

@@ -32,7 +32,7 @@ pub async fn publish(
             timestamp: towonel_common::time::now_ms(),
             op: ConfigOp::SetHostnameTls {
                 hostname: svc.hostname.clone(),
-                mode: svc.tls_mode.clone(),
+                mode: svc.tls_mode,
             },
         };
         match submit_entry(&client, hub_url, &tenant_kp, payload).await {

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "mode")]
 pub enum TlsMode {
     #[default]
@@ -46,7 +46,7 @@ impl TlsPolicyTable {
     #[must_use]
     pub fn lookup(&self, hostname: &str) -> TlsMode {
         wildcard_lookup(hostname, |key| self.policies.get(key))
-            .cloned()
+            .copied()
             .unwrap_or(TlsMode::Passthrough)
     }
 

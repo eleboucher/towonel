@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use towonel_common::client_state::{ClientState, DefaultPaths};
+use towonel_common::tls_policy::TlsMode;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct AgentConfig {
@@ -24,14 +25,29 @@ pub struct IdentityConfig {
     pub key_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyProtocol {
     /// Do not prepend any PROXY header.
     None,
     /// Prepend `HAProxy` PROXY v2 header to the origin stream.
-    #[default]
     V2,
+}
+
+impl ProxyProtocol {
+    /// Default for a service when the user didn't pin `proxy_protocol`.
+    /// Derived from [`TlsMode`]:
+    /// - [`TlsMode::Passthrough`] → [`ProxyProtocol::V2`] (the only L4 mechanism
+    ///   left to convey the client IP once envoy terminates TLS itself)
+    /// - [`TlsMode::Terminate`] → [`ProxyProtocol::None`] (edge already
+    ///   handshook; bytes reaching origin are HTTP — a PROXY prefix would
+    ///   corrupt envoy's HTTP listener)
+    pub const fn default_for_tls_mode(mode: TlsMode) -> Self {
+        match mode {
+            TlsMode::Passthrough => Self::V2,
+            TlsMode::Terminate => Self::None,
+        }
+    }
 }
 
 /// A service the agent exposes. The edge routes to it by SNI-matching
@@ -53,11 +69,29 @@ pub struct ServiceConfig {
     /// have the edge handshake and forward plaintext.
     #[serde(default)]
     pub tls_mode: towonel_common::tls_policy::TlsMode,
-    /// PROXY protocol header prepended to the origin connection. Use
-    /// `v2` when the origin is a TCP load balancer like Envoy Gateway
-    /// configured with `ClientTrafficPolicy.proxyProtocol`.
+    /// PROXY protocol header prepended to the origin connection. When
+    /// omitted, defaults derive from `tls_mode`: passthrough → v2 (only L4
+    /// way to convey client IP), terminate → none (bytes are HTTP, PROXY
+    /// would corrupt the origin's HTTP listener).
     #[serde(default)]
-    pub proxy_protocol: ProxyProtocol,
+    pub proxy_protocol: Option<ProxyProtocol>,
+}
+
+impl ServiceConfig {
+    /// Resolve the effective PROXY protocol mode for this service, using
+    /// the explicit value if set, otherwise the [`TlsMode`]-derived default.
+    pub fn resolved_proxy_protocol(&self) -> ProxyProtocol {
+        self.proxy_protocol
+            .unwrap_or_else(|| ProxyProtocol::default_for_tls_mode(self.tls_mode))
+    }
+}
+
+impl Default for ProxyProtocol {
+    /// Backstop for callers that don't have a `TlsMode` available. Prefer
+    /// [`ProxyProtocol::default_for_tls_mode`] in service-aware code paths.
+    fn default() -> Self {
+        Self::V2
+    }
 }
 
 /// Fully resolved agent settings after merging `agent.toml` and `state.toml`.
@@ -148,7 +182,30 @@ mod tests {
             {"hostname":"app.b","origin":"127.0.0.1:80"}
         ]"#;
         let services: Vec<ServiceConfig> = serde_json::from_str(json).unwrap();
-        assert_eq!(services[0].proxy_protocol, ProxyProtocol::None);
-        assert_eq!(services[1].proxy_protocol, ProxyProtocol::V2);
+        assert_eq!(services[0].proxy_protocol, Some(ProxyProtocol::None));
+        assert_eq!(services[0].resolved_proxy_protocol(), ProxyProtocol::None);
+        assert_eq!(services[1].proxy_protocol, None);
+        assert_eq!(services[1].resolved_proxy_protocol(), ProxyProtocol::V2);
+    }
+
+    #[test]
+    fn proxy_protocol_default_derives_from_tls_mode() {
+        let svc_passthrough: ServiceConfig =
+            serde_json::from_str(r#"{"hostname":"a.example","origin":"127.0.0.1:443"}"#).unwrap();
+        assert_eq!(
+            svc_passthrough.resolved_proxy_protocol(),
+            ProxyProtocol::V2,
+            "passthrough should default to PROXY v2 (only L4 way to convey client IP)"
+        );
+
+        let svc_terminate: ServiceConfig = serde_json::from_str(
+            r#"{"hostname":"b.example","origin":"127.0.0.1:80","tls_mode":{"mode":"terminate"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            svc_terminate.resolved_proxy_protocol(),
+            ProxyProtocol::None,
+            "terminate should default to no PROXY (origin gets HTTP, PROXY would corrupt it)"
+        );
     }
 }

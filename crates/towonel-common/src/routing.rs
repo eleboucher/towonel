@@ -81,7 +81,7 @@ impl RouteTable {
                 }
                 ConfigOp::SetHostnameTls { hostname, mode } => {
                     if policy.is_hostname_allowed(&payload.tenant_id, hostname) {
-                        state.tls.insert(hostname.to_lowercase(), mode.clone());
+                        state.tls.insert(hostname.to_lowercase(), *mode);
                     } else {
                         tracing::warn!(
                             tenant = %payload.tenant_id,
@@ -102,7 +102,7 @@ impl RouteTable {
             for hostname in &state.hostnames {
                 routes.insert(hostname.clone(), state.agents.clone());
                 if let Some(mode) = state.tls.get(hostname) {
-                    tls_policies.insert(hostname.clone(), mode.clone());
+                    tls_policies.insert(hostname.clone(), *mode);
                 }
             }
         }
