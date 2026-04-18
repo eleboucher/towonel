@@ -3112,6 +3112,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "normpath"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf23ab2b905654b4cb177e30b629937b3868311d4e1cba859f899c041046e69b"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5527,6 +5536,7 @@ dependencies = [
  "futures-util",
  "http",
  "http-body",
+ "http-body-util",
  "iri-string",
  "pin-project-lite",
  "tower",
@@ -5578,6 +5588,7 @@ name = "towonel-agent"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "base64",
  "ciborium",
  "clap",
@@ -5631,6 +5642,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64",
+ "blake3",
  "ciborium",
  "clienthello",
  "ed25519-dalek 2.2.0",
@@ -5669,6 +5681,8 @@ dependencies = [
  "instant-acme",
  "iroh",
  "moka",
+ "normpath",
+ "papaya",
  "prometheus-client",
  "reqwest",
  "rustls",
@@ -5682,6 +5696,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-stream",
+ "tokio-util",
  "toml 1.1.2+spec-1.1.0",
  "tower",
  "tower-http",

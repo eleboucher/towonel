@@ -9,6 +9,7 @@ use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
     NewAccount, NewOrder,
 };
+use normpath::PathExt;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, OnceCell, RwLock};
 use tracing::{debug, info, warn};
@@ -320,8 +321,8 @@ async fn run_order(
     let private_key_pem = order.finalize().await?;
     let cert_chain = order.poll_certificate(&retries).await?;
 
-    let cert_path = cert_store.cert_dir().join(format!("{hostname}.crt"));
-    let key_path = cert_store.cert_dir().join(format!("{hostname}.key"));
+    let cert_path = safe_cert_path(cert_store.cert_dir(), hostname, "crt")?;
+    let key_path = safe_cert_path(cert_store.cert_dir(), hostname, "key")?;
     tokio::fs::write(&cert_path, cert_chain.as_bytes()).await?;
     tokio::fs::write(&key_path, private_key_pem.as_bytes()).await?;
     #[cfg(unix)]
@@ -336,4 +337,22 @@ async fn run_order(
 
     debug!(%hostname, "cert written to disk");
     Ok(())
+}
+
+/// Join `<cert_dir>/<hostname>.<ext>` and verify via `normpath` that the
+/// resulting path is still inside `cert_dir`. Rejects hostnames that contain
+/// path traversal sequences (e.g. `../`), even though `validate_hostname`
+/// already catches these upstream — belt-and-braces at the FS boundary.
+fn safe_cert_path(
+    cert_dir: &std::path::Path,
+    hostname: &str,
+    ext: &str,
+) -> anyhow::Result<PathBuf> {
+    let base = cert_dir.normalize()?;
+    let candidate = base.as_path().join(format!("{hostname}.{ext}"));
+    let normalized = candidate.normalize()?;
+    if !normalized.as_path().starts_with(base.as_path()) {
+        anyhow::bail!("refusing to write cert outside cert_dir for `{hostname}`");
+    }
+    Ok(normalized.into_path_buf())
 }

@@ -254,14 +254,48 @@ impl EdgeInviteToken {
     }
 }
 
-/// SHA-256 of an invite secret -- what the hub stores and compares against
-/// during redemption. Never the raw secret.
+/// Operator secret for keyed hashing of invite secrets before DB storage.
+/// Rotating invalidates every outstanding invite hash; treat as long-lived.
+#[derive(Clone)]
+pub struct InviteHashKey([u8; 32]);
+
+impl InviteHashKey {
+    pub fn from_hex(hex_str: &str) -> anyhow::Result<Self> {
+        let bytes = hex::decode(hex_str.trim())
+            .map_err(|e| anyhow::anyhow!("invite hash key is not valid hex: {e}"))?;
+        let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+            anyhow::anyhow!("invite hash key must be exactly 32 bytes (64 hex chars)")
+        })?;
+        Ok(Self(arr))
+    }
+
+    #[must_use]
+    pub fn generate() -> Self {
+        let mut k = [0u8; 32];
+        #[allow(clippy::expect_used)]
+        getrandom::fill(&mut k).expect("OS RNG failed");
+        Self(k)
+    }
+
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for InviteHashKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InviteHashKey(***)")
+    }
+}
+
 #[must_use]
-pub fn hash_invite_secret(secret: &[u8]) -> [u8; 32] {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(secret);
-    hasher.finalize().into()
+pub fn hash_invite_secret(key: &InviteHashKey, secret: &[u8]) -> [u8; 32] {
+    *blake3::keyed_hash(key.as_bytes(), secret).as_bytes()
 }
 
 fn fresh_bytes<const N: usize>() -> [u8; N] {
@@ -404,11 +438,32 @@ mod tests {
 
     #[test]
     fn hash_is_stable_and_sensitive() {
-        let h1 = hash_invite_secret(&[1u8; 32]);
-        let h2 = hash_invite_secret(&[1u8; 32]);
-        let h3 = hash_invite_secret(&[2u8; 32]);
+        let key = InviteHashKey::generate();
+        let h1 = hash_invite_secret(&key, &[1u8; 32]);
+        let h2 = hash_invite_secret(&key, &[1u8; 32]);
+        let h3 = hash_invite_secret(&key, &[2u8; 32]);
         assert_eq!(h1, h2);
         assert_ne!(h1, h3);
         assert_eq!(h1.len(), 32);
+    }
+
+    #[test]
+    fn hash_depends_on_key() {
+        let k1 = InviteHashKey::generate();
+        let k2 = InviteHashKey::generate();
+        let secret = [7u8; 32];
+        assert_ne!(
+            hash_invite_secret(&k1, &secret),
+            hash_invite_secret(&k2, &secret),
+            "same secret under two keys must produce different hashes"
+        );
+    }
+
+    #[test]
+    fn hash_key_hex_roundtrip() {
+        let k = InviteHashKey::generate();
+        let hex_str = k.to_hex();
+        let parsed = InviteHashKey::from_hex(&hex_str).unwrap();
+        assert_eq!(k.as_bytes(), parsed.as_bytes());
     }
 }

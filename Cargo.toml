@@ -41,7 +41,9 @@ members = [
 
 [profile.release]
 strip = true
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 
 [dev-dependencies]
 towonel-common = { path = "crates/towonel-common" }
@@ -87,7 +89,12 @@ clienthello = "0.1"
 anyhow = "1"
 axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "request-id", "util"] }
+tower-http = { version = "0.6", features = [
+  "trace",
+  "request-id",
+  "util",
+  "limit",
+] }
 rand_core = { version = "0.10.0" }
 getrandom = "0.4"
 reqwest = { version = "0.13", features = ["json", "stream"] }
@@ -125,3 +132,7 @@ arc-swap = "1.7"
 moka = { version = "0.12", features = ["future"] }
 backon = "1"
 ppp = "2"
+papaya = "0.2"
+tokio-util = { version = "0.7", features = ["rt"] }
+blake3 = "1"
+normpath = "1"

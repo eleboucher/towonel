@@ -350,8 +350,14 @@ fn model_to_edge_invite_row(model: edge_invites::Model) -> anyhow::Result<EdgeIn
 mod tests {
     use super::super::temp_db;
     use super::*;
+    use std::sync::OnceLock;
     use towonel_common::identity::TenantKeypair;
-    use towonel_common::invite::hash_invite_secret;
+    use towonel_common::invite::{InviteHashKey, hash_invite_secret};
+
+    fn test_key() -> &'static InviteHashKey {
+        static KEY: OnceLock<InviteHashKey> = OnceLock::new();
+        KEY.get_or_init(InviteHashKey::generate)
+    }
 
     struct PendingInput {
         id_byte: u8,
@@ -378,7 +384,7 @@ mod tests {
             invite_id: [i.id_byte; INVITE_ID_LEN],
             name: &i.name,
             hostnames: &i.hostnames,
-            secret_hash: hash_invite_secret(&i.secret),
+            secret_hash: hash_invite_secret(test_key(), &i.secret),
             tenant_id: i.tenant.id(),
             pq_public_key: i.tenant.public_key(),
             expires_at_ms: i.expires_at_ms,
@@ -398,7 +404,7 @@ mod tests {
         assert_eq!(row.invite_id, id);
         assert_eq!(row.name, "alice");
         assert_eq!(row.hostnames, i.hostnames);
-        assert_eq!(row.secret_hash, hash_invite_secret(&i.secret));
+        assert_eq!(row.secret_hash, hash_invite_secret(test_key(), &i.secret));
         assert_eq!(row.status, InviteStatus::Pending);
         assert_eq!(row.expires_at_ms, Some(2_000_000_000_000));
         assert_eq!(row.tenant_id, i.tenant.id());
@@ -425,7 +431,7 @@ mod tests {
             invite_id: [7; INVITE_ID_LEN],
             name: &b.name,
             hostnames: &b.hostnames,
-            secret_hash: hash_invite_secret(&b.secret),
+            secret_hash: hash_invite_secret(test_key(), &b.secret),
             tenant_id: b.tenant.id(),
             pq_public_key: b.tenant.public_key(),
             expires_at_ms: b.expires_at_ms,

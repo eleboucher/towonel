@@ -57,7 +57,10 @@ pub(super) async fn post_bootstrap(
     // so an attacker who obtains an invite_secret can't distinguish a revoked
     // invite from a mistyped secret. Legitimate clients see the generic message;
     // hub operators can inspect the server log (below) for the real cause.
-    let secret_ok = constant_time_eq(&hash_invite_secret(&invite_secret), &invite.secret_hash);
+    let secret_ok = constant_time_eq(
+        &hash_invite_secret(&state.invite_hash_key, &invite_secret),
+        &invite.secret_hash,
+    );
     let revoked = matches!(invite.status, InviteStatus::Revoked);
     if !secret_ok || revoked {
         if secret_ok && revoked {

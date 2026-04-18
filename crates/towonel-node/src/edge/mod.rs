@@ -4,7 +4,6 @@ pub mod router;
 pub mod subscribe;
 pub mod tls;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -13,13 +12,12 @@ use iroh::EndpointAddr;
 use iroh::endpoint::{Connection, Endpoint};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::protocol::ALPN_TUNNEL;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
-use towonel_common::tunnel::{ClientAddrs, write_client_addrs, write_hostname_header};
+use towonel_common::tunnel::{ClientAddrs, write_handshake};
 
 use self::acme::AcmeCoordinator;
 use self::health::EdgeMetrics;
@@ -30,13 +28,17 @@ use self::tls::CertStore;
 /// 16 KiB is more than enough for any realistic `ClientHello`.
 const PEEK_BUF_SIZE: usize = 16_384;
 
+/// Byte-pipe buffer size for `tokio::io::copy_buf`. 64 KiB matches QUIC's typical
+/// window-unit and keeps syscall overhead low on bulk transfers.
+const COPY_BUF_SIZE: usize = 64 * 1024;
+
 /// Pool of iroh QUIC connections, keyed by agent `EndpointId`.
 ///
 /// QUIC connections are expensive to establish; streams are cheap. We keep
 /// one connection per agent and open multiple streams over it. iroh's
 /// `Connection` is cheaply cloneable (internal `Arc`), so callers can take
-/// a handle out of the map without holding the lock across awaits.
-type AgentPool = Mutex<HashMap<iroh::EndpointId, Connection>>;
+/// a handle out of the map without blocking.
+type AgentPool = papaya::HashMap<iroh::EndpointId, Connection>;
 
 /// Per-agent health state. Lock-free via atomics so the hot path doesn't
 /// contend on a shared mutex.
@@ -80,7 +82,7 @@ impl AgentHealthState {
 /// Shared map of per-agent health. Populated lazily on first connection
 /// attempt. Never shrinks (agents that disappear from the route table
 /// leave a harmless stale entry).
-type AgentHealthMap = Mutex<HashMap<iroh::EndpointId, Arc<AgentHealthState>>>;
+type AgentHealthMap = papaya::HashMap<iroh::EndpointId, Arc<AgentHealthState>>;
 
 /// The edge: listens on one TCP port, peeks the SNI, looks up the hostname's
 /// TLS policy, and dispatches:
@@ -100,7 +102,7 @@ pub struct Edge {
 }
 
 struct TlsState {
-    server_config: Arc<rustls::ServerConfig>,
+    acceptor: tokio_rustls::TlsAcceptor,
     cert_store: CertStore,
     acme: Option<Arc<AcmeCoordinator>>,
 }
@@ -115,8 +117,8 @@ impl Edge {
         Self {
             router,
             endpoint,
-            agent_pool: Arc::new(Mutex::new(HashMap::new())),
-            agent_health: Arc::new(Mutex::new(HashMap::new())),
+            agent_pool: Arc::new(AgentPool::new()),
+            agent_health: Arc::new(AgentHealthMap::new()),
             listen_addr,
             health_listen_addr,
             tls: None,
@@ -125,9 +127,9 @@ impl Edge {
     }
 
     pub fn with_tls(mut self, cert_store: CertStore, acme: Option<Arc<AcmeCoordinator>>) -> Self {
-        let server_config = cert_store.server_config();
+        let acceptor = tokio_rustls::TlsAcceptor::from(cert_store.server_config());
         self.tls = Some(TlsState {
-            server_config,
+            acceptor,
             cert_store,
             acme,
         });
@@ -145,6 +147,17 @@ impl Edge {
         let listener = TcpListener::bind(&self.listen_addr).await?;
         info!(listen = %self.listen_addr, tls = self.tls.is_some(), "edge listening");
 
+        let ctx = Arc::new(ConnCtx {
+            router: Arc::clone(&self.router),
+            endpoint: Arc::clone(&self.endpoint),
+            pool: Arc::clone(&self.agent_pool),
+            health: Arc::clone(&self.agent_health),
+            metrics: self.metrics.clone(),
+            tls_acceptor: self.tls.as_ref().map(|t| t.acceptor.clone()),
+            cert_store: self.tls.as_ref().map(|t| t.cert_store.clone()),
+            acme: self.tls.as_ref().and_then(|t| t.acme.clone()),
+        });
+
         loop {
             let (tcp_stream, peer_addr) = match listener.accept().await {
                 Ok(conn) => conn,
@@ -153,24 +166,14 @@ impl Edge {
                     continue;
                 }
             };
+            if let Err(e) = tcp_stream.set_nodelay(true) {
+                debug!(%peer_addr, error = %e, "failed to set TCP_NODELAY on client socket");
+            }
             debug!(%peer_addr, "accepted TCP connection");
 
-            let ctx = ConnCtx {
-                router: Arc::clone(&self.router),
-                endpoint: Arc::clone(&self.endpoint),
-                pool: Arc::clone(&self.agent_pool),
-                health: Arc::clone(&self.agent_health),
-                metrics: self.metrics.clone(),
-                tls_acceptor: self
-                    .tls
-                    .as_ref()
-                    .map(|t| tokio_rustls::TlsAcceptor::from(Arc::clone(&t.server_config))),
-                cert_store: self.tls.as_ref().map(|t| t.cert_store.clone()),
-                acme: self.tls.as_ref().and_then(|t| t.acme.clone()),
-            };
-
+            let ctx = Arc::clone(&ctx);
             tokio::spawn(async move {
-                if let Err(e) = handle_connection(tcp_stream, peer_addr, ctx).await {
+                if let Err(e) = handle_connection(tcp_stream, peer_addr, &ctx).await {
                     debug!(%peer_addr, error = %e, "connection handling failed");
                 }
             });
@@ -178,8 +181,9 @@ impl Edge {
     }
 }
 
-/// Per-connection context shared between the dispatch paths.
-#[derive(Clone)]
+/// Per-edge context shared across every incoming connection. Wrapped in an
+/// `Arc` so per-connection tasks bump a single refcount instead of cloning
+/// ~seven `Arc`s each.
 struct ConnCtx {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
@@ -197,12 +201,12 @@ struct ConnCtx {
 async fn handle_connection(
     tcp_stream: TcpStream,
     peer_addr: std::net::SocketAddr,
-    ctx: ConnCtx,
+    ctx: &ConnCtx,
 ) -> anyhow::Result<()> {
     ctx.metrics.total_connections.inc();
     ctx.metrics.active_connections.inc();
 
-    let result = handle_connection_inner(tcp_stream, peer_addr, &ctx).await;
+    let result = handle_connection_inner(tcp_stream, peer_addr, ctx).await;
 
     ctx.metrics.active_connections.dec();
 
@@ -213,11 +217,15 @@ async fn handle_connection(
     result
 }
 
-async fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentHealthState> {
-    let mut map = health.lock().await;
-    map.entry(id)
-        .or_insert_with(|| Arc::new(AgentHealthState::new()))
-        .clone()
+fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentHealthState> {
+    let guard = health.pin();
+    if let Some(existing) = guard.get(&id) {
+        return Arc::clone(existing);
+    }
+    let state = Arc::new(AgentHealthState::new());
+    // Concurrent insert is fine: whoever lost the race drops their Arc and we
+    // return the winning one. All callers ultimately see the same Arc.
+    Arc::clone(guard.get_or_insert(id, state))
 }
 
 /// Score `candidates` by agent health, then dial them in order until one
@@ -231,16 +239,17 @@ async fn pick_agent_and_open_stream(
     iroh::endpoint::SendStream,
     iroh::endpoint::RecvStream,
 )> {
-    let mut scored: Vec<(EndpointAddr, (u32, u64))> = Vec::with_capacity(candidates.len());
+    let mut scored: Vec<(EndpointAddr, Arc<AgentHealthState>, (u32, u64))> =
+        Vec::with_capacity(candidates.len());
     for addr in candidates {
-        let h = get_health(&ctx.health, addr.id).await;
-        scored.push((addr, h.score()));
+        let h = get_health(&ctx.health, addr.id);
+        let score = h.score();
+        scored.push((addr, h, score));
     }
-    scored.sort_by_key(|(_, score)| *score);
+    scored.sort_by_key(|(_, _, score)| *score);
 
     let mut last_err: Option<anyhow::Error> = None;
-    for (agent_addr, _) in scored {
-        let health_state = get_health(&ctx.health, agent_addr.id).await;
+    for (agent_addr, health_state, _) in scored {
         match open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr.clone()).await {
             Ok((send, recv)) => {
                 health_state.record_success();
@@ -276,12 +285,10 @@ async fn handle_connection_inner(
             .ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?;
         info!(%hostname, "SNI extracted");
 
-        let candidates = ctx
+        let (candidates, policy) = ctx
             .router
-            .lookup(&hostname)
-            .await
+            .route(&hostname)
             .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
-        let policy = ctx.router.tls_policy(&hostname).await;
         info!(
             %hostname,
             candidates = candidates.len(),
@@ -349,20 +356,21 @@ async fn pipe_passthrough(
     hostname: &str,
     client_addrs: ClientAddrs,
     mut send_stream: iroh::endpoint::SendStream,
-    mut recv_stream: iroh::endpoint::RecvStream,
+    recv_stream: iroh::endpoint::RecvStream,
 ) -> anyhow::Result<(u64, u64)> {
-    write_hostname_header(&mut send_stream, hostname).await?;
-    write_client_addrs(&mut send_stream, client_addrs).await?;
+    write_handshake(&mut send_stream, hostname, client_addrs).await?;
 
-    let (mut tcp_read, mut tcp_write) = tcp_stream.into_split();
+    let (tcp_read, mut tcp_write) = tcp_stream.into_split();
+    let mut tcp_read = tokio::io::BufReader::with_capacity(COPY_BUF_SIZE, tcp_read);
+    let mut recv_stream = tokio::io::BufReader::with_capacity(COPY_BUF_SIZE, recv_stream);
 
     let c2a = async {
-        let res = tokio::io::copy(&mut tcp_read, &mut send_stream).await;
+        let res = tokio::io::copy_buf(&mut tcp_read, &mut send_stream).await;
         let _ = send_stream.finish();
         res
     };
     let a2c = async {
-        let res = tokio::io::copy(&mut recv_stream, &mut tcp_write).await;
+        let res = tokio::io::copy_buf(&mut recv_stream, &mut tcp_write).await;
         let _ = tcp_write.shutdown().await;
         res
     };
@@ -376,7 +384,7 @@ async fn pipe_terminate(
     hostname: &str,
     client_addrs: ClientAddrs,
     mut send_stream: iroh::endpoint::SendStream,
-    mut recv_stream: iroh::endpoint::RecvStream,
+    recv_stream: iroh::endpoint::RecvStream,
     ctx: &ConnCtx,
 ) -> anyhow::Result<(u64, u64)> {
     let acceptor = ctx
@@ -397,18 +405,19 @@ async fn pipe_terminate(
 
     let tls_stream = acceptor.accept(tcp_stream).await?;
     info!(%hostname, "TLS handshake complete");
-    let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
+    let (tls_read, mut tls_write) = tokio::io::split(tls_stream);
+    let mut tls_read = tokio::io::BufReader::with_capacity(COPY_BUF_SIZE, tls_read);
+    let mut recv_stream = tokio::io::BufReader::with_capacity(COPY_BUF_SIZE, recv_stream);
 
-    write_hostname_header(&mut send_stream, hostname).await?;
-    write_client_addrs(&mut send_stream, client_addrs).await?;
+    write_handshake(&mut send_stream, hostname, client_addrs).await?;
 
     let c2a = async {
-        let res = tokio::io::copy(&mut tls_read, &mut send_stream).await;
+        let res = tokio::io::copy_buf(&mut tls_read, &mut send_stream).await;
         let _ = send_stream.finish();
         res
     };
     let a2c = async {
-        let res = tokio::io::copy(&mut recv_stream, &mut tls_write).await;
+        let res = tokio::io::copy_buf(&mut recv_stream, &mut tls_write).await;
         let _ = tls_write.shutdown().await;
         res
     };
@@ -430,7 +439,7 @@ async fn open_agent_stream(
 ) -> anyhow::Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     let agent_id = agent_addr.id;
 
-    let cached = pool.lock().await.get(&agent_id).cloned();
+    let cached = pool.pin().get(&agent_id).cloned();
     if let Some(conn) = cached {
         match conn.open_bi().await {
             Ok(pair) => return Ok(pair),
@@ -440,14 +449,24 @@ async fn open_agent_stream(
                     error = %e,
                     "pooled connection broken, reconnecting"
                 );
-                pool.lock().await.remove(&agent_id);
+                pool.pin().remove(&agent_id);
             }
         }
     }
 
     info!(agent = %agent_id.fmt_short(), "connecting to agent");
     let conn = endpoint.connect(agent_addr, ALPN_TUNNEL).await?;
+    let path_type = conn
+        .paths()
+        .into_iter()
+        .find(iroh::endpoint::PathInfo::is_selected)
+        .map_or("unknown", |p| if p.is_relay() { "relay" } else { "direct" });
+    info!(
+        agent = %agent_id.fmt_short(),
+        path = path_type,
+        "agent connection established"
+    );
     let pair = conn.open_bi().await?;
-    pool.lock().await.insert(agent_id, conn);
+    pool.pin().insert(agent_id, conn);
     Ok(pair)
 }

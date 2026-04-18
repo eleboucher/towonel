@@ -202,6 +202,7 @@ fn build_hub_params(
 ) -> anyhow::Result<hub::HubParams> {
     let policy = build_ownership_policy(&config.tenants)?;
     let operator_api_key = hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
+    let invite_hash_key = hub::load_invite_hash_key()?;
     let public_url = default_public_url(&config.hub);
     let peers = config.hub.peers.clone();
     Ok(hub::HubParams {
@@ -211,6 +212,7 @@ fn build_hub_params(
         static_policy: policy,
         identity,
         operator_api_key,
+        invite_hash_key,
         public_url,
         peers,
         secret_key,
@@ -334,7 +336,7 @@ async fn route_sync_task(mut route_rx: broadcast::Receiver<RouteTable>, router: 
         match route_rx.recv().await {
             Ok(new_table) => {
                 let count = new_table.len();
-                router.replace(new_table).await;
+                router.replace(new_table);
                 info!(hostnames = count, "dynamic route update applied");
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {

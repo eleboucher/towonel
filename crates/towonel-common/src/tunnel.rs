@@ -13,21 +13,41 @@ pub async fn write_hostname_header(
     stream: &mut (impl AsyncWrite + Unpin),
     hostname: &str,
 ) -> std::io::Result<()> {
+    let len = encoded_hostname_len(hostname)?;
+    let mut buf = Vec::with_capacity(2 + hostname.len());
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(hostname.as_bytes());
+    stream.write_all(&buf).await
+}
+
+fn encoded_hostname_len(hostname: &str) -> std::io::Result<u16> {
     let len: u16 = hostname
         .len()
         .try_into()
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "hostname too long"))?;
-
     if len > MAX_HOSTNAME_LEN {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("hostname length {len} exceeds maximum {MAX_HOSTNAME_LEN}"),
         ));
     }
+    Ok(len)
+}
 
-    stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(hostname.as_bytes()).await?;
-    Ok(())
+/// Writes the hostname header and the client-address frame as a single write
+/// so the peer receives the entire preamble in one STREAM frame and unblocks
+/// its readers with a single wakeup.
+pub async fn write_handshake(
+    stream: &mut (impl AsyncWrite + Unpin),
+    hostname: &str,
+    addrs: ClientAddrs,
+) -> std::io::Result<()> {
+    let len = encoded_hostname_len(hostname)?;
+    let mut buf = Vec::with_capacity(2 + hostname.len() + 37);
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(hostname.as_bytes());
+    encode_client_addrs_into(&mut buf, addrs)?;
+    stream.write_all(&buf).await
 }
 
 /// Reads a hostname header: `[u16 BE length]` then that many bytes of UTF-8.
@@ -75,22 +95,28 @@ pub async fn write_client_addrs(
     stream: &mut (impl AsyncWrite + Unpin),
     addrs: ClientAddrs,
 ) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(37);
+    encode_client_addrs_into(&mut buf, addrs)?;
+    stream.write_all(&buf).await
+}
+
+fn encode_client_addrs_into(buf: &mut Vec<u8>, addrs: ClientAddrs) -> std::io::Result<()> {
     let src = unmap_v4(addrs.src);
     let dst = unmap_v4(addrs.dst);
     match (src.ip(), dst.ip()) {
         (IpAddr::V4(s), IpAddr::V4(d)) => {
-            stream.write_all(&[FAMILY_V4]).await?;
-            stream.write_all(&s.octets()).await?;
-            stream.write_all(&src.port().to_be_bytes()).await?;
-            stream.write_all(&d.octets()).await?;
-            stream.write_all(&dst.port().to_be_bytes()).await?;
+            buf.push(FAMILY_V4);
+            buf.extend_from_slice(&s.octets());
+            buf.extend_from_slice(&src.port().to_be_bytes());
+            buf.extend_from_slice(&d.octets());
+            buf.extend_from_slice(&dst.port().to_be_bytes());
         }
         (IpAddr::V6(s), IpAddr::V6(d)) => {
-            stream.write_all(&[FAMILY_V6]).await?;
-            stream.write_all(&s.octets()).await?;
-            stream.write_all(&src.port().to_be_bytes()).await?;
-            stream.write_all(&d.octets()).await?;
-            stream.write_all(&dst.port().to_be_bytes()).await?;
+            buf.push(FAMILY_V6);
+            buf.extend_from_slice(&s.octets());
+            buf.extend_from_slice(&src.port().to_be_bytes());
+            buf.extend_from_slice(&d.octets());
+            buf.extend_from_slice(&dst.port().to_be_bytes());
         }
         _ => {
             return Err(std::io::Error::new(
@@ -190,6 +216,22 @@ mod tests {
         write_client_addrs(&mut client, addrs).await.unwrap();
         drop(client);
 
+        assert_eq!(read_client_addrs(&mut server).await.unwrap(), addrs);
+    }
+
+    #[tokio::test]
+    async fn roundtrip_handshake() {
+        let (mut client, mut server) = tokio::io::duplex(1024);
+        let hostname = "app.example.com";
+        let addrs = ClientAddrs {
+            src: "203.0.113.7:54321".parse().unwrap(),
+            dst: "192.0.2.1:443".parse().unwrap(),
+        };
+
+        write_handshake(&mut client, hostname, addrs).await.unwrap();
+        drop(client);
+
+        assert_eq!(read_hostname_header(&mut server).await.unwrap(), hostname);
         assert_eq!(read_client_addrs(&mut server).await.unwrap(), addrs);
     }
 

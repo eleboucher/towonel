@@ -24,6 +24,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use towonel_common::identity::write_key_file;
+use towonel_common::invite::InviteHashKey;
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
 use tracing::info;
@@ -31,6 +32,23 @@ use tracing::info;
 /// Length of a freshly generated operator API key in bytes (before base64).
 /// 32 bytes = 256 bits, base64url-encoded without padding = 43 chars.
 const OPERATOR_KEY_BYTES: usize = 32;
+
+/// Env var carrying the 32-byte hex-encoded key used to keyed-hash invite
+/// secrets. Required at hub startup: losing or rotating it invalidates every
+/// outstanding invite. Generate with `openssl rand -hex 32`.
+pub const INVITE_HASH_KEY_ENV: &str = "TOWONEL_INVITE_HASH_KEY";
+
+/// Read the invite-hash key from `TOWONEL_INVITE_HASH_KEY` or fail with a
+/// message that tells the operator how to generate one.
+pub fn load_invite_hash_key() -> anyhow::Result<InviteHashKey> {
+    let hex = std::env::var(INVITE_HASH_KEY_ENV).map_err(|_| {
+        anyhow::anyhow!(
+            "{INVITE_HASH_KEY_ENV} is not set — generate one with \
+             `openssl rand -hex 32` and export it before starting the hub"
+        )
+    })?;
+    InviteHashKey::from_hex(&hex)
+}
 
 /// Load the operator API key from `path`, or generate a new random one and
 /// save it with 0o600 permissions.
@@ -74,6 +92,7 @@ pub struct HubParams {
     pub static_policy: OwnershipPolicy,
     pub identity: HubIdentity,
     pub operator_api_key: String,
+    pub invite_hash_key: InviteHashKey,
     pub public_url: String,
     pub peers: Vec<crate::config::FederationPeer>,
     pub secret_key: iroh::SecretKey,
@@ -182,6 +201,8 @@ impl Hub {
             prev_hostnames: RwLock::new(std::collections::HashSet::new()),
             metrics,
             peer_statuses,
+            tasks: tokio_util::task::TaskTracker::new(),
+            invite_hash_key: self.p.invite_hash_key.clone(),
         });
 
         for peer in &self.p.peers {
