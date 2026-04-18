@@ -6,6 +6,7 @@ mod migration;
 mod types;
 
 pub use federation::FederationPushState;
+pub use liveness::LivenessBump;
 pub use types::*;
 
 use sea_orm::{
