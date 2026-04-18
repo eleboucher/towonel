@@ -6,14 +6,15 @@ use axum::response::Response;
 use serde::Serialize;
 use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
 use towonel_common::identity::TenantId;
+use towonel_common::routing::RouteTable;
 use tracing::warn;
 
 use towonel_common::time::now_ms;
 
 use super::super::metrics::reject_reason;
 use super::{
-    AppState, PROTOCOL_VERSION, cbor_response, hostname_not_owned, internal_error, invalid_request,
-    invalid_signature, json_ok, rebuild_and_broadcast_routes, sequence_conflict,
+    AppState, PROTOCOL_VERSION, broadcast_routes, cbor_response, hostname_not_owned,
+    internal_error, invalid_request, invalid_signature, json_ok, sequence_conflict,
     tenant_not_allowed, unsupported_version,
 };
 
@@ -105,9 +106,14 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
 
     state.metrics.entries_accepted.inc();
 
+    let policy_snapshot = policy.clone();
     drop(policy);
-    if let Err(e) = rebuild_and_broadcast_routes(&state).await {
-        warn!(error = %e, "failed to rebuild routes after insert");
+    match state.db.get_all_entries().await {
+        Ok(all_entries) => {
+            let table = RouteTable::from_entries(&all_entries, &policy_snapshot);
+            broadcast_routes(&state, table).await;
+        }
+        Err(e) => warn!(error = %e, "failed to rebuild routes after insert"),
     }
 
     cbor_response(&PostEntryResponse {
@@ -200,10 +206,18 @@ pub(super) async fn delete_tenant(
         return internal_error();
     }
 
-    state.policy.write().await.remove(&tenant_id);
+    let policy_snapshot = {
+        let mut policy = state.policy.write().await;
+        policy.remove(&tenant_id);
+        policy.clone()
+    };
 
-    if let Err(e) = rebuild_and_broadcast_routes(&state).await {
-        warn!(error = %e, "failed to rebuild routes after tenant removal");
+    match state.db.get_all_entries().await {
+        Ok(entries) => {
+            let table = RouteTable::from_entries(&entries, &policy_snapshot);
+            broadcast_routes(&state, table).await;
+        }
+        Err(e) => warn!(error = %e, "failed to rebuild routes after tenant removal"),
     }
 
     json_ok(serde_json::json!({

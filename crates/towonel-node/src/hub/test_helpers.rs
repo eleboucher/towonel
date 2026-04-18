@@ -4,9 +4,11 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde_json::{Value, json};
 use tokio::sync::{RwLock, broadcast};
-use towonel_common::identity::TenantKeypair;
+use towonel_common::identity::{AgentKeypair, TenantKeypair};
 use towonel_common::invite::InviteToken;
 use towonel_common::ownership::OwnershipPolicy;
 
@@ -160,9 +162,15 @@ pub(super) async fn create_invite(
     InviteToken::decode(body["token"].as_str().expect("token field")).expect("decode token")
 }
 
-/// Derive the deterministic tenant keypair baked into a v2 invite token.
-/// Pods do this at boot; tests use the same helper to verify the hub has
-/// pre-registered that tenant at invite-creation time.
-pub(super) fn tenant_from_token(token: &InviteToken) -> TenantKeypair {
-    TenantKeypair::from_seed(token.tenant_seed)
+pub(super) fn redeem_body(
+    token: &InviteToken,
+    tenant: &TenantKeypair,
+    agent: &AgentKeypair,
+) -> Value {
+    json!({
+        "invite_id": B64.encode(token.invite_id),
+        "invite_secret": B64.encode(token.invite_secret),
+        "tenant_pq_public_key": tenant.public_key().to_string(),
+        "agent_node_id": agent.id().to_string(),
+    })
 }

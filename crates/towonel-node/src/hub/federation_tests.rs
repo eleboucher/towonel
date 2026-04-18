@@ -6,11 +6,13 @@ use reqwest::StatusCode;
 use serde_json::Value;
 use towonel_common::CBOR_CONTENT_TYPE;
 use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
-use towonel_common::identity::TenantKeypair;
+use towonel_common::identity::{AgentKeypair, TenantKeypair};
 use towonel_common::time::now_ms;
 
 use super::federation::{RemovalPush, TenantPush, push_round};
-use super::test_helpers::{FAKE_NODE_ID, OutboundConfig, TestHub, create_invite};
+use super::test_helpers::{
+    FAKE_NODE_ID, OutboundConfig, TestHub, create_invite, post_json, redeem_body,
+};
 
 const FEDERATION_AUTH_DOMAIN: &str = "towonel/federation/v1";
 
@@ -23,11 +25,8 @@ fn node_id_bytes(sk: &iroh::SecretKey) -> [u8; 32] {
 }
 
 fn signed_auth_header_at(sk: &iroh::SecretKey, ts_ms: u64) -> String {
-    // Federation handlers consume the request body before auth runs, so the
-    // production signer hashes an empty slice. Tests must match.
-    let body_hex = crate::hub::auth::body_hash_hex(&[]);
     let node_id = sk.public();
-    let message = format!("{FEDERATION_AUTH_DOMAIN}/{node_id}/{ts_ms}/{body_hex}");
+    let message = format!("{FEDERATION_AUTH_DOMAIN}/{node_id}/{ts_ms}");
     let sig = sk.sign(message.as_bytes());
     format!("Signature {node_id}.{ts_ms}.{}", B64.encode(sig.to_bytes()))
 }
@@ -400,7 +399,7 @@ async fn push_entry_duplicate_sequence_is_idempotent() {
 }
 
 #[tokio::test]
-async fn create_invite_with_sync_push_propagates_immediately() {
+async fn redeem_invite_with_sync_push_propagates_immediately() {
     let hub_b = TestHub::start().await;
     let a_key = peer_secret(22);
     trust(&hub_b, &a_key).await;
@@ -414,18 +413,25 @@ async fn create_invite_with_sync_push_propagates_immediately() {
 
     let client = reqwest::Client::new();
     let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
-    let expected = towonel_common::identity::TenantKeypair::from_seed(token.tenant_seed).id();
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 
-    // v2: the tenant is registered at invite-create time, so sync push fires
-    // immediately from inside POST /v1/invites -- no separate redeem call.
     let fed = hub_b.state.db.list_federated_tenants().await.expect("list");
     assert_eq!(fed.len(), 1);
-    assert_eq!(fed[0].tenant_id, expected);
+    assert_eq!(fed[0].tenant_id, tenant.id());
     assert_eq!(fed[0].hostnames, vec!["app.alice.test".to_string()]);
 }
 
 #[tokio::test]
-async fn create_invite_without_sync_flag_does_not_push() {
+async fn redeem_invite_without_sync_flag_does_not_push() {
     let hub_b = TestHub::start().await;
     let a_key = peer_secret(23);
     trust(&hub_b, &a_key).await;
@@ -438,14 +444,24 @@ async fn create_invite_without_sync_flag_does_not_push() {
     .await;
 
     let client = reqwest::Client::new();
-    let _ = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
+    let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 
     let fed = hub_b.state.db.list_federated_tenants().await.expect("list");
     assert!(fed.is_empty());
 }
 
 #[tokio::test]
-async fn create_invite_sync_push_survives_unreachable_peer() {
+async fn redeem_invite_sync_push_survives_unreachable_peer() {
     // Peer URL that will fail to connect (reserved loopback port we never bind).
     let hub_a = TestHub::start_with(OutboundConfig {
         peer_urls: vec!["http://127.0.0.1:1".to_string()],
@@ -456,9 +472,24 @@ async fn create_invite_sync_push_survives_unreachable_peer() {
 
     let client = reqwest::Client::new();
     let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
-    let tenant_id = towonel_common::identity::TenantKeypair::from_seed(token.tenant_seed).id();
-    // Invite creation must succeed locally even though the peer push fails.
-    assert!(hub_a.state.policy.read().await.is_known_tenant(&tenant_id));
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "peer failure must not fail the redeem");
+    assert!(
+        hub_a
+            .state
+            .policy
+            .read()
+            .await
+            .is_known_tenant(&tenant.id())
+    );
 }
 
 #[tokio::test]
@@ -471,7 +502,16 @@ async fn two_hubs_reach_consistency_after_push_round() {
 
     let client = reqwest::Client::new();
     let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
-    let tenant = towonel_common::identity::TenantKeypair::from_seed(token.tenant_seed);
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 
     let cbor = cbor_entry(&tenant, 1, "app.alice.test");
     let resp = client
@@ -483,7 +523,7 @@ async fn two_hubs_reach_consistency_after_push_round() {
         .expect("send");
     assert_eq!(resp.status(), 200);
 
-    let b_node_id = node_id_bytes(&peer_secret(21));
+    let b_node_id = node_id_bytes(&peer_secret(21)); // stable placeholder peer id
     push_round(
         &client,
         &hub_b.base_url,
@@ -564,7 +604,16 @@ async fn push_round_persists_state_across_calls() {
 
     let client = reqwest::Client::new();
     let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
-    let tenant = towonel_common::identity::TenantKeypair::from_seed(token.tenant_seed);
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub_a.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 
     let b_node_id = node_id_bytes(&peer_secret(77));
     push_round(

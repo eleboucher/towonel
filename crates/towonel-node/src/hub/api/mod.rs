@@ -1,6 +1,4 @@
 mod admin;
-mod agent_heartbeat;
-mod bootstrap;
 mod edge_invites;
 mod entries;
 mod federation_status;
@@ -38,14 +36,6 @@ pub(super) use towonel_common::JSON_CONTENT_TYPE;
 
 /// Protocol version supported by this hub.
 pub const PROTOCOL_VERSION: u16 = 1;
-
-/// Maximum age of an agent heartbeat for the agent to still appear in route
-/// tables. Pods heartbeat every 20s; 90s tolerates two missed beats.
-pub const AGENT_LIVE_TTL_MS: u64 = 90_000;
-
-/// Rows older than this are physically deleted by the prune loop. Five
-/// minutes is long enough to debug a dead pod without keeping rows forever.
-pub const AGENT_PRUNE_TTL_MS: u64 = 300_000;
 
 /// Shared application state for all axum handlers.
 pub struct AppState {
@@ -97,22 +87,6 @@ pub struct FederationState {
 pub struct OutboundFederation {
     pub peer_urls: Vec<String>,
     pub signing_key: iroh::SecretKey,
-}
-
-/// Build a route table from the hub's current state (policy + entries +
-/// agent liveness) and broadcast it to edges.
-///
-/// The liveness-aware rebuild is the single funnel every route update flows
-/// through; it guarantees stale agents vanish from the edge view as soon as
-/// their heartbeat lapses.
-pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Result<()> {
-    let policy_snapshot = state.policy.read().await.clone();
-    let entries = state.db.get_all_entries().await?;
-    let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
-    let live = state.db.live_agents(cutoff).await?;
-    let table = RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live));
-    broadcast_routes(state, table).await;
-    Ok(())
 }
 
 /// Broadcast `table` to edges and fire the DNS webhook if hostnames changed.
@@ -194,8 +168,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let public_write = Router::new()
         .route("/v1/entries", post(entries::post_entry))
         .route("/v1/tenants/{id}/entries", get(entries::get_tenant_entries))
-        .route("/v1/bootstrap", post(bootstrap::post_bootstrap))
-        .route("/v1/agent/heartbeat", post(agent_heartbeat::post_heartbeat))
+        .route("/v1/invites/redeem", post(invites::redeem_invite))
         .route(
             "/v1/edge-invites/redeem",
             post(edge_invites::redeem_edge_invite),

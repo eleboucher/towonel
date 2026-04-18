@@ -93,12 +93,9 @@ mod tests {
     #[test]
     fn wildcard_match() {
         let mut table = TlsPolicyTable::new();
-        table.insert("*.bob.example.eu", TlsMode::Terminate);
-        assert!(matches!(
-            table.lookup("foo.bob.example.eu"),
-            TlsMode::Terminate
-        ));
-        assert_eq!(table.lookup("bob.example.eu"), TlsMode::Passthrough);
+        table.insert("*.bob.example", TlsMode::Terminate);
+        assert!(matches!(table.lookup("foo.bob.example"), TlsMode::Terminate));
+        assert_eq!(table.lookup("bob.example"), TlsMode::Passthrough);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::config_entry::{ConfigOp, SignedConfigEntry};
-use crate::identity::{AgentId, TenantId};
+use crate::identity::AgentId;
 use crate::ownership::OwnershipPolicy;
 use crate::tls_policy::{TlsMode, TlsPolicyTable};
 
@@ -29,22 +29,8 @@ impl RouteTable {
     /// verified before being applied -- entries with invalid signatures are
     /// logged and skipped. The `policy` enforces which tenants and hostnames
     /// are allowed.
-    #[must_use]
     pub fn from_entries(entries: &[SignedConfigEntry], policy: &OwnershipPolicy) -> Self {
-        Self::from_entries_with_liveness(entries, policy, None)
-    }
-
-    /// Same as [`Self::from_entries`] but intersects each tenant's agent set
-    /// with `live_agents` before materialization. Agents missing from
-    /// `live_agents` are treated as unreachable and their routes suppressed.
-    /// Pass `None` to disable liveness filtering (legacy behavior).
-    #[must_use]
-    pub fn from_entries_with_liveness(
-        entries: &[SignedConfigEntry],
-        policy: &OwnershipPolicy,
-        live_agents: Option<&HashSet<(TenantId, AgentId)>>,
-    ) -> Self {
-        let mut tenant_state: HashMap<TenantId, TenantState> = HashMap::new();
+        let mut tenant_state: HashMap<String, TenantState> = HashMap::new();
 
         for entry in entries {
             let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
@@ -67,7 +53,8 @@ impl RouteTable {
                 }
             };
 
-            let state = tenant_state.entry(payload.tenant_id).or_default();
+            let key = payload.tenant_id.to_string();
+            let state = tenant_state.entry(key).or_default();
 
             match &payload.op {
                 ConfigOp::UpsertHostname { hostname } => {
@@ -108,24 +95,12 @@ impl RouteTable {
 
         let mut routes: HashMap<String, HashSet<AgentId>> = HashMap::new();
         let mut tls_policies = TlsPolicyTable::new();
-        for (tenant_id, state) in &tenant_state {
-            // Only allocate a new set when filtering; the `None` path reuses
-            // the existing set by reference. `agents_ref` points at whichever.
-            let filtered: Option<HashSet<AgentId>> = live_agents.map(|live| {
-                state
-                    .agents
-                    .iter()
-                    .filter(|a| live.contains(&(*tenant_id, (*a).clone())))
-                    .cloned()
-                    .collect()
-            });
-            let agents_ref: &HashSet<AgentId> = filtered.as_ref().unwrap_or(&state.agents);
-
-            if agents_ref.is_empty() {
+        for state in tenant_state.values() {
+            if state.agents.is_empty() {
                 continue;
             }
             for hostname in &state.hostnames {
-                routes.insert(hostname.clone(), agents_ref.clone());
+                routes.insert(hostname.clone(), state.agents.clone());
                 if let Some(mode) = state.tls.get(hostname) {
                     tls_policies.insert(hostname.clone(), *mode);
                 }
@@ -350,103 +325,6 @@ mod tests {
         ];
         let table = RouteTable::from_entries(&entries, &policy);
         assert!(table.is_empty());
-    }
-
-    #[test]
-    fn live_agents_filter_hides_offline_agents() {
-        let kp = TenantKeypair::generate();
-        let live_agent = AgentKeypair::generate();
-        let offline_agent = AgentKeypair::generate();
-        let policy = policy_for(&kp, &["app.example.eu"]);
-
-        let entries = vec![
-            sign_entry(
-                &kp,
-                1,
-                ConfigOp::UpsertHostname {
-                    hostname: "app.example.eu".into(),
-                },
-            ),
-            sign_entry(
-                &kp,
-                2,
-                ConfigOp::UpsertAgent {
-                    agent_id: live_agent.id(),
-                },
-            ),
-            sign_entry(
-                &kp,
-                3,
-                ConfigOp::UpsertAgent {
-                    agent_id: offline_agent.id(),
-                },
-            ),
-        ];
-
-        let mut live = HashSet::new();
-        live.insert((kp.id(), live_agent.id()));
-
-        let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&live));
-        let agents = table.lookup("app.example.eu").unwrap();
-        assert!(agents.contains(&live_agent.id()));
-        assert!(
-            !agents.contains(&offline_agent.id()),
-            "offline agent must be filtered out"
-        );
-        assert_eq!(agents.len(), 1);
-    }
-
-    #[test]
-    fn live_agents_empty_hides_all_routes() {
-        let kp = TenantKeypair::generate();
-        let agent = AgentKeypair::generate();
-        let policy = policy_for(&kp, &["app.example.eu"]);
-        let entries = vec![
-            sign_entry(
-                &kp,
-                1,
-                ConfigOp::UpsertHostname {
-                    hostname: "app.example.eu".into(),
-                },
-            ),
-            sign_entry(
-                &kp,
-                2,
-                ConfigOp::UpsertAgent {
-                    agent_id: agent.id(),
-                },
-            ),
-        ];
-
-        let empty = HashSet::new();
-        let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&empty));
-        assert!(table.is_empty());
-    }
-
-    #[test]
-    fn live_agents_none_preserves_legacy_behavior() {
-        let kp = TenantKeypair::generate();
-        let agent = AgentKeypair::generate();
-        let policy = policy_for(&kp, &["app.example.eu"]);
-        let entries = vec![
-            sign_entry(
-                &kp,
-                1,
-                ConfigOp::UpsertHostname {
-                    hostname: "app.example.eu".into(),
-                },
-            ),
-            sign_entry(
-                &kp,
-                2,
-                ConfigOp::UpsertAgent {
-                    agent_id: agent.id(),
-                },
-            ),
-        ];
-
-        let table = RouteTable::from_entries_with_liveness(&entries, &policy, None);
-        assert!(table.lookup("app.example.eu").is_some());
     }
 
     #[test]
@@ -709,13 +587,13 @@ mod tests {
 
         let kp = TenantKeypair::generate();
         let agent = AgentKeypair::generate();
-        let policy = policy_for(&kp, &["*.bob.example.eu"]);
+        let policy = policy_for(&kp, &["*.bob.example"]);
         let entries = vec![
             sign_entry(
                 &kp,
                 1,
                 ConfigOp::UpsertHostname {
-                    hostname: "*.bob.example.eu".into(),
+                    hostname: "*.bob.example".into(),
                 },
             ),
             sign_entry(
@@ -729,18 +607,18 @@ mod tests {
                 &kp,
                 3,
                 ConfigOp::SetHostnameTls {
-                    hostname: "*.bob.example.eu".into(),
+                    hostname: "*.bob.example".into(),
                     mode: TlsMode::Terminate,
                 },
             ),
         ];
         let table = RouteTable::from_entries(&entries, &policy);
         assert!(matches!(
-            table.tls_mode("foo.bob.example.eu"),
+            table.tls_mode("foo.bob.example"),
             TlsMode::Terminate
         ));
         // Routes remain intact.
-        assert!(table.lookup("foo.bob.example.eu").is_some());
+        assert!(table.lookup("foo.bob.example").is_some());
     }
 
     #[test]

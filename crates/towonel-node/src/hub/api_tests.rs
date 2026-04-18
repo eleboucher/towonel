@@ -4,11 +4,15 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde_json::{Value, json};
 use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
-use towonel_common::identity::{AgentKeypair, TenantKeypair};
-use towonel_common::invite::{INVITE_ID_LEN, InviteToken};
+use towonel_common::identity::TenantKeypair;
+use towonel_common::invite::{INVITE_ID_LEN, InviteToken, hash_invite_secret};
 
+use towonel_common::identity::AgentKeypair;
+
+use super::db::PendingInvite;
 use super::test_helpers::{
-    OPERATOR_KEY, TestHub, create_invite, delete_json, get_json, post_json, tenant_from_token,
+    FAKE_NODE_ID, OPERATOR_KEY, TestHub, create_invite, delete_json, get_json, post_json,
+    redeem_body,
 };
 
 // POST /v1/invites (create)
@@ -33,7 +37,7 @@ async fn create_invite_happy_path() {
     assert_eq!(status, 200);
     assert_eq!(body["status"], "ok");
     let token = body["token"].as_str().unwrap();
-    assert!(token.starts_with("tt_inv_2_"));
+    assert!(token.starts_with("tt_inv_1_"));
     // Decoding the emitted token must succeed and embed the hub's public URL.
     let parsed = InviteToken::decode(token).unwrap();
     assert_eq!(parsed.hub_url, "https://hub.test.example");
@@ -94,10 +98,11 @@ async fn create_invite_empty_hostnames_rejected() {
 }
 
 #[tokio::test]
-async fn create_invite_zero_expiry_means_forever() {
+async fn create_invite_expiry_out_of_range_rejected() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
 
+    // 0 seconds.
     let (status, body) = post_json(
         &client,
         &hub.url("/v1/invites"),
@@ -105,34 +110,10 @@ async fn create_invite_zero_expiry_means_forever() {
         Some(OPERATOR_KEY),
     )
     .await;
-    assert_eq!(status, 200);
-    assert!(
-        body["expires_at_ms"].is_null(),
-        "0 secs should mean forever"
-    );
-}
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_request");
 
-#[tokio::test]
-async fn create_invite_omitted_expiry_means_forever() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let (status, body) = post_json(
-        &client,
-        &hub.url("/v1/invites"),
-        json!({"name": "a", "hostnames": ["h.test"]}),
-        Some(OPERATOR_KEY),
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert!(body["expires_at_ms"].is_null());
-}
-
-#[tokio::test]
-async fn create_invite_expiry_beyond_cap_rejected() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
+    // > 30 days.
     let (status, _) = post_json(
         &client,
         &hub.url("/v1/invites"),
@@ -207,6 +188,14 @@ async fn create_invite_rejects_overlap_with_pending_invite() {
     .await;
     assert_eq!(status, 409);
     assert_eq!(body["error"]["code"], "hostname_conflict");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("pending invite"),
+        "message should mention the pending invite, got: {}",
+        body["error"]["message"]
+    );
 }
 
 /// Revoking the first invite must free its hostnames for a new invite.
@@ -344,6 +333,231 @@ async fn revoke_invite_bad_id_returns_400() {
     assert_eq!(body["error"]["code"], "invalid_request");
 }
 
+// POST /v1/invites/redeem
+
+#[tokio::test]
+async fn redeem_invite_happy_path() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, 200, "redeem failed: {body}");
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["tenant_id"], tenant.id().to_string());
+    assert_eq!(body["hostnames"][0], "app.alice.test");
+    assert_eq!(body["hub_node_id"], FAKE_NODE_ID);
+    assert_eq!(body["edge_node_id"], FAKE_NODE_ID);
+
+    // Side effect: the tenant is now in the in-memory policy with the
+    // invite's hostnames, so subsequent entry submissions will pass.
+    let policy = hub.state.policy.read().await;
+    assert!(policy.is_known_tenant(&tenant.id()));
+    assert!(policy.is_hostname_allowed(&tenant.id(), "app.alice.test"));
+}
+
+#[tokio::test]
+async fn redeem_invite_bad_secret_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+
+    let mut body = redeem_body(&token, &tenant, &agent);
+    body["invite_secret"] = json!(B64.encode([0xdd; 32])); // wrong secret
+
+    let (status, resp) = post_json(&client, &hub.url("/v1/invites/redeem"), body, None).await;
+    assert_eq!(status, 401);
+    assert_eq!(resp["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn redeem_invite_expired_returns_410() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    // Skip the API and inject an already-expired invite directly into the
+    // DB so we don't have to sleep.
+    let invite_id = [0x77; INVITE_ID_LEN];
+    let secret = [0x88u8; 32];
+    let hostnames = vec!["expired.test".to_string()];
+    hub.state
+        .db
+        .insert_invite(&PendingInvite {
+            invite_id,
+            name: "ghost",
+            hostnames: &hostnames,
+            secret_hash: hash_invite_secret(&secret),
+            expires_at_ms: 1, // unix epoch + 1ms, definitely in the past
+            created_at_ms: 0,
+        })
+        .await
+        .unwrap();
+
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        json!({
+            "invite_id": B64.encode(invite_id),
+            "invite_secret": B64.encode(secret),
+            "tenant_pq_public_key": tenant.public_key().to_string(),
+            "agent_node_id": agent.id().to_string(),
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, 410);
+    assert_eq!(body["error"]["code"], "invite_expired");
+}
+
+#[tokio::test]
+async fn redeem_invite_is_idempotent_with_valid_secret() {
+    // Redeeming an already-redeemed invite is allowed when the caller presents
+    // the correct invite secret: the old tenant binding is replaced by the new
+    // one. This matches Cloudflare Tunnel's idempotency and lets an agent
+    // recover after its key-bearing PVC is lost.
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let t1 = TenantKeypair::generate();
+    let t2 = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+
+    let (status, _) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &t1, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &t2, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["tenant_id"], t2.id().to_string());
+}
+
+#[tokio::test]
+async fn redeem_invite_revoked_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    // Revoke via API.
+    let (status, _) = delete_json(
+        &client,
+        &hub.url(&format!("/v1/invites/{}", B64.encode(token.invite_id))),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"]["code"], "invite_revoked");
+}
+
+#[tokio::test]
+async fn redeem_invite_missing_returns_404() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        json!({
+            "invite_id": B64.encode([0; INVITE_ID_LEN]),
+            "invite_secret": B64.encode([0u8; 32]),
+            "tenant_pq_public_key": tenant.public_key().to_string(),
+            "agent_node_id": agent.id().to_string(),
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, 404);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+// End-to-end: redeem -> submit signed entry
+
+/// The marquee phase-2 test: after a fresh tenant redeems an invite, the
+/// hub accepts the signed entries they submit. This proves that the in-memory
+/// policy mutation done by the redeem handler is actually picked up by the
+/// `/v1/entries` validator -- regressing this would break onboarding.
+#[tokio::test]
+async fn redeemed_tenant_can_submit_signed_entries() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+
+    let (status, _) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // Submit UpsertHostname for the pre-approved hostname.
+    let payload = ConfigPayload {
+        version: 1,
+        tenant_id: tenant.id(),
+        sequence: 1,
+        timestamp: 1_700_000_000_000,
+        op: ConfigOp::UpsertHostname {
+            hostname: "app.alice.test".into(),
+        },
+    };
+    let entry = SignedConfigEntry::sign(&payload, &tenant).unwrap();
+    let mut body = Vec::new();
+    ciborium::into_writer(&entry, &mut body).unwrap();
+
+    let resp = client
+        .post(hub.url("/v1/entries"))
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "entry submission failed");
+}
+
 // DELETE /v1/tenants/{id} (operator tenant remove)
 
 #[tokio::test]
@@ -351,9 +565,18 @@ async fn delete_tenant_drops_from_policy_and_records_removal() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
 
-    // v2: creating the invite registers the tenant immediately.
+    // Register a tenant via the invite flow so they're in the policy.
     let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
-    let tenant = tenant_from_token(&token);
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
     assert!(hub.state.policy.read().await.is_known_tenant(&tenant.id()));
 
     // Remove.
@@ -380,7 +603,16 @@ async fn delete_tenant_blocks_future_entry_submissions() {
     let client = reqwest::Client::new();
 
     let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
-    let tenant = tenant_from_token(&token);
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 
     // Operator removes the tenant.
     let (status, _) = delete_json(
@@ -465,15 +697,24 @@ async fn delete_tenant_unregistered_succeeds() {
 }
 
 #[tokio::test]
-async fn tenant_cannot_claim_unapproved_hostname() {
-    // v2 equivalent: after invite creation the tenant is pre-registered with
-    // exactly the approved hostnames. Claiming anything else must fail.
+async fn redeemed_tenant_cannot_claim_unapproved_hostname() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
 
+    // Invite only pre-approves `app.alice.test`.
     let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
-    let tenant = tenant_from_token(&token);
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        &client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 
+    // Try to claim a hostname the operator did NOT pre-approve.
     let payload = ConfigPayload {
         version: 1,
         tenant_id: tenant.id(),
@@ -497,253 +738,4 @@ async fn tenant_cannot_claim_unapproved_hostname() {
     assert_eq!(resp.status(), 403);
     let json = resp.json::<Value>().await.unwrap();
     assert_eq!(json["error"]["code"], "hostname_not_owned");
-}
-
-// POST /v1/bootstrap (v2: replaces /v1/invites/redeem)
-
-#[tokio::test]
-async fn bootstrap_returns_tenant_info_idempotent() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
-    let expected_tenant = tenant_from_token(&token);
-
-    let (status1, body1) = post_json(
-        &client,
-        &hub.url("/v1/bootstrap"),
-        json!({
-            "invite_id": B64.encode(token.invite_id),
-            "invite_secret": B64.encode(token.invite_secret),
-        }),
-        None,
-    )
-    .await;
-    assert_eq!(status1, 200);
-    assert_eq!(body1["tenant_id"], expected_tenant.id().to_string());
-    assert_eq!(body1["hostnames"], json!(["app.alice.test"]));
-
-    // Second call must return the same tenant info -- v2 bootstrap is pure
-    // metadata lookup, no state transition.
-    let (status2, body2) = post_json(
-        &client,
-        &hub.url("/v1/bootstrap"),
-        json!({
-            "invite_id": B64.encode(token.invite_id),
-            "invite_secret": B64.encode(token.invite_secret),
-        }),
-        None,
-    )
-    .await;
-    assert_eq!(status2, 200);
-    assert_eq!(body2["tenant_id"], body1["tenant_id"]);
-    assert_eq!(body2["hostnames"], body1["hostnames"]);
-}
-
-#[tokio::test]
-async fn bootstrap_rejects_wrong_secret() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let token = create_invite(&hub, &client, "alice", &["x.test"]).await;
-    let (status, body) = post_json(
-        &client,
-        &hub.url("/v1/bootstrap"),
-        json!({
-            "invite_id": B64.encode(token.invite_id),
-            "invite_secret": B64.encode([0x00; 32]),
-        }),
-        None,
-    )
-    .await;
-    assert_eq!(status, 401);
-    assert_eq!(body["error"]["code"], "unauthorized");
-}
-
-#[tokio::test]
-async fn bootstrap_rejects_missing_invite() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let (status, body) = post_json(
-        &client,
-        &hub.url("/v1/bootstrap"),
-        json!({
-            "invite_id": B64.encode([0xff; INVITE_ID_LEN]),
-            "invite_secret": B64.encode([0x00; 32]),
-        }),
-        None,
-    )
-    .await;
-    assert_eq!(status, 404);
-    assert_eq!(body["error"]["code"], "not_found");
-}
-
-// POST /v1/agent/heartbeat
-
-#[derive(serde::Serialize)]
-struct HeartbeatBody {
-    tenant_id: towonel_common::identity::TenantId,
-    agent_id: towonel_common::identity::AgentId,
-}
-
-fn encode_heartbeat(
-    tenant_id: towonel_common::identity::TenantId,
-    agent_id: towonel_common::identity::AgentId,
-) -> Vec<u8> {
-    let body = HeartbeatBody {
-        tenant_id,
-        agent_id,
-    };
-    let mut buf = Vec::new();
-    ciborium::into_writer(&body, &mut buf).unwrap();
-    buf
-}
-
-#[tokio::test]
-async fn prune_stale_liveness_drops_agent_from_route_table() {
-    // Seed an agent as live, submit its UpsertAgent + UpsertHostname, verify
-    // the route table includes it, then age its liveness row past the cutoff
-    // and confirm a liveness-aware rebuild drops it.
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
-    let tenant = tenant_from_token(&token);
-    let agent = AgentKeypair::generate();
-
-    for (seq, op) in [
-        (
-            1,
-            ConfigOp::UpsertHostname {
-                hostname: "app.alice.test".into(),
-            },
-        ),
-        (
-            2,
-            ConfigOp::UpsertAgent {
-                agent_id: agent.id(),
-            },
-        ),
-    ] {
-        let payload = ConfigPayload {
-            version: 1,
-            tenant_id: tenant.id(),
-            sequence: seq,
-            timestamp: 1_700_000_000_000,
-            op,
-        };
-        let entry = SignedConfigEntry::sign(&payload, &tenant).unwrap();
-        let mut body = Vec::new();
-        ciborium::into_writer(&entry, &mut body).unwrap();
-        let resp = client
-            .post(hub.url("/v1/entries"))
-            .header(reqwest::header::CONTENT_TYPE, "application/cbor")
-            .body(body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-    }
-
-    let now = towonel_common::time::now_ms();
-    hub.state
-        .db
-        .bump_agent_liveness(&tenant.id(), &agent.id(), now)
-        .await
-        .unwrap();
-    super::api::rebuild_and_broadcast_routes(&hub.state)
-        .await
-        .unwrap();
-
-    // The pod's iroh key appears in the freshly-rebuilt route table.
-    let live = hub.state.db.live_agents(0).await.unwrap();
-    assert!(live.contains(&(tenant.id(), agent.id())));
-
-    // Age the liveness row past the prune cutoff (5 min), then prune.
-    let ancient = now.saturating_sub(10 * 60 * 1_000);
-    hub.state
-        .db
-        .bump_agent_liveness(&tenant.id(), &agent.id(), ancient)
-        .await
-        .unwrap();
-    let pruned = hub
-        .state
-        .db
-        .prune_agent_liveness(now.saturating_sub(5 * 60 * 1_000))
-        .await
-        .unwrap();
-    assert_eq!(pruned, 1);
-
-    let live_after = hub.state.db.live_agents(0).await.unwrap();
-    assert!(!live_after.contains(&(tenant.id(), agent.id())));
-}
-
-#[tokio::test]
-async fn heartbeat_bumps_liveness_for_known_tenant() {
-    use ed25519_dalek::Signer;
-    use sha2::Digest;
-
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
-    let tenant = tenant_from_token(&token);
-    let agent = AgentKeypair::generate();
-
-    // Serialize the body first; the signature must cover it (v2 body-binding).
-    let body_bytes = encode_heartbeat(tenant.id(), agent.id());
-
-    let ts_ms = towonel_common::time::now_ms();
-    let node_id_hex = hex::encode(agent.signing_key().verifying_key().as_bytes());
-    let body_hex = hex::encode(sha2::Sha256::digest(&body_bytes));
-    let message = format!("towonel/agent-heartbeat/v1/{node_id_hex}/{ts_ms}/{body_hex}");
-    let sig = agent.signing_key().sign(message.as_bytes());
-    let auth = format!(
-        "Signature {node_id_hex}.{ts_ms}.{}",
-        B64.encode(sig.to_bytes())
-    );
-
-    let resp = client
-        .post(hub.url("/v1/agent/heartbeat"))
-        .header(reqwest::header::AUTHORIZATION, auth)
-        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
-        .body(body_bytes)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let live = hub.state.db.live_agents(0).await.unwrap();
-    assert!(live.contains(&(tenant.id(), agent.id())));
-}
-
-#[tokio::test]
-async fn bootstrap_after_revoke_returns_unauthorized_no_oracle() {
-    // Revoked invites must return 401 unauthorized (same as wrong-secret) so
-    // an attacker holding the secret can't detect the revocation via the
-    // error code and verify their secret is correct.
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
-    delete_json(
-        &client,
-        &hub.url(&format!("/v1/invites/{}", token.invite_id_b64())),
-        Some(OPERATOR_KEY),
-    )
-    .await;
-
-    let (status, body) = post_json(
-        &client,
-        &hub.url("/v1/bootstrap"),
-        json!({
-            "invite_id": B64.encode(token.invite_id),
-            "invite_secret": B64.encode(token.invite_secret),
-        }),
-        None,
-    )
-    .await;
-    assert_eq!(status, 401);
-    assert_eq!(body["error"]["code"], "unauthorized");
 }

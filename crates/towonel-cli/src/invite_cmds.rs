@@ -7,17 +7,15 @@ struct CreateInviteReq<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
     hostnames: &'a [String],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    expires_in_secs: Option<u64>,
+    expires_in_secs: u64,
 }
 
 #[derive(serde::Deserialize)]
 struct CreateInviteResp {
     token: String,
     invite_id: String,
-    tenant_id: String,
     name: String,
-    expires_at_ms: Option<u64>,
+    expires_at_ms: u64,
 }
 
 pub async fn cmd_invite_create(
@@ -32,7 +30,12 @@ pub async fn cmd_invite_create(
     }
     let hub_url = resolve_hub_url(hub_url)?;
     let api_key = resolve_operator_key(api_key)?;
-    let expires_in_secs = parse_expires(&expires)?;
+    let dur: std::time::Duration = humantime::parse_duration(&expires)
+        .with_context(|| format!("invalid duration `{expires}` (examples: 24h, 48h, 7d)"))?;
+    let expires_in_secs = dur.as_secs();
+    if expires_in_secs == 0 {
+        return Err(anyhow!("--expires must be > 0"));
+    }
 
     let url = format!("{}/v1/invites", hub_url.trim_end_matches('/'));
     let resp = reqwest::Client::new()
@@ -53,33 +56,13 @@ pub async fn cmd_invite_create(
 
     println!("Created invite for \"{}\"", parsed.name);
     println!("  Invite ID: {}", parsed.invite_id);
-    println!("  Tenant ID: {}", parsed.tenant_id);
     println!("  Hostnames: {}", hostnames.join(", "));
-    match parsed.expires_at_ms {
-        Some(ts) => println!("  Expires:   {ts} (in {expires})"),
-        None => println!("  Expires:   never"),
-    }
+    println!("  Expires:   {} (in {expires})", parsed.expires_at_ms);
     println!();
-    println!("Send this token to the recipient (re-usable; keep it secret):");
+    println!("Send this token to the recipient (one-time use, keep it secret):");
     println!();
     println!("  {}", parsed.token);
     Ok(())
-}
-
-/// Parse `--expires`: `"never"`, `"0"`, or empty → `None` (forever); any
-/// humantime-compatible duration → `Some(secs)`.
-fn parse_expires(raw: &str) -> anyhow::Result<Option<u64>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("never") || trimmed == "0" {
-        return Ok(None);
-    }
-    let dur = humantime::parse_duration(trimmed)
-        .with_context(|| format!("invalid duration `{raw}` (examples: 24h, 48h, 7d, never)"))?;
-    let secs = dur.as_secs();
-    if secs == 0 {
-        return Ok(None);
-    }
-    Ok(Some(secs))
 }
 
 #[derive(serde::Deserialize)]
@@ -93,7 +76,7 @@ struct InviteItem {
     invite_id: String,
     name: String,
     status: String,
-    expires_at_ms: Option<u64>,
+    expires_at_ms: u64,
 }
 
 pub async fn cmd_invite_list(
@@ -120,15 +103,12 @@ pub async fn cmd_invite_list(
     }
     println!("{:<24} {:<16} {:<10} EXPIRES_AT_MS", "ID", "NAME", "STATUS");
     for inv in parsed.invites {
-        let expires = inv
-            .expires_at_ms
-            .map_or_else(|| "never".to_string(), |ts| ts.to_string());
         println!(
             "{:<24} {:<16} {:<10} {}",
             short(&inv.invite_id, 20),
             short(&inv.name, 14),
             inv.status,
-            expires
+            inv.expires_at_ms
         );
     }
     Ok(())

@@ -41,7 +41,9 @@ members = [
 
 [profile.release]
 strip = true
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
 
 [dev-dependencies]
 towonel-common = { path = "crates/towonel-common" }

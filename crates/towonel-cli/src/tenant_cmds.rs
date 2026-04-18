@@ -147,7 +147,7 @@ pub async fn cmd_tenant_leave(
     }
 
     println!();
-    println!("Done. The tenant key file is no longer needed.");
+    println!("Done. You may now delete ~/.towonel/ on this machine.");
     Ok(())
 }
 

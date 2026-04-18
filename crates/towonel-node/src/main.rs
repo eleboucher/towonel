@@ -334,7 +334,7 @@ async fn route_sync_task(mut route_rx: broadcast::Receiver<RouteTable>, router: 
         match route_rx.recv().await {
             Ok(new_table) => {
                 let count = new_table.len();
-                router.replace(new_table).await;
+                router.replace(new_table);
                 info!(hostnames = count, "dynamic route update applied");
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {

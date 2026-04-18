@@ -116,11 +116,15 @@ impl Hub {
         for tid in &removed {
             policy.remove(tid);
         }
-        for tenant in db.list_active_tenants().await? {
-            if removed.contains(&tenant.tenant_id) {
+        for redeemed in db.list_redeemed_tenants().await? {
+            if removed.contains(&redeemed.tenant_id) {
                 continue;
             }
-            policy.register_tenant(&tenant.tenant_id, tenant.pq_public_key, tenant.hostnames);
+            policy.register_tenant(
+                &redeemed.tenant_id,
+                redeemed.pq_public_key,
+                redeemed.hostnames,
+            );
         }
         for federated in db.list_federated_tenants().await? {
             if removed.contains(&federated.tenant_id)
@@ -135,16 +139,9 @@ impl Hub {
             );
         }
 
-        // Initial broadcast: intersect with surviving liveness rows from the
-        // previous process, so edges don't briefly see zombie agents after
-        // a hub restart. The prune loop sweeps stale rows every 30 s;
-        // anything still present at boot is either a currently-alive pod
-        // (about to bump its heartbeat) or within the TTL window.
-        let initial_cutoff = towonel_common::time::now_ms().saturating_sub(api::AGENT_LIVE_TTL_MS);
-        let live = db.live_agents(initial_cutoff).await.unwrap_or_default();
         match db.get_all_entries().await {
             Ok(entries) => {
-                let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&live));
+                let table = RouteTable::from_entries(&entries, &policy);
                 let _ = self.p.route_tx.send(table);
             }
             Err(e) => tracing::warn!(error = %e, "initial route broadcast skipped"),
@@ -196,7 +193,6 @@ impl Hub {
         }
 
         tokio::spawn(refresh_metrics_loop(state.clone()));
-        tokio::spawn(agent_liveness_prune_loop(state.clone()));
 
         let app = api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
 
@@ -237,41 +233,26 @@ async fn init_trusted_peers(
     Ok(trusted)
 }
 
-/// Periodically prune stale `agent_liveness` rows and trigger a route
-/// rebuild if any row was dropped. Keeps the edge view fresh even when a pod
-/// dies without sending SIGTERM (OOM-kill, node failure).
-async fn agent_liveness_prune_loop(state: Arc<api::AppState>) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-    tick.tick().await; // skip immediate first tick
-    loop {
-        tick.tick().await;
-        let cutoff = towonel_common::time::now_ms().saturating_sub(api::AGENT_PRUNE_TTL_MS);
-        let pruned = match state.db.prune_agent_liveness(cutoff).await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(error = %e, "agent_liveness prune failed");
-                continue;
-            }
-        };
-        if pruned > 0 {
-            tracing::debug!(pruned, "pruned stale agent_liveness rows");
-            if let Err(e) = api::rebuild_and_broadcast_routes(&state).await {
-                tracing::warn!(error = %e, "route rebuild after liveness prune failed");
-            }
-        }
-    }
-}
-
-/// Periodically refresh `tenants_total` from the in-memory policy.
-///
-/// This is the only gauge we can't update at the mutation site cheaply --
-/// every `OwnershipPolicy::register_tenant` / `remove` call could bump it,
-/// but that's a lot of hot-path instrumentation for a gauge nobody needs
-/// sub-second accuracy on. A 15 s refresh is fine for dashboards.
+/// Periodically refresh metrics gauges derived from DB/policy state.
+/// Keeps `invites_pending` and `tenants_total` within ~15 s of the truth
+/// without instrumenting every code path that might change them.
 async fn refresh_metrics_loop(state: Arc<api::AppState>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
     loop {
         tick.tick().await;
+        match state.db.list_invites().await {
+            Ok(rows) => {
+                let pending = rows
+                    .iter()
+                    .filter(|r| matches!(r.status, db::InviteStatus::Pending))
+                    .count();
+                state
+                    .metrics
+                    .invites_pending
+                    .set(i64::try_from(pending).unwrap_or(i64::MAX));
+            }
+            Err(e) => tracing::debug!(error = %e, "metrics refresh: list_invites failed"),
+        }
         let tenants = state.policy.read().await.iter_patterns().count();
         state
             .metrics

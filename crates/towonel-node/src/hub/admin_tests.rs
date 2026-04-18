@@ -3,17 +3,24 @@
 use serde_json::json;
 use towonel_common::CBOR_CONTENT_TYPE;
 use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
-use towonel_common::identity::TenantKeypair;
+use towonel_common::identity::{AgentKeypair, TenantKeypair};
 
 use super::test_helpers::{
-    OPERATOR_KEY, TestHub, create_invite, delete_json, get_json, post_json, tenant_from_token,
+    OPERATOR_KEY, TestHub, create_invite, delete_json, get_json, post_json, redeem_body,
 };
 
 async fn seed_tenant_with_entry(hub: &TestHub, client: &reqwest::Client) -> TenantKeypair {
     let token = create_invite(hub, client, "alice", &["app.alice.test"]).await;
-    // v2 tokens carry the tenant seed; invite creation already registered the
-    // tenant on the hub, so we can sign + submit entries directly.
-    let tenant = tenant_from_token(&token);
+    let tenant = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let (status, _) = post_json(
+        client,
+        &hub.url("/v1/invites/redeem"),
+        redeem_body(&token, &tenant, &agent),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
 
     let payload = ConfigPayload {
         version: 1,

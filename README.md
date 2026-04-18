@@ -4,7 +4,7 @@
 
 Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbound ports. Per hostname, the edge either passes raw TLS through to your origin (default — it never sees keys or request content) **or** terminates TLS with an on-demand Let's Encrypt cert. The agent picks.
 
-**How it compares:** Like Cloudflare Tunnel but self-hosted, decentralized, and post-quantum signed. No accounts, no SaaS — just cryptographic keypairs and a VPS you control. Stateless by default: one invite token, N replicas, no disk state, no bootstrap ceremony.
+**How it compares:** Like Cloudflare Tunnel but self-hosted, decentralized, and post-quantum signed. No accounts, no SaaS — just cryptographic keypairs and a VPS you control.
 
 ```
                        Internet                        Your Network
@@ -12,10 +12,10 @@ Exposes HTTP(S) services behind NAT, CGNAT, or dynamic IPs without opening inbou
 
  Client               towonel-node                    towonel-agent
    |                  ┌──────────┐                       |
-   | TLS ClientHello  │ hub  API │◄─── towonel-cli        |
+   | TLS ClientHello  │ hub  API │◄─── towonel-cli         |
    | ──────────────►  │ (SQLite/ │     (invites)         |
    |  (SNI: app.eu)   │ Postgres)│                       |
-   |                  │          │                       |
+   |  (SNI: app.eu)   │          │                       |
    |                  │ edge :443│◄─ SetHostnameTls ──── + (signed, on agent start)
    |                  │  (peek   │                       |
    |                  │   SNI)   │   iroh QUIC stream    |
@@ -62,8 +62,11 @@ docker build -f Dockerfile.agent -t towonel-agent:latest .
 
 ### 1. Start the node (operator, on a VPS)
 
+
+
+
 ```bash
-towonel-node
+  towonel-node
 ```
 
 On first run, `node.key` and `operator.key` are auto-generated. Save the operator key — you'll need it to create invites. To generate keys ahead of time, any tool that writes 32 random bytes works:
@@ -73,24 +76,27 @@ openssl rand 32 > node.key
 chmod 600 node.key
 ```
 
-### 2. Create an invite (operator)
+### 2. Invite a tenant (operator)
 
 ```bash
 towonel-cli invite create \
   --hub-url https://node.example.eu:8443 \
   --name alice \
-  --hostnames "app.alice.example.eu,*.alice.example.eu"
-# Prints: tt_inv_2_<token>
+  --hostnames "app.alice.example.eu,*.alice.example.eu" \
+  --expires 48h
+# Prints: tt_inv_1_<token>
 ```
 
-The token embeds the tenant's post-quantum signing seed, the hub URL, and the invite secret — everything a pod needs. Invites default to `--expires never` (re-usable by any number of replicas with no rotation); pass e.g. `--expires 48h` if you want a short-lived bootstrap credential.
+Send the token to Alice through a trusted channel.
 
-Send the token to Alice through a trusted channel — or mount it directly into a Kubernetes Secret, since it doubles as the runtime credential.
-
-### 3. Run the agent (Alice, behind NAT)
+### 3. Join and start the agent (Alice, behind NAT)
 
 ```bash
-TOWONEL_INVITE_TOKEN=tt_inv_2_... \
+towonel-agent init --invite tt_inv_1_...
+```
+
+
+```bash
 TOWONEL_AGENT_SERVICES='[
   {"hostname":"app.alice.example.eu","origin":"127.0.0.1:8443"},
   {"hostname":"*.alice.example.eu","origin":"127.0.0.1:8080",
@@ -98,15 +104,10 @@ TOWONEL_AGENT_SERVICES='[
 ]' towonel-agent
 ```
 
-- **No init step, no state file.** The agent derives the tenant signing key from the token in memory, generates a fresh iroh keypair (different every boot), self-registers with the hub via `POST /v1/entries`, and heartbeats every 20s to stay in the route table.
 - First service: passthrough (default). The origin terminates TLS.
-- Second service: the edge terminates TLS with an on-demand Let's Encrypt cert, forwards plaintext to the origin.
+- Second service: the edge terminates TLS using an on-demand Let's Encrypt cert, forwards plaintext to the origin. Useful when the origin can't hold a cert itself.
 
-Equivalent with a config file:
-
-```bash
-TOWONEL_INVITE_TOKEN=tt_inv_2_... towonel-agent --config /etc/towonel/agent.toml
-```
+On startup the agent publishes each hostname's `tls_mode` to the hub as a signed `SetHostnameTls` entry. Edges pick it up via the existing route subscription.
 
 ### 4. Point DNS and test
 
@@ -116,58 +117,26 @@ Point `app.alice.example.eu` to the VPS IP, then:
 curl https://app.alice.example.eu
 ```
 
-## Kubernetes: N replicas, one Secret
-
-Because the agent is stateless, scaling is a plain `Deployment`:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata: { name: towonel-agent }
-spec:
-  replicas: 3
-  selector: { matchLabels: { app: towonel-agent } }
-  template:
-    metadata: { labels: { app: towonel-agent } }
-    spec:
-      containers:
-        - name: agent
-          image: git.erwanleboucher.dev/eleboucher/towonel-agent:latest
-          env:
-            - name: TOWONEL_INVITE_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: towonel-bootstrap
-                  key: token
-            - name: TOWONEL_AGENT_SERVICES
-              valueFrom:
-                configMapKeyRef:
-                  name: towonel-agent-services
-                  key: services.json
-```
-
-Every replica shares the same token, each generates its own ephemeral iroh identity at boot, and the hub's liveness TTL (90s) drops dead replicas automatically. No PVC, no `StatefulSet`, no init container.
-
 ## Keys
 
-The tenant seed is now baked into the invite token (32 bytes, never stored on the hub). You don't manage it as a file unless you specifically want to:
+All keys auto-generate on first run. Every key is a 32-byte random seed file — you can create them with any tool:
 
 ```bash
-# The only file that ever holds secret key material is the node / operator key
-# on the hub side. Agents never write keys to disk.
+# With openssl
+openssl rand 32 > tenant.key && chmod 600 tenant.key
+openssl rand 32 > agent.key  && chmod 600 agent.key
 
-# For advanced flows (e.g. signing entries directly with towonel-cli),
-# you can still derive a tenant keypair on disk:
+# Or with towonel-cli (also prints the derived public identity)
 towonel-cli tenant init --key-path tenant.key   # prints tenant_id + PQ public key
-towonel-cli agent  init --key-path agent.key    # prints agent_id (rarely needed in v2)
+towonel-cli agent init --key-path agent.key     # prints agent_id
 ```
 
-The tenant seed derives an ML-DSA-65 (post-quantum) signing keypair. The agent's iroh transport key is generated fresh in memory on every pod boot.
+The tenant seed derives an ML-DSA-65 (post-quantum) signing keypair; the agent seed derives an Ed25519 keypair for iroh transport.
 
 ### Key backup
 
 ```bash
-towonel-cli tenant export-key --key-path tenant.key
+towonel-cli tenant export-key
 # Prints: towonel-key-v1:<encrypted-backup>  (AES-256-GCM + argon2id)
 
 towonel-cli tenant import-key --backup 'towonel-key-v1:...' --key-path tenant.key
@@ -175,21 +144,27 @@ towonel-cli tenant import-key --backup 'towonel-key-v1:...' --key-path tenant.ke
 
 ## Manage tenants
 
-Tenants are managed through the CLI and the hub's database — no config-file edits.
+Tenants are managed through the CLI and the hub's database — no config file edits.
 
 ```bash
-towonel-cli invite create --name bob --hostnames "*.bob.example.eu"
+towonel-cli invite create --name bob --hostnames "*.bob.example.eu" --expires 48h
 towonel-cli invite list
-towonel-cli invite revoke --id <invite-id>    # also removes the tenant
+towonel-cli invite revoke --id <invite-id>
 
-# Operator evicts a tenant directly
+# Operator evicts a tenant
 towonel-cli tenant remove --tenant-id <hex-tenant-id>
 
 # Tenant leaves voluntarily
-towonel-cli tenant leave --key-path tenant.key --hub-url https://node.example.eu:8443
+towonel-cli tenant leave
 ```
 
-Each invite IS a tenant. Revoking the invite revokes the tenant.
+## Add an agent to an existing tenant
+
+When a tenant runs services on multiple machines:
+
+```bash
+towonel-agent add-agent --tenant-key ~/.towonel/tenant.key --hub https://hub.example.eu:8443
+```
 
 ## Add edge nodes
 
@@ -204,7 +179,7 @@ towonel-node init --edge-invite tt_edge_1_...
 towonel-node --config /etc/towonel/node.toml
 ```
 
-Edge invites still follow the one-shot redemption model — they bind the edge's iroh node_id to the hub at claim time.
+The edge subscribes to the hub's route stream and receives updates as tenants come and go.
 
 ## Signed config entries
 
@@ -212,11 +187,11 @@ Tenants manage their own hostnames and agents without operator intervention:
 
 ```bash
 towonel-cli entry submit --op upsert-hostname --hostname new.alice.example.eu
+towonel-cli entry submit --op upsert-agent --agent-id <hex-agent-id>
 towonel-cli entry submit --op delete-hostname --hostname old.alice.example.eu
+towonel-cli entry submit --op revoke-agent --agent-id <hex-agent-id>
 towonel-cli entry list
 ```
-
-Agent registration (`UpsertAgent`) and TLS policy (`SetHostnameTls`) are submitted automatically by the agent at boot, so you rarely call these directly.
 
 ## TLS handling
 
@@ -250,9 +225,9 @@ Set `tls_mode` on the service and the edge terminates TLS using an on-demand Let
 Cert lifecycle:
 
 - First request for a hostname triggers HTTP-01 issuance against Let's Encrypt. Subsequent requests reuse the cached cert. Renewed lazily.
-- Transient failures are retried with exponential backoff + jitter up to 3 attempts per request before the hostname enters a 5-minute failure cooldown.
+- Transient failures (network blips, ACME rate limits, challenge propagation) are retried with exponential backoff + jitter up to 3 attempts per request before the hostname enters a 5-minute failure cooldown.
 - Requires `TOWONEL_EDGE__TLS__ACME_EMAIL` on the node and inbound :80 reachable for ACME challenges.
-- Wildcards issue per exact subdomain on first contact — no DNS-01 required. Subject to Let's Encrypt rate limits (50 certs/week/registered domain).
+- Wildcards (`*.bob.example.eu`) issue per exact subdomain on first contact — no DNS-01 required. Subject to Let's Encrypt rate limits (50 certs/week/registered domain).
 - The community member just needs a CNAME from their domain (e.g. `*.bob.example.eu`) to an edge hostname; no DNS provider API access needed.
 
 ## Deploy
@@ -294,13 +269,13 @@ All settings are configurable via `TOWONEL_*` env vars (double underscore separa
 
 **Lists in env vars** — string-valued lists (`PEER_URLS`, `HUB_URLS`, `PUBLIC_ADDRESSES`) accept either comma-separated values (preferred in Kubernetes YAML) or a JSON array. Complex structured lists like `TOWONEL_TENANTS` require JSON.
 
-towonel-agent (`TOWONEL_*` on the agent side):
+towonel-agent (`TOWONEL_AGENT_*`):
 
 | Env var | Description |
 |---------|-------------|
-| `TOWONEL_INVITE_TOKEN` | **Required.** `tt_inv_2_...` token issued by the hub. Everything else is derived from or fetched using this. |
-| `TOWONEL_AGENT_SERVICES` | JSON array of services — see below. Optional but typical. |
-| `TOWONEL_AGENT_TRUSTED_EDGES` | JSON array of hex endpoint IDs. Optional; normally the bootstrap response fills this in. |
+| `TOWONEL_AGENT_SERVICES` | JSON array — see below |
+| `TOWONEL_AGENT_IDENTITY__KEY_PATH` | Agent key path |
+| `TOWONEL_AGENT_TRUSTED_EDGES` | JSON array of hex endpoint IDs |
 
 `TOWONEL_AGENT_SERVICES` shape:
 
@@ -328,10 +303,11 @@ towonel-cli:
 |---------|-------------|
 | `TOWONEL_HUB_URL` | Default `--hub-url` for all commands |
 | `TOWONEL_OPERATOR_KEY` | Default `--api-key` for operator commands |
+| `TOWONEL_STATE` | Override `state.toml` path (default: `~/.towonel/state.toml`) |
 
 ### Database
 
-The hub stores invites (which double as tenant registrations), federated tenants, edge registrations, signed config entries, and an `agent_liveness` table for heartbeat-based route freshness. Two drivers are supported:
+The hub stores invites, redeemed tenants, federated tenants, edge registrations, and signed config entries. Two drivers are supported:
 
 - **SQLite** (default): zero-config single-node deployments. The DB file is created on first boot.
 - **PostgreSQL**: recommended for multi-node operator setups or when you want external backups and HA on the storage layer.
@@ -353,7 +329,7 @@ TOWONEL_HUB__DATABASE__DRIVER=postgres
 TOWONEL_HUB__DATABASE__DSN='postgres://towonel:secret@db.internal:5432/towonel_hub'
 ```
 
-Migrations run automatically at boot via `sea-orm-migration`. The same schema applies to both drivers — no backend-specific branches. Migrating from v1 is destructive: the `invites` table is dropped and recreated (see the `m20260428_invite_v2` migration); v1 tokens become invalid and must be re-issued.
+Migrations run automatically at boot via `sea-orm-migration`. The same schema applies to both drivers — no backend-specific branches.
 
 ### Federation
 
@@ -395,14 +371,12 @@ Write a small HTTP handler that receives this and calls your DNS provider (Cloud
 
 ## Security
 
-- The edge sees only SNI hostnames, source IPs, and byte counts — never request bodies, headers, or TLS keys.
-- A malicious edge operator can deny service but cannot read or forge traffic.
-- All config entries are signed with ML-DSA-65 (FIPS 204, post-quantum).
-- The invite token IS a bearer credential: it carries the tenant signing seed. Treat it as secret on par with a private key — mount as a K8s Secret, never log it, rotate by revoking + reissuing. In-memory copies are zeroed on drop; the `Debug` impl redacts the seed.
-- Agent heartbeat signatures are body-bound: a captured header cannot be replayed with a substituted body within the freshness window.
-- Invite secrets are SHA-256 hashed at rest, compared in constant time. Revoked invites return the same 401 as a wrong secret — no timing oracle.
-- Per-IP rate limiting on public endpoints.
-- Federation pushes are Ed25519-signed with a nonce cache for replay protection.
+- The edge sees only SNI hostnames, source IPs, and byte counts — never request bodies, headers, or TLS keys
+- A malicious edge operator can deny service but cannot read or forge traffic
+- All config entries are signed with ML-DSA-65 (FIPS 204, post-quantum)
+- Invite secrets are SHA-256 hashed at rest, compared in constant time
+- Per-IP rate limiting on public endpoints
+- Federation pushes are Ed25519-signed with replay protection
 
 ## API
 
@@ -412,16 +386,15 @@ Write a small HTTP handler that receives this and calls your DNS provider (Cloud
 | `GET` | `/v1/tenants/{id}/entries` | none | List entries for a tenant |
 | `GET` | `/v1/health` | none | Hub health check |
 | `GET` | `/v1/edges` | none | List edge nodes |
-| `GET` | `/v1/routes/subscribe` | edge sig | SSE route stream (liveness-filtered) |
-| `POST` | `/v1/bootstrap` | invite secret | Pod boot: returns tenant_id, hostnames, and trusted edge metadata |
-| `POST` | `/v1/agent/heartbeat` | agent sig | Every ~20s per pod; keeps the agent in the route table. 90s TTL |
-| `POST` | `/v1/invites` | operator | Create invite (also registers the tenant) |
+| `GET` | `/v1/routes/subscribe` | edge sig | SSE route stream |
+| `POST` | `/v1/invites` | operator | Create invite |
 | `GET` | `/v1/invites` | operator | List invites |
-| `DELETE` | `/v1/invites/{id}` | operator | Revoke invite + remove tenant |
+| `DELETE` | `/v1/invites/{id}` | operator | Revoke invite |
+| `POST` | `/v1/invites/redeem` | none | Redeem invite |
 | `POST` | `/v1/edge-invites` | operator | Create edge invite |
 | `GET` | `/v1/edge-invites` | operator | List edge invites |
 | `DELETE` | `/v1/edge-invites/{id}` | operator | Revoke edge invite |
-| `POST` | `/v1/edge-invites/redeem` | none | Redeem edge invite (one-shot) |
+| `POST` | `/v1/edge-invites/redeem` | none | Redeem edge invite |
 | `DELETE` | `/v1/tenants/{id}` | operator | Remove tenant |
 | `GET` | `/v1/dns/records` | operator | Active hostnames + edge addresses |
 

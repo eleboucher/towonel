@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
+use towonel_common::client_state::{ClientState, DefaultPaths};
 use towonel_common::identity::write_key_file;
 
 pub(crate) use towonel_common::CBOR_CONTENT_TYPE;
@@ -77,7 +78,7 @@ enum HubAction {
     /// Disaster-recovery resync: pull federation state (tenants, removals,
     /// entries) from `--from-peer` into the local hub. Idempotent.
     Resync {
-        /// Local hub URL. Defaults to `TOWONEL_HUB_URL`.
+        /// Local hub URL. Defaults to state.toml / `TOWONEL_HUB_URL`.
         #[arg(long)]
         hub_url: Option<String>,
         /// Operator key for the LOCAL hub. Defaults to `$TOWONEL_OPERATOR_KEY`.
@@ -103,10 +104,10 @@ enum TenantAction {
     /// print a confirmation. The operator may additionally drop the tenant
     /// from their allowlist.
     Leave {
-        /// Path to the tenant key file.
+        /// Path to the tenant key. Defaults to the value in state.toml.
         #[arg(long)]
         key_path: Option<PathBuf>,
-        /// Hub URL. Defaults to `TOWONEL_HUB_URL`.
+        /// Hub URL. Defaults to state.toml / `TOWONEL_HUB_URL`.
         #[arg(long)]
         hub_url: Option<String>,
     },
@@ -127,7 +128,7 @@ enum TenantAction {
     /// result to stdout — copy it to a safe place (password manager, paper
     /// backup). Uses AES-256-GCM + argon2id.
     ExportKey {
-        /// Path to the tenant key file.
+        /// Path to the tenant key file. Defaults to state.toml.
         #[arg(long)]
         key_path: Option<PathBuf>,
         /// Passphrase for encryption. Prompted interactively if omitted.
@@ -153,10 +154,10 @@ enum TenantAction {
 enum EntryAction {
     /// Sign and submit a config entry to a hub.
     Submit {
-        /// Defaults to `TOWONEL_HUB_URL`.
+        /// Defaults to state.toml / `TOWONEL_HUB_URL`.
         #[arg(long)]
         hub_url: Option<String>,
-        /// Path to the tenant key file.
+        /// Defaults to state.toml's `tenant_key_path`.
         #[arg(long)]
         key_path: Option<PathBuf>,
         /// Operation: upsert-hostname, delete-hostname, upsert-agent, revoke-agent
@@ -201,10 +202,8 @@ enum InviteAction {
         /// Comma-separated hostname patterns to pre-approve.
         #[arg(long, value_delimiter = ',')]
         hostnames: Vec<String>,
-        /// Token validity, e.g. "48h", "7d", "never". Defaults to `never`
-        /// so stateless K8s deployments don't need rotation on every
-        /// Secret cycle.
-        #[arg(long, default_value = "never")]
+        /// Token validity, e.g. "48h", "7d". Default 48h.
+        #[arg(long, default_value = "48h")]
         expires: String,
     },
     /// List invites on the hub. Operator-only.
@@ -362,6 +361,11 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
+fn load_state() -> ClientState {
+    let paths = DefaultPaths::from_env();
+    ClientState::load(&paths.state_file).unwrap_or_default()
+}
+
 pub(crate) fn resolve_hub_url(flag: Option<String>) -> anyhow::Result<String> {
     if let Some(v) = flag {
         return Ok(v);
@@ -369,18 +373,27 @@ pub(crate) fn resolve_hub_url(flag: Option<String>) -> anyhow::Result<String> {
     if let Ok(v) = std::env::var(HUB_URL_ENV) {
         return Ok(v);
     }
+    if let Some(v) = load_state().hub_url {
+        return Ok(v);
+    }
     Err(anyhow!(
-        "--hub-url not provided. Set it on the command line or via ${HUB_URL_ENV}."
+        "--hub-url not provided. Set it on the command line, or via ${HUB_URL_ENV}, \
+         or run `towonel-agent init --invite <token>` to populate state.toml."
     ))
 }
 
 pub(crate) fn resolve_tenant_key_path(flag: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    flag.ok_or_else(|| {
-        anyhow!(
-            "--key-path not provided. Create a tenant key with `towonel-cli tenant init` \
-             and pass its path via --key-path."
-        )
-    })
+    if let Some(v) = flag {
+        return Ok(v);
+    }
+    if let Some(v) = load_state().tenant_key_path {
+        return Ok(v);
+    }
+    Err(anyhow!(
+        "--key-path not provided and state.toml has no tenant_key_path. \
+         Run `towonel-agent init --invite <token>` to bootstrap, or create a \
+         tenant key with `towonel-cli tenant init`."
+    ))
 }
 
 pub(crate) fn resolve_operator_key(flag: Option<String>) -> anyhow::Result<String> {

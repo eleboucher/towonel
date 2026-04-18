@@ -102,7 +102,7 @@ async fn connect_and_stream(
                     tracing::debug!(kind = %event.event, "ignoring unknown SSE event");
                     continue;
                 }
-                apply_route_data(router, &event.data).await?;
+                apply_route_data(router, &event.data)?;
             }
             Err(e) => {
                 return Err(anyhow!("SSE stream error: {e}"));
@@ -120,14 +120,14 @@ fn signed_auth_header(secret_key: &iroh::SecretKey) -> String {
     format!("Signature {node_id}.{ts}.{}", B64.encode(sig.to_bytes()))
 }
 
-async fn apply_route_data(router: &Router, data: &str) -> anyhow::Result<()> {
+fn apply_route_data(router: &Router, data: &str) -> anyhow::Result<()> {
     let cbor_bytes = B64
         .decode(data)
         .map_err(|e| anyhow!("routes event: base64 decode: {e}"))?;
     let table: RouteTable = ciborium::from_reader(cbor_bytes.as_slice())
         .map_err(|e| anyhow!("routes event: CBOR decode: {e}"))?;
     let count = table.len();
-    router.replace(table).await;
+    router.replace(table);
     tracing::info!(hostnames = count, "applied route table from hub");
     Ok(())
 }

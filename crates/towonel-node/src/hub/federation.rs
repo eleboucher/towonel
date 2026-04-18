@@ -62,16 +62,10 @@ async fn authenticate_peer(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<[u8; 32], &'static str> {
-    // Federation POST handlers receive axum::Json<...> which consumes the body
-    // before this auth runs; we can't hash the raw bytes here. Replay protection
-    // for federation comes from the (node_id, ts) nonce cache below, not from
-    // body-binding. For endpoints WITH raw-body access (heartbeat), callers
-    // pass the real body bytes so the signature covers it.
     let (node_id_bytes, ts_ms) = super::auth::verify_signature_header(
         headers,
         FEDERATION_AUTH_DOMAIN,
         FEDERATION_MAX_CLOCK_SKEW_MS,
-        &[],
     )?;
 
     if !state
@@ -399,7 +393,7 @@ pub async fn push_round(
         entry_seq: sent_seq,
     } = state.db.load_federation_push_state(peer_node_id).await?;
 
-    for tenant in state.db.list_active_tenants().await? {
+    for tenant in state.db.list_redeemed_tenants().await? {
         if sent_tenants.contains(&tenant.tenant_id) {
             continue;
         }
@@ -486,9 +480,7 @@ pub async fn push_round(
 fn signed_auth_header(secret_key: &iroh::SecretKey) -> String {
     let node_id = secret_key.public();
     let ts = now_ms();
-    // Pass &[] to match authenticate_peer, which cannot access the raw body.
-    let body_hex = super::auth::body_hash_hex(&[]);
-    let message = format!("{FEDERATION_AUTH_DOMAIN}/{node_id}/{ts}/{body_hex}");
+    let message = format!("{FEDERATION_AUTH_DOMAIN}/{node_id}/{ts}");
     let sig = secret_key.sign(message.as_bytes());
     format!("Signature {node_id}.{ts}.{}", B64.encode(sig.to_bytes()))
 }

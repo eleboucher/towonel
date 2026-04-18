@@ -1,23 +1,27 @@
-use towonel_common::config_entry::{ConfigOp, ConfigPayload};
+use std::path::Path;
+
+use anyhow::Context;
+use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
 use towonel_common::identity::TenantKeypair;
 use tracing::{info, warn};
 
 use crate::config::ServiceConfig;
-use crate::hub_client::{fetch_latest_sequence, submit_entry};
+use crate::init::submit_entry;
 
-/// Publish per-service TLS policy entries so the edge knows which
-/// hostnames it should terminate vs pass-through. Sequence numbers are
-/// allocated after the agent's own `UpsertAgent` registration.
 pub async fn publish(
     hub_url: &str,
-    tenant_kp: &TenantKeypair,
+    tenant_key_path: &Path,
     services: &[ServiceConfig],
 ) -> anyhow::Result<()> {
     if services.is_empty() {
         return Ok(());
     }
+
+    let tenant_kp = towonel_common::identity::load_or_generate_tenant_keypair(tenant_key_path)
+        .context("failed to load tenant key for TLS publish")?;
+
     let client = reqwest::Client::new();
-    let mut seq = fetch_latest_sequence(&client, hub_url, tenant_kp).await?;
+    let mut seq = fetch_latest_sequence(&client, hub_url, &tenant_kp).await?;
 
     for svc in services {
         seq += 1;
@@ -31,7 +35,7 @@ pub async fn publish(
                 mode: svc.tls_mode,
             },
         };
-        match submit_entry(&client, hub_url, tenant_kp, payload).await {
+        match submit_entry(&client, hub_url, &tenant_kp, payload).await {
             Ok(()) => info!(
                 hostname = %svc.hostname,
                 mode = svc.tls_mode.label(),
@@ -47,4 +51,35 @@ pub async fn publish(
         }
     }
     Ok(())
+}
+
+async fn fetch_latest_sequence(
+    client: &reqwest::Client,
+    hub_url: &str,
+    kp: &TenantKeypair,
+) -> anyhow::Result<u64> {
+    let url = format!(
+        "{}/v1/tenants/{}/entries",
+        hub_url.trim_end_matches('/'),
+        kp.id(),
+    );
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("failed to GET {url}"))?;
+    if !resp.status().is_success() {
+        return Ok(0);
+    }
+    let bytes = resp.bytes().await?;
+    let entries: Vec<SignedConfigEntry> = ciborium::from_reader(bytes.as_ref())
+        .context("hub returned malformed tenant-entries CBOR")?;
+    let pq_pubkey = kp.public_key();
+    let mut max_seq = 0u64;
+    for entry in &entries {
+        if let Ok(payload) = entry.verify(pq_pubkey) {
+            max_seq = max_seq.max(payload.sequence);
+        }
+    }
+    Ok(max_seq)
 }
