@@ -117,6 +117,8 @@ impl AcmeCoordinator {
     }
 
     pub async fn ensure_cert(&self, hostname: &str) -> anyhow::Result<()> {
+        validate_hostname(hostname)?;
+
         if self.cert_store.has_cert(hostname) {
             return Ok(());
         }
@@ -339,10 +341,33 @@ async fn run_order(
     Ok(())
 }
 
-/// Join `<cert_dir>/<hostname>.<ext>` and verify via `normpath` that the
-/// resulting path is still inside `cert_dir`. Rejects hostnames that contain
-/// path traversal sequences (e.g. `../`), even though `validate_hostname`
-/// already catches these upstream — belt-and-braces at the FS boundary.
+/// Validate hostname against RFC 952/1123: labels of `[A-Za-z0-9-]`, no
+/// leading/trailing hyphens, total ≤ 253, each label ≤ 63. Guards against
+/// SNI path traversal before the hostname touches the filesystem.
+fn validate_hostname(hostname: &str) -> anyhow::Result<()> {
+    let hostname = hostname.strip_suffix('.').unwrap_or(hostname);
+    anyhow::ensure!(
+        !hostname.is_empty() && hostname.len() <= 253,
+        "hostname length out of range"
+    );
+    for label in hostname.split('.') {
+        anyhow::ensure!(
+            !label.is_empty() && label.len() <= 63,
+            "hostname label length out of range"
+        );
+        anyhow::ensure!(
+            label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+            "hostname label contains invalid character"
+        );
+        anyhow::ensure!(
+            !label.starts_with('-') && !label.ends_with('-'),
+            "hostname label must not start or end with a hyphen"
+        );
+    }
+    Ok(())
+}
+
+/// Join `<cert_dir>/<hostname>.<ext>`, verify the result stays inside `cert_dir`.
 fn safe_cert_path(
     cert_dir: &std::path::Path,
     hostname: &str,
@@ -355,4 +380,60 @@ fn safe_cert_path(
         anyhow::bail!("refusing to write cert outside cert_dir for `{hostname}`");
     }
     Ok(normalized.into_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_hostname;
+
+    #[test]
+    fn valid_hostnames_are_accepted() {
+        for h in &[
+            "example.com",
+            "foo.bar.baz",
+            "sub-domain.example.co.uk",
+            "xn--nxasmq6b.com",
+            "a",
+            "example.com.", // trailing dot (FQDN)
+        ] {
+            assert!(validate_hostname(h).is_ok(), "expected valid: {h}");
+        }
+    }
+
+    #[test]
+    fn traversal_sequences_are_rejected() {
+        for h in &[
+            "../etc/passwd",
+            "../../secret",
+            "foo/../bar",
+            "foo/bar",
+            "foo\\bar",
+            ".hidden",
+            "foo..bar",
+        ] {
+            assert!(validate_hostname(h).is_err(), "expected invalid: {h}");
+        }
+    }
+
+    #[test]
+    fn special_characters_are_rejected() {
+        for h in &[
+            "foo bar",
+            "foo%2e%2e",
+            "foo\0bar",
+            "foo@bar",
+            "foo:bar",
+            "-foo.com",
+            "foo-.com",
+        ] {
+            assert!(validate_hostname(h).is_err(), "expected invalid: {h}");
+        }
+    }
+
+    #[test]
+    fn empty_and_oversized_hostnames_are_rejected() {
+        assert!(validate_hostname("").is_err());
+        assert!(validate_hostname(&"a".repeat(254)).is_err());
+        assert!(validate_hostname(&format!("{}.com", "a".repeat(64))).is_err());
+    }
 }
