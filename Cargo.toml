@@ -1,8 +1,11 @@
 [package]
 name = "towonel"
-version = "0.0.1"
+version.workspace = true
 edition = "2024"
 publish = false
+
+[workspace.package]
+version = "0.0.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
