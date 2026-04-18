@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --release --bin towonel-agent && \
+    cargo build --release -p towonel-agent && \
     cp target/release/towonel-agent /towonel-agent
 
 FROM debian:bookworm-slim

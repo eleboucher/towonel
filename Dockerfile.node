@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --release --bin towonel-node --bin towonel-cli && \
+    cargo build --release -p towonel-node -p towonel-cli && \
     mkdir -p /out && \
     cp target/release/towonel-node target/release/towonel-cli /out/
 
