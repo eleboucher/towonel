@@ -161,7 +161,7 @@ JSON.
 |----------|---------|-------------|
 | `TOWONEL_IDENTITY__KEY_PATH` | `node.key` | Node identity key |
 | `TOWONEL_HUB__ENABLED` | `true` | Enable the hub API |
-TOWONEL_INVITE_HASH_KEY | | Key for hashing invite secrets (must be set for security) |
+| `TOWONEL_INVITE_HASH_KEY` | | Key for hashing invite secrets (must be set for security) |
 | `TOWONEL_HUB__LISTEN_ADDR` | `0.0.0.0:8443` | Hub API bind address |
 | `TOWONEL_HUB__PUBLIC_URL` | derived | URL embedded in invite tokens |
 | `TOWONEL_HUB__OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file |
