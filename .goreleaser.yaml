@@ -11,6 +11,7 @@ builds:
     builder: rust
     dir: crates/towonel-agent
     binary: towonel-agent
+    command: build
     targets:
       - x86_64-unknown-linux-gnu
 
@@ -18,6 +19,7 @@ builds:
     builder: rust
     dir: crates/towonel-node
     binary: towonel-node
+    command: build
     targets:
       - x86_64-unknown-linux-gnu
 
@@ -25,6 +27,7 @@ builds:
     builder: rust
     dir: crates/towonel-cli
     binary: towonel-cli
+    command: build
     targets:
       - x86_64-unknown-linux-gnu
 
