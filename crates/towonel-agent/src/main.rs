@@ -73,7 +73,8 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         config::AgentConfig::default()
     };
 
-    let service_map = Arc::new(tunnel::ServiceMap::from_config(&agent_config.services));
+    let service_map = Arc::new(tunnel::ServiceMap::from_config(&agent_config.services).await);
+    service_map.spawn_dns_refresher();
 
     let endpoint = Endpoint::builder(N0)
         .secret_key(ctx.iroh_secret_key())

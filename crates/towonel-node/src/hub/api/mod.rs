@@ -20,10 +20,12 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio_util::task::TaskTracker;
 use tower_http::ServiceBuilderExt;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::MakeRequestUuid;
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
-use towonel_common::invite::INVITE_ID_LEN;
+use towonel_common::invite::{INVITE_ID_LEN, InviteHashKey};
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
 use tracing::Level;
@@ -42,6 +44,9 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// Maximum age of an agent heartbeat for the agent to still appear in route
 /// tables. Pods heartbeat every 20s; 90s tolerates two missed beats.
 pub const AGENT_LIVE_TTL_MS: u64 = 90_000;
+
+/// Upper bound on any request body accepted by the hub API.
+pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 
 /// Rows older than this are physically deleted by the prune loop. Five
 /// minutes is long enough to debug a dead pod without keeping rows forever.
@@ -75,6 +80,10 @@ pub struct AppState {
     pub metrics: HubMetrics,
     /// Per-peer federation push status, surfaced via `/v1/federation/status`.
     pub peer_statuses: PeerStatusMap,
+    /// Tracker for fire-and-forget background tasks (DNS webhook, etc.).
+    pub tasks: TaskTracker,
+    /// Operator secret used to keyed-hash invite secrets before persistence.
+    pub invite_hash_key: InviteHashKey,
 }
 
 /// Federation-related runtime state.
@@ -132,7 +141,7 @@ pub async fn broadcast_routes(state: &Arc<AppState>, table: RouteTable) {
                 "added": added,
                 "removed": removed,
             });
-            tokio::spawn(async move {
+            state.tasks.spawn(async move {
                 match client
                     .post(&url)
                     .header("Content-Type", "application/json")
@@ -170,68 +179,12 @@ pub fn router_unlimited(state: Arc<AppState>) -> Router {
 }
 
 fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
-    let operator_routes = Router::new()
-        .route(
-            "/v1/invites",
-            post(invites::post_invite).get(invites::list_invites),
-        )
-        .route("/v1/invites/{id}", delete(invites::delete_invite))
-        .route("/v1/tenants/{id}", delete(entries::delete_tenant))
-        .route(
-            "/v1/edge-invites",
-            post(edge_invites::post_edge_invite).get(edge_invites::list_edge_invites_route),
-        )
-        .route(
-            "/v1/edge-invites/{id}",
-            delete(edge_invites::delete_edge_invite),
-        )
-        .route("/v1/dns/records", get(subscribe::get_dns_records))
-        .route("/v1/admin/federation/snapshot", get(admin::snapshot))
-        .route("/v1/admin/resync", post(admin::resync))
-        .route("/v1/federation/status", get(federation_status::get_status))
-        .layer(middleware::from_fn_with_state(state.clone(), operator_auth));
-
-    let public_write = Router::new()
-        .route("/v1/entries", post(entries::post_entry))
-        .route("/v1/tenants/{id}/entries", get(entries::get_tenant_entries))
-        .route("/v1/bootstrap", post(bootstrap::post_bootstrap))
-        .route("/v1/agent/heartbeat", post(agent_heartbeat::post_heartbeat))
-        .route(
-            "/v1/edge-invites/redeem",
-            post(edge_invites::redeem_edge_invite),
-        )
-        .route("/v1/routes/subscribe", get(subscribe::routes_subscribe));
-
-    let public_write = if rate_limit {
-        let governor_conf = std::sync::Arc::new(
-            // The builder configuration above is statically valid; finish() returns None
-            // only for invalid configs (e.g. zero rate), which can't happen here.
-            #[allow(clippy::expect_used)]
-            tower_governor::governor::GovernorConfigBuilder::default()
-                .per_second(2)
-                .burst_size(20)
-                .finish()
-                .expect("tower_governor config is valid"),
-        );
-        let limiter = governor_conf.limiter().clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_mins(1));
-            interval.tick().await; // skip the immediate first tick
-            loop {
-                interval.tick().await;
-                limiter.retain_recent();
-            }
-        });
-        public_write.layer(tower_governor::GovernorLayer::new(governor_conf))
-    } else {
-        public_write
-    };
-
+    let operator_routes = operator_routes(&state);
+    let public_write = maybe_rate_limit(public_write_routes(), rate_limit);
     let unlimited_public = Router::new()
         .route("/v1/health", get(entries::health))
         .route("/v1/edges", get(entries::list_edges))
         .route("/metrics", get(metrics_handler::metrics));
-
     let federation_routes = Router::new()
         .route(
             "/v1/federation/tenants",
@@ -276,8 +229,69 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
             state.clone(),
             record_request_metric,
         ))
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BODY_BYTES))
         .layer(correlated)
         .with_state(state)
+}
+
+fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/v1/invites",
+            post(invites::post_invite).get(invites::list_invites),
+        )
+        .route("/v1/invites/{id}", delete(invites::delete_invite))
+        .route("/v1/tenants/{id}", delete(entries::delete_tenant))
+        .route(
+            "/v1/edge-invites",
+            post(edge_invites::post_edge_invite).get(edge_invites::list_edge_invites_route),
+        )
+        .route(
+            "/v1/edge-invites/{id}",
+            delete(edge_invites::delete_edge_invite),
+        )
+        .route("/v1/dns/records", get(subscribe::get_dns_records))
+        .route("/v1/admin/federation/snapshot", get(admin::snapshot))
+        .route("/v1/admin/resync", post(admin::resync))
+        .route("/v1/federation/status", get(federation_status::get_status))
+        .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
+}
+
+fn public_write_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/v1/entries", post(entries::post_entry))
+        .route("/v1/tenants/{id}/entries", get(entries::get_tenant_entries))
+        .route("/v1/bootstrap", post(bootstrap::post_bootstrap))
+        .route("/v1/agent/heartbeat", post(agent_heartbeat::post_heartbeat))
+        .route(
+            "/v1/edge-invites/redeem",
+            post(edge_invites::redeem_edge_invite),
+        )
+        .route("/v1/routes/subscribe", get(subscribe::routes_subscribe))
+}
+
+fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<Arc<AppState>> {
+    if !rate_limit {
+        return router;
+    }
+    let governor_conf = std::sync::Arc::new(
+        #[allow(clippy::expect_used)]
+        tower_governor::governor::GovernorConfigBuilder::default()
+            .per_second(2)
+            .burst_size(20)
+            .finish()
+            .expect("tower_governor config is valid"),
+    );
+    let limiter = governor_conf.limiter().clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_mins(1));
+        interval.tick().await; // skip the immediate first tick
+        loop {
+            interval.tick().await;
+            limiter.retain_recent();
+        }
+    });
+    router.layer(tower_governor::GovernorLayer::new(governor_conf))
 }
 
 /// Bump `towonel_hub_requests{endpoint,status}` per response. Uses the

@@ -74,6 +74,8 @@ impl TestHub {
             prev_hostnames: tokio::sync::RwLock::new(std::collections::HashSet::new()),
             metrics: super::metrics::HubMetrics::new(),
             peer_statuses: super::peer_status::new_peer_status_map(&[]),
+            tasks: tokio_util::task::TaskTracker::new(),
+            invite_hash_key: towonel_common::invite::InviteHashKey::generate(),
         });
 
         let app = router_unlimited(state.clone());

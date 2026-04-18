@@ -1,18 +1,23 @@
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use arc_swap::ArcSwap;
 use iroh::EndpointId;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tracing::{Instrument, info, info_span, warn};
+use tokio::net::{TcpStream, lookup_host};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::tunnel::{ClientAddrs, read_client_addrs, read_hostname_header};
 
 use crate::config::{ProxyProtocol, ServiceConfig};
 
 mod proxy_protocol;
+
+const DNS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const COPY_BUF_SIZE: usize = 64 * 1024;
 
 async fn write_proxy_header(
     stream: &mut (impl AsyncWrite + Unpin),
@@ -29,38 +34,65 @@ async fn write_proxy_header(
 
 struct OriginTarget {
     address: String,
+    /// Empty means resolution has never succeeded; callers fall back to a
+    /// direct `TcpStream::connect(&address)` so a transient DNS outage at
+    /// startup doesn't permanently break a service.
+    resolved: ArcSwap<Vec<SocketAddr>>,
+    is_literal: bool,
     server_name: Option<String>,
     proxy_protocol: ProxyProtocol,
 }
 
+impl OriginTarget {
+    async fn connect(&self) -> anyhow::Result<TcpStream> {
+        let cached = self.resolved.load();
+        if !cached.is_empty() {
+            let mut last_err: Option<std::io::Error> = None;
+            for addr in cached.iter() {
+                match TcpStream::connect(addr).await {
+                    Ok(s) => return Ok(s),
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            if let Some(e) = last_err {
+                debug!(origin = %self.address, error = %e, "cached addrs exhausted, re-resolving");
+            }
+        }
+        TcpStream::connect(&self.address)
+            .await
+            .with_context(|| format!("failed to connect to origin {}", self.address))
+    }
+}
+
 pub struct ServiceMap {
-    services: HashMap<String, OriginTarget>,
+    services: HashMap<String, Arc<OriginTarget>>,
     /// Shared rustls client config for TLS-wrapped origin connections. Built
     /// once at startup from the webpki roots and reused for every stream.
     tls_config: Arc<rustls::ClientConfig>,
 }
 
 impl ServiceMap {
-    pub fn from_config(services: &[ServiceConfig]) -> Self {
-        let mut map = HashMap::new();
+    pub async fn from_config(services: &[ServiceConfig]) -> Self {
+        let mut map: HashMap<String, Arc<OriginTarget>> = HashMap::new();
         for svc in services {
-            map.insert(
-                svc.hostname.to_lowercase(),
-                OriginTarget {
-                    address: svc.origin.clone(),
-                    server_name: svc.origin_server_name.clone(),
-                    proxy_protocol: svc.resolved_proxy_protocol(),
-                },
-            );
+            let (initial, is_literal) = resolve_origin(&svc.origin).await;
+            let target = Arc::new(OriginTarget {
+                address: svc.origin.clone(),
+                resolved: ArcSwap::from_pointee(initial),
+                is_literal,
+                server_name: svc.origin_server_name.clone(),
+                proxy_protocol: svc.resolved_proxy_protocol(),
+            });
+            map.insert(svc.hostname.to_lowercase(), target);
         }
 
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls_config = Arc::new(
-            rustls::ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth(),
-        );
+        let mut config = rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        config.resumption = rustls::client::Resumption::in_memory_sessions(1024);
+        let tls_config = Arc::new(config);
 
         Self {
             services: map,
@@ -68,7 +100,42 @@ impl ServiceMap {
         }
     }
 
-    fn lookup(&self, hostname: &str) -> Option<&OriginTarget> {
+    /// Runs for the lifetime of the agent; no handle is returned because
+    /// there is no cooperative shutdown path to call it from.
+    pub fn spawn_dns_refresher(&self) {
+        let targets: Vec<Arc<OriginTarget>> = self
+            .services
+            .values()
+            .filter(|t| !t.is_literal)
+            .cloned()
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(DNS_REFRESH_INTERVAL);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await; // tokio interval fires immediately; skip it
+            loop {
+                ticker.tick().await;
+                for target in &targets {
+                    match lookup_host(&target.address).await {
+                        Ok(iter) => {
+                            let addrs: Vec<SocketAddr> = iter.collect();
+                            if !addrs.is_empty() {
+                                target.resolved.store(Arc::new(addrs));
+                            }
+                        }
+                        Err(e) => {
+                            debug!(origin = %target.address, error = %e, "DNS refresh failed");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    fn lookup(&self, hostname: &str) -> Option<&Arc<OriginTarget>> {
         let lower = hostname.to_lowercase();
         if let Some(target) = self.services.get(&lower) {
             return Some(target);
@@ -80,6 +147,19 @@ impl ServiceMap {
             }
         }
         None
+    }
+}
+
+async fn resolve_origin(origin: &str) -> (Vec<SocketAddr>, bool) {
+    if let Ok(addr) = origin.parse::<SocketAddr>() {
+        return (vec![addr], true);
+    }
+    match lookup_host(origin).await {
+        Ok(iter) => (iter.collect(), false),
+        Err(e) => {
+            warn!(origin, error = %e, "initial DNS resolution failed; will retry on first connect");
+            (Vec::new(), false)
+        }
     }
 }
 
@@ -187,9 +267,10 @@ async fn handle_stream(
     async {
         info!("forwarding to origin");
 
-        let tcp_stream = TcpStream::connect(&target.address)
-            .await
-            .with_context(|| format!("failed to connect to origin {}", target.address))?;
+        let tcp_stream = target.connect().await?;
+        if let Err(e) = tcp_stream.set_nodelay(true) {
+            warn!(origin = %target.address, error = %e, "failed to set TCP_NODELAY on origin socket");
+        }
 
         match &target.server_name {
             Some(sni) => {
@@ -233,17 +314,19 @@ async fn forward_plain(
     quic_recv: &mut iroh::endpoint::RecvStream,
     quic_send: &mut iroh::endpoint::SendStream,
 ) -> anyhow::Result<()> {
-    let (mut origin_read, mut origin_write) = origin.into_split();
+    let (origin_read, mut origin_write) = origin.into_split();
+    let mut origin_read = io::BufReader::with_capacity(COPY_BUF_SIZE, origin_read);
+    let mut quic_recv = io::BufReader::with_capacity(COPY_BUF_SIZE, quic_recv);
 
     write_proxy_header(&mut origin_write, proxy, addrs).await?;
 
     let q2o = async {
-        let res = io::copy(quic_recv, &mut origin_write).await;
+        let res = io::copy_buf(&mut quic_recv, &mut origin_write).await;
         let _ = origin_write.shutdown().await;
         res
     };
     let o2q = async {
-        let res = io::copy(&mut origin_read, quic_send).await;
+        let res = io::copy_buf(&mut origin_read, quic_send).await;
         let _ = quic_send.finish();
         res
     };
@@ -280,15 +363,17 @@ async fn forward_tls(
         .await
         .with_context(|| format!("TLS handshake with origin failed (SNI: {server_name})"))?;
 
-    let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
+    let (tls_read, mut tls_write) = tokio::io::split(tls_stream);
+    let mut tls_read = io::BufReader::with_capacity(COPY_BUF_SIZE, tls_read);
+    let mut quic_recv = io::BufReader::with_capacity(COPY_BUF_SIZE, quic_recv);
 
     let q2o = async {
-        let res = io::copy(quic_recv, &mut tls_write).await;
+        let res = io::copy_buf(&mut quic_recv, &mut tls_write).await;
         let _ = tls_write.shutdown().await;
         res
     };
     let o2q = async {
-        let res = io::copy(&mut tls_read, quic_send).await;
+        let res = io::copy_buf(&mut tls_read, quic_send).await;
         let _ = quic_send.finish();
         res
     };

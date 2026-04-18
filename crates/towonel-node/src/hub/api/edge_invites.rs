@@ -56,7 +56,7 @@ pub(super) async fn post_edge_invite(
     let pending = super::db::PendingEdgeInvite {
         invite_id: token.invite_id,
         name: &name,
-        secret_hash: hash_invite_secret(&token.invite_secret),
+        secret_hash: hash_invite_secret(&state.invite_hash_key, &token.invite_secret),
         expires_at_ms,
         created_at_ms,
     };
@@ -181,7 +181,10 @@ pub(super) async fn redeem_edge_invite(
         return gone("edge invite has expired");
     }
 
-    if !constant_time_eq(&hash_invite_secret(&invite_secret), &invite.secret_hash) {
+    if !constant_time_eq(
+        &hash_invite_secret(&state.invite_hash_key, &invite_secret),
+        &invite.secret_hash,
+    ) {
         return unauthorized("invite_secret does not match");
     }
 

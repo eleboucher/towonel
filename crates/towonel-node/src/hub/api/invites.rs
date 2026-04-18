@@ -111,7 +111,7 @@ pub(super) async fn post_invite(
         invite_id: token.invite_id,
         name: &name,
         hostnames: &req.hostnames,
-        secret_hash: hash_invite_secret(&token.invite_secret),
+        secret_hash: hash_invite_secret(&state.invite_hash_key, &token.invite_secret),
         tenant_id,
         pq_public_key: &pq_public_key,
         expires_at_ms,

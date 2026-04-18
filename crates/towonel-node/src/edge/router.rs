@@ -1,23 +1,23 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use iroh::{EndpointAddr, EndpointId};
-use tokio::sync::RwLock;
 use tracing::warn;
 
 use towonel_common::identity::AgentId;
 use towonel_common::routing::RouteTable;
-use towonel_common::tls_policy::{TlsMode, TlsPolicyTable};
+use towonel_common::tls_policy::TlsMode;
 
 use crate::config::TenantEntry;
 
-/// Thin adapter around [`RouteTable`] that provides async-safe access and
-/// converts between domain types ([`AgentId`]) and transport types ([`EndpointId`]).
+/// Thin adapter around [`RouteTable`] converting [`AgentId`] to
+/// [`EndpointAddr`] and folding in direct socket addresses.
 pub struct Router {
-    table: RwLock<RouteTable>,
-    tls_policies: RwLock<TlsPolicyTable>,
-    /// Optional direct socket addresses per agent `EndpointId`, used when relay
-    /// discovery is unavailable (e.g. Docker e2e tests).
+    table: ArcSwap<RouteTable>,
+    /// Direct socket addresses per agent, used when relay discovery is
+    /// unavailable (e.g. Docker e2e tests).
     direct_addrs: HashMap<AgentId, Vec<SocketAddr>>,
 }
 
@@ -30,7 +30,6 @@ impl Router {
     pub fn load_from_config(tenants: &[TenantEntry]) -> anyhow::Result<Self> {
         let mut routes: HashMap<String, HashSet<AgentId>> = HashMap::new();
         let mut direct_addrs: HashMap<AgentId, Vec<SocketAddr>> = HashMap::new();
-        let tls_policies = TlsPolicyTable::new();
 
         for tenant in tenants {
             let mut agent_ids = Vec::with_capacity(tenant.agent_node_ids.len());
@@ -78,37 +77,24 @@ impl Router {
 
         let table = RouteTable::from_raw(routes);
         Ok(Self {
-            table: RwLock::new(table),
-            tls_policies: RwLock::new(tls_policies),
+            table: ArcSwap::from_pointee(table),
             direct_addrs,
         })
     }
 
-    /// Replace the entire routing table and the derived TLS policies.
-    ///
-    /// Used by the dynamic config sync: the hub builds a [`RouteTable`] from
-    /// signed config entries (including `SetHostnameTls` ops) and broadcasts
-    /// it to the edge.
-    pub async fn replace(&self, new_table: RouteTable) {
-        let new_policies = new_table.tls_policies().clone();
-        *self.table.write().await = new_table;
-        *self.tls_policies.write().await = new_policies;
+    /// Called by the dynamic config sync after the hub broadcasts a new
+    /// table. Readers see the swap atomically.
+    pub fn replace(&self, new_table: RouteTable) {
+        self.table.store(Arc::new(new_table));
     }
 
-    /// Look up the TLS policy for a hostname. Missing entries return
-    /// `Passthrough`.
-    pub async fn tls_policy(&self, hostname: &str) -> TlsMode {
-        self.tls_policies.read().await.lookup(hostname)
-    }
-
-    /// Look up which agents serve a given hostname.
-    ///
-    /// Delegates to [`RouteTable::lookup`] and converts [`AgentId`] to [`EndpointAddr`].
-    /// If direct socket addresses are configured for an agent, they are included
-    /// in the returned [`EndpointAddr`] so the edge can connect without relay.
-    pub async fn lookup(&self, hostname: &str) -> Option<Vec<EndpointAddr>> {
-        let table = self.table.read().await;
-        self.agents_to_addrs(table.lookup(hostname)?)
+    /// Missing TLS entries default to `Passthrough`.
+    #[must_use]
+    pub fn route(&self, hostname: &str) -> Option<(Vec<EndpointAddr>, TlsMode)> {
+        let table = self.table.load();
+        let agents = table.lookup(hostname)?;
+        let addrs = self.agents_to_addrs(agents)?;
+        Some((addrs, table.tls_mode(hostname)))
     }
 
     fn agents_to_addrs(&self, agents: &HashSet<AgentId>) -> Option<Vec<EndpointAddr>> {
@@ -164,7 +150,7 @@ mod tests {
         let tenant = make_tenant("test", vec!["app.example.com"], vec![&hex_id]);
         let router = Router::load_from_config(&[tenant]).unwrap();
 
-        let result = router.lookup("app.example.com").await;
+        let result = router.route("app.example.com").map(|(addrs, _)| addrs);
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 1);
     }
@@ -175,7 +161,7 @@ mod tests {
         let tenant = make_tenant("test", vec!["*.example.com"], vec![&hex_id]);
         let router = Router::load_from_config(&[tenant]).unwrap();
 
-        let result = router.lookup("app.example.com").await;
+        let result = router.route("app.example.com").map(|(addrs, _)| addrs);
         assert!(result.is_some());
     }
 
@@ -185,7 +171,7 @@ mod tests {
         let tenant = make_tenant("test", vec!["other.com"], vec![&hex_id]);
         let router = Router::load_from_config(&[tenant]).unwrap();
 
-        let result = router.lookup("app.example.com").await;
+        let result = router.route("app.example.com").map(|(addrs, _)| addrs);
         assert!(result.is_none());
     }
 
@@ -195,7 +181,7 @@ mod tests {
         let tenant = make_tenant("test", vec!["App.Example.COM"], vec![&hex_id]);
         let router = Router::load_from_config(&[tenant]).unwrap();
 
-        let result = router.lookup("app.example.com").await;
+        let result = router.route("app.example.com").map(|(addrs, _)| addrs);
         assert!(result.is_some());
     }
 
@@ -204,7 +190,7 @@ mod tests {
         let tenant = make_tenant("empty", vec!["app.example.com"], vec![]);
         let router = Router::load_from_config(&[tenant]).unwrap();
 
-        let result = router.lookup("app.example.com").await;
+        let result = router.route("app.example.com").map(|(addrs, _)| addrs);
         assert!(result.is_none());
     }
 }
