@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 use towonel_common::CBOR_CONTENT_TYPE;
-use towonel_common::config_entry::{ConfigOp, ConfigPayload};
+use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
 use towonel_common::identity::{AgentId, AgentKeypair, TenantId, TenantKeypair};
 use towonel_common::invite::InviteToken;
 use tracing::{info, warn};
@@ -48,6 +48,7 @@ pub struct BootstrapContext {
     pub tenant_id: TenantId,
     pub trusted_edges: HashSet<EndpointId>,
     pub client: reqwest::Client,
+    pub hostnames: Vec<String>,
 }
 
 impl BootstrapContext {
@@ -112,12 +113,11 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
     Ok(BootstrapContext {
         tenant_kp,
         agent_kp,
-        // InviteToken zeroes its secrets on drop; clone the hub URL out
-        // before it falls off the end of this scope.
         hub_url: token.hub_url.clone(),
         tenant_id,
         trusted_edges,
         client,
+        hostnames: resp.hostnames,
     })
 }
 
@@ -157,6 +157,95 @@ pub async fn register(ctx: &BootstrapContext) -> anyhow::Result<()> {
             Err(e) => return Err(e),
         }
     }
+}
+
+/// Submit `UpsertHostname` entries for each hostname from the bootstrap
+/// response that isn't already present in the tenant's entry log. Idempotent
+/// across restarts.
+pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
+    if ctx.hostnames.is_empty() {
+        return Ok(());
+    }
+
+    let existing = fetch_existing_hostnames(ctx).await?;
+    let missing: Vec<&String> = ctx
+        .hostnames
+        .iter()
+        .filter(|h| !existing.contains(&h.to_lowercase()))
+        .collect();
+
+    if missing.is_empty() {
+        info!(
+            count = ctx.hostnames.len(),
+            "all hostnames already published"
+        );
+        return Ok(());
+    }
+
+    for hostname in missing {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            let latest = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await?;
+            let payload = ConfigPayload {
+                version: 1,
+                tenant_id: ctx.tenant_id,
+                sequence: latest + 1,
+                timestamp: towonel_common::time::now_ms(),
+                op: ConfigOp::UpsertHostname {
+                    hostname: hostname.clone(),
+                },
+            };
+            match submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await {
+                Ok(()) => {
+                    info!(%hostname, sequence = latest + 1, "published hostname");
+                    break;
+                }
+                Err(e) if is_sequence_conflict(&e) && attempt < REGISTER_MAX_ATTEMPTS => {
+                    let backoff = backoff_ms(attempt);
+                    warn!(attempt, backoff_ms = backoff, %hostname, "sequence conflict on UpsertHostname, retrying");
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Replay the tenant's entries to find which hostnames are already active.
+async fn fetch_existing_hostnames(ctx: &BootstrapContext) -> anyhow::Result<HashSet<String>> {
+    let url = format!(
+        "{}/v1/tenants/{}/entries",
+        ctx.hub_url.trim_end_matches('/'),
+        ctx.tenant_kp.id(),
+    );
+    let resp = ctx
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("failed to GET {url}"))?;
+    let bytes = check_response(resp).await?;
+    let entries: Vec<SignedConfigEntry> =
+        ciborium::from_reader(bytes.as_slice()).context("malformed entries CBOR")?;
+
+    let pk = ctx.tenant_kp.public_key();
+    let mut hostnames = HashSet::new();
+    for entry in &entries {
+        if let Ok(payload) = entry.verify(pk) {
+            match payload.op {
+                ConfigOp::UpsertHostname { hostname } => {
+                    hostnames.insert(hostname.to_lowercase());
+                }
+                ConfigOp::DeleteHostname { hostname } => {
+                    hostnames.remove(&hostname.to_lowercase());
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(hostnames)
 }
 
 /// Spawn the heartbeat task. Returns the `JoinHandle` so the caller can
@@ -238,6 +327,8 @@ fn sign_auth_header(
 #[derive(Deserialize)]
 struct BootstrapResponse {
     tenant_id: String,
+    #[serde(default)]
+    hostnames: Vec<String>,
     edge_node_id: Option<String>,
 }
 

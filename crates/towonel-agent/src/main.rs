@@ -4,10 +4,13 @@ mod publish_tls;
 mod stateless;
 mod tunnel;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
+use axum::Router;
+use axum::routing::get;
 use clap::Parser;
 use iroh::{Endpoint, endpoint::presets::N0};
 use towonel_common::protocol::ALPN_TUNNEL;
@@ -37,6 +40,11 @@ struct Cli {
     /// `trusted_edges`. For local testing and e2e only.
     #[arg(long, default_value_t = false)]
     allow_any_edge: bool,
+
+    /// Bind a minimal HTTP server on this port with `GET /healthz`.
+    /// Useful for k8s liveness/readiness probes.
+    #[arg(long)]
+    health_port: Option<u16>,
 }
 
 #[allow(clippy::large_futures)]
@@ -113,6 +121,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     }
 
     stateless::register(&ctx).await?;
+    stateless::publish_hostnames(&ctx).await?;
     let heartbeat = stateless::spawn_heartbeat(ctx.clone());
 
     if !agent_config.services.is_empty() {
@@ -127,6 +136,10 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let allow_any = cli.allow_any_edge;
     let trusted_edges = ctx.trusted_edges.clone();
 
+    let health_handle = cli
+        .health_port
+        .map(|port| tokio::spawn(serve_healthz(port)));
+
     tokio::select! {
         res = tunnel::run(&endpoint, service_map, trusted_edges, allow_any) => {
             if let Err(e) = res {
@@ -137,9 +150,29 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     }
 
     heartbeat.abort();
+    if let Some(h) = health_handle {
+        h.abort();
+    }
     endpoint.close().await;
     info!("towonel-agent stopped");
     Ok(())
+}
+
+/// Minimal HTTP server for health probes.
+async fn serve_healthz(port: u16) {
+    let app = Router::new().route("/healthz", get(|| async { "ok" }));
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!(port, error = %e, "failed to bind healthz listener");
+            return;
+        }
+    };
+    info!(port, "healthz listening");
+    if let Err(e) = axum::serve(listener, app).await {
+        error!(error = %e, "healthz server error");
+    }
 }
 
 /// Look up the agent config path: explicit --config, else ./agent.toml, else None.

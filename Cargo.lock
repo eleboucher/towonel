@@ -5589,6 +5589,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "axum",
  "base64",
  "ciborium",
  "clap",
