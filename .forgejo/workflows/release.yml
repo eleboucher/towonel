@@ -58,9 +58,6 @@ jobs:
 
       - name: Build and push towonel-node
         uses: https://data.forgejo.org/docker/build-push-action@v7
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.BUILDCACHE_S3_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.BUILDCACHE_S3_SECRET }}
         with:
           context: .
           file: Dockerfile.node
@@ -68,8 +65,8 @@ jobs:
           push: true
           tags: ${{ steps.meta-node.outputs.tags }}
           labels: ${{ steps.meta-node.outputs.labels }}
-          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=towonel-node
-          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=towonel-node,mode=max
+          cache-from: type=gha,scope=towonel-node
+          cache-to: type=gha,scope=towonel-node,mode=max
 
       - name: Compute agent image metadata
         id: meta-agent
@@ -83,9 +80,6 @@ jobs:
 
       - name: Build and push towonel-agent
         uses: https://data.forgejo.org/docker/build-push-action@v7
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.BUILDCACHE_S3_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.BUILDCACHE_S3_SECRET }}
         with:
           context: .
           file: Dockerfile.agent
@@ -93,5 +87,5 @@ jobs:
           push: true
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}
-          cache-from: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=towonel-agent
-          cache-to: type=s3,region=us-east-1,endpoint_url=https://s3.erwanleboucher.dev,bucket=forgejo-buildcache,use_path_style=true,name=towonel-agent,mode=max
+          cache-from: type=gha,scope=towonel-agent
+          cache-to: type=gha,scope=towonel-agent,mode=max
