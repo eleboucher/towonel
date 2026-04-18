@@ -2,16 +2,16 @@ pre-commit:
   parallel: true
   commands:
     fmt:
-      glob: "*.rs"
+      glob: "**/*.rs"
       run: cargo fmt --all -- --check
     clippy:
-      glob: "*.rs"
+      glob: "**/*.rs"
       run: cargo clippy --workspace --all-targets --all-features -- -D warnings
     machete:
       glob: "{Cargo.toml,Cargo.lock}"
       run: cargo machete
     taplo:
-      glob: "*.toml"
+      glob: "**/*.toml"
       run: taplo fmt --check {staged_files}
     typos:
       run: typos {staged_files}
@@ -20,10 +20,13 @@ pre-push:
   parallel: true
   commands:
     test:
+      glob: "**/*.rs"
       run: cargo nextest run --workspace --all-features --no-fail-fast
     deny:
+      glob: "{Cargo.toml,Cargo.lock}"
       run: cargo deny --all-features check
     doc:
+      glob: "**/*.rs"
       env:
         RUSTDOCFLAGS: "-D warnings"
       run: cargo doc --workspace --all-features --no-deps
