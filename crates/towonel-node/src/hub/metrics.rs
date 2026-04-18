@@ -45,7 +45,6 @@ pub struct HubMetrics {
     pub federation_push_failures: Family<PeerLabels, Counter>,
     pub federation_push_last_ok_ms: Family<PeerLabels, Gauge>,
     pub sse_subscribers_connected: Gauge,
-    pub invites_pending: Gauge,
     pub tenants_total: Gauge,
     pub requests_total: Family<RequestLabels, Counter>,
     registry: Arc<Registry>,
@@ -61,7 +60,6 @@ impl HubMetrics {
         let federation_push_failures: Family<PeerLabels, Counter> = Family::default();
         let federation_push_last_ok_ms: Family<PeerLabels, Gauge> = Family::default();
         let sse_subscribers_connected = Gauge::default();
-        let invites_pending = Gauge::default();
         let tenants_total = Gauge::default();
         let requests_total: Family<RequestLabels, Counter> = Family::default();
 
@@ -96,11 +94,6 @@ impl HubMetrics {
             sse_subscribers_connected.clone(),
         );
         registry.register(
-            "towonel_hub_invites_pending",
-            "Invites currently in the pending state",
-            invites_pending.clone(),
-        );
-        registry.register(
             "towonel_hub_tenants_total",
             "Tenants currently active in the ownership policy",
             tenants_total.clone(),
@@ -118,7 +111,6 @@ impl HubMetrics {
             federation_push_failures,
             federation_push_last_ok_ms,
             sse_subscribers_connected,
-            invites_pending,
             tenants_total,
             requests_total,
             registry: Arc::new(registry),

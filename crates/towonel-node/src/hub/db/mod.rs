@@ -1,6 +1,7 @@
 pub(super) mod entities;
 mod federation;
 mod invites;
+mod liveness;
 mod migration;
 mod types;
 

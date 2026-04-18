@@ -9,11 +9,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
 use towonel_common::config_entry::SignedConfigEntry;
 use towonel_common::identity::{PqPublicKey, TenantId};
-use towonel_common::routing::RouteTable;
 use tracing::{info, warn};
 
 use super::super::db::{FederatedTenant, is_unique_violation};
-use super::{AppState, broadcast_routes, internal_error, invalid_request, json_ok};
+use super::{AppState, internal_error, invalid_request, json_ok, rebuild_and_broadcast_routes};
 
 /// Sentinel `source_peer_node_id` for resync-originated rows.
 const RESYNC_SOURCE_PEER: [u8; 32] = [0xff; 32];
@@ -42,7 +41,7 @@ pub(super) struct RemovalSnapshot {
 pub(super) async fn snapshot(State(state): State<Arc<AppState>>) -> Response {
     let res: anyhow::Result<SnapshotResponse> = async {
         let federated = state.db.list_federated_tenants().await?;
-        let redeemed = state.db.list_redeemed_tenants().await?;
+        let redeemed = state.db.list_active_tenants().await?;
         let removals = state.db.list_tenant_removals().await?;
         let entries = state.db.get_all_entries().await?;
 
@@ -242,12 +241,8 @@ async fn do_resync(
         }
     }
 
-    let policy_snapshot = state.policy.read().await.clone();
-    match state.db.get_all_entries().await {
-        Ok(entries) => {
-            broadcast_routes(state, RouteTable::from_entries(&entries, &policy_snapshot)).await;
-        }
-        Err(e) => warn!(error = %e, "resync: route rebuild failed"),
+    if let Err(e) = rebuild_and_broadcast_routes(state).await {
+        warn!(error = %e, "resync: route rebuild failed");
     }
 
     Ok(ResyncResponse {

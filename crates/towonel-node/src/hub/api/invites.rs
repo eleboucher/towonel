@@ -1,21 +1,19 @@
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
-use towonel_common::identity::{PqPublicKey, TenantId};
+use towonel_common::identity::{TenantId, TenantKeypair};
 use towonel_common::invite::{InviteToken, hash_invite_secret};
 use tracing::warn;
-use zeroize::Zeroizing;
 
 use towonel_common::time::now_ms;
 
 use super::db::{InviteRow, InviteStatus, PendingInvite};
 use super::{
-    AppState, conflict, constant_time_eq, gone, internal_error, invalid_request, json_ok,
-    not_found, parse_invite_id, unauthorized,
+    AppState, conflict, internal_error, invalid_request, json_ok, not_found, parse_invite_id,
 };
 use crate::hub::federation::{TenantPush, push_tenant_sync};
 
@@ -24,9 +22,10 @@ pub(super) struct CreateInviteRequest {
     /// Optional human-readable label. A random name is generated when absent.
     name: Option<String>,
     hostnames: Vec<String>,
-    /// Relative TTL from now. 48h default enforced by the operator tool;
-    /// the hub trusts whatever it's told but caps at 30 days.
-    expires_in_secs: u64,
+    /// `None` (or 0) means the token never expires. The hub caps finite
+    /// values at 30 days; the operator tool sets sensible defaults.
+    #[serde(default)]
+    expires_in_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -34,8 +33,10 @@ pub(super) struct CreateInviteResponse {
     status: &'static str,
     token: String,
     invite_id: String,
+    tenant_id: String,
     name: String,
-    expires_at_ms: u64,
+    /// `None` when the token never expires.
+    expires_at_ms: Option<u64>,
 }
 
 const MAX_TTL_SECS: u64 = 30 * 24 * 3600;
@@ -56,50 +57,63 @@ pub(super) async fn post_invite(
             return invalid_request(format!("invalid hostname `{h}`: {e}"));
         }
     }
-    if req.expires_in_secs == 0 || req.expires_in_secs > MAX_TTL_SECS {
-        return invalid_request(format!("expires_in_secs must be in 1..={MAX_TTL_SECS}"));
-    }
+    let expires_at_ms = match req.expires_in_secs {
+        None | Some(0) => None,
+        Some(secs) if secs <= MAX_TTL_SECS => Some(now_ms() + secs * 1000),
+        Some(secs) => {
+            return invalid_request(format!(
+                "expires_in_secs must be None (forever) or in 1..={MAX_TTL_SECS}, got {secs}"
+            ));
+        }
+    };
 
     let _guard = state.invite_lock.lock().await;
 
     let candidates_lower: Vec<String> = req.hostnames.iter().map(|h| h.to_lowercase()).collect();
-    let policy = state.policy.read().await;
-    for (h_lower, h_orig) in candidates_lower.iter().zip(req.hostnames.iter()) {
-        for (tenant, patterns) in policy.iter_patterns() {
-            if patterns.contains(h_lower) {
-                return conflict(
-                    "hostname_conflict",
-                    format!("hostname `{h_orig}` is already owned by tenant {tenant}"),
-                );
+    {
+        let policy = state.policy.read().await;
+        for (h_lower, h_orig) in candidates_lower.iter().zip(req.hostnames.iter()) {
+            for (tenant, patterns) in policy.iter_patterns() {
+                if patterns.contains(h_lower) {
+                    return conflict(
+                        "hostname_conflict",
+                        format!("hostname `{h_orig}` is already owned by tenant {tenant}"),
+                    );
+                }
             }
         }
     }
-    drop(policy);
 
-    match state.db.any_pending_invite_claims(&candidates_lower).await {
+    match state.db.any_active_invite_claims(&candidates_lower).await {
         Ok(Some(h)) => {
             return conflict(
                 "hostname_conflict",
-                format!("hostname `{h}` is already reserved by a pending invite"),
+                format!("hostname `{h}` is already reserved by an active invite"),
             );
         }
         Ok(None) => {}
         Err(e) => {
-            warn!(error = %e, "failed to check pending invites");
+            warn!(error = %e, "failed to check active invites");
             return internal_error();
         }
     }
 
+    // v2 token generation bundles a fresh tenant seed so pods can derive the
+    // tenant signing key locally. The hub never persists the seed.
     let token = InviteToken::generate(state.public_url.clone());
+    let tenant_kp = TenantKeypair::from_seed(token.tenant_seed);
+    let tenant_id = tenant_kp.id();
+    let pq_public_key = tenant_kp.public_key().clone();
 
     let created_at_ms = now_ms();
-    let expires_at_ms = created_at_ms + req.expires_in_secs * 1000;
 
     let pending = PendingInvite {
         invite_id: token.invite_id,
         name: &name,
         hostnames: &req.hostnames,
         secret_hash: hash_invite_secret(&token.invite_secret),
+        tenant_id,
+        pq_public_key: &pq_public_key,
         expires_at_ms,
         created_at_ms,
     };
@@ -109,10 +123,22 @@ pub(super) async fn post_invite(
         return internal_error();
     }
 
+    {
+        let mut policy = state.policy.write().await;
+        policy.register_tenant(
+            &tenant_id,
+            pq_public_key.clone(),
+            req.hostnames.iter().cloned(),
+        );
+    }
+
+    maybe_sync_push(&state, &tenant_id, &pq_public_key, &req.hostnames).await;
+
     json_ok(CreateInviteResponse {
         status: "ok",
         token: token.encode(),
         invite_id: token.invite_id_b64(),
+        tenant_id: tenant_id.to_string(),
         name,
         expires_at_ms,
     })
@@ -124,9 +150,8 @@ pub(super) struct InviteSummary {
     name: String,
     hostnames: Vec<String>,
     status: InviteStatus,
-    expires_at_ms: u64,
-    tenant_id: Option<String>,
-    redeemed_at_ms: Option<u64>,
+    expires_at_ms: Option<u64>,
+    tenant_id: String,
     created_at_ms: u64,
 }
 
@@ -138,8 +163,7 @@ impl From<InviteRow> for InviteSummary {
             hostnames: row.hostnames,
             status: row.status,
             expires_at_ms: row.expires_at_ms,
-            tenant_id: row.tenant_id.map(|t| t.to_string()),
-            redeemed_at_ms: row.redeemed_at_ms,
+            tenant_id: row.tenant_id.to_string(),
             created_at_ms: row.created_at_ms,
         }
     }
@@ -164,15 +188,27 @@ pub(super) async fn delete_invite(
     let Some(invite_id) = parse_invite_id(&id) else {
         return invalid_request("invite_id is not valid base64url");
     };
+
+    let row = match state.db.get_invite(&invite_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found("invite does not exist"),
+        Err(e) => {
+            warn!(error = %e, "failed to look up invite for revoke");
+            return internal_error();
+        }
+    };
+
     match state.db.revoke_invite(&invite_id).await {
         Ok(true) => {
-            #[derive(Serialize)]
-            struct Ok {
-                status: &'static str,
+            let tid = row.tenant_id;
+            if let Err(e) = state.db.remove_tenant(&tid, now_ms()).await {
+                warn!(error = %e, tenant = %tid, "failed to persist tenant removal on invite revoke");
+                return internal_error();
             }
-            axum::Json(Ok { status: "revoked" }).into_response()
+            state.policy.write().await.remove(&tid);
+            json_ok(serde_json::json!({"status": "revoked"}))
         }
-        Ok(false) => not_found("invite is not pending or does not exist"),
+        Ok(false) => not_found("invite is already revoked or does not exist"),
         Err(e) => {
             warn!(error = %e, "failed to revoke invite");
             internal_error()
@@ -180,165 +216,10 @@ pub(super) async fn delete_invite(
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub(super) struct RedeemRequest {
-    invite_id: String,
-    invite_secret: String,
-    /// Base64url-encoded ML-DSA-65 public key (1952 bytes).
-    /// The hub derives `tenant_id = sha256(tenant_pq_public_key)`.
-    tenant_pq_public_key: String,
-    agent_node_id: String,
-}
-
-#[derive(Debug, Serialize)]
-pub(super) struct RedeemResponse {
-    status: &'static str,
-    tenant_id: String,
-    hostnames: Vec<String>,
-    hub_node_id: String,
-    edge_node_id: Option<String>,
-    edge_addresses: Vec<String>,
-}
-
-// This handler is long because it covers multiple redemption paths (pending, re-redeem).
-// Refactoring would not meaningfully improve readability.
-#[allow(clippy::too_many_lines)]
-pub(super) async fn redeem_invite(
-    State(state): State<Arc<AppState>>,
-    axum::Json(req): axum::Json<RedeemRequest>,
-) -> Response {
-    let Some(invite_id) = parse_invite_id(&req.invite_id) else {
-        return invalid_request("invite_id is not valid base64url");
-    };
-    let Ok(invite_secret) = B64.decode(&req.invite_secret).map(Zeroizing::new) else {
-        return invalid_request("invite_secret is not valid base64url");
-    };
-    let pq_public_key: PqPublicKey = match req.tenant_pq_public_key.parse() {
-        Ok(pk) => pk,
-        Err(e) => return invalid_request(format!("invalid tenant_pq_public_key: {e}")),
-    };
-    let tenant_id = TenantId::derive(&pq_public_key);
-
-    let _agent_id: towonel_common::identity::NodeId = match req.agent_node_id.parse() {
-        Ok(a) => a,
-        Err(e) => return invalid_request(format!("invalid agent_node_id: {e}")),
-    };
-
-    let invite = match state.db.get_invite(&invite_id).await {
-        Ok(Some(row)) => row,
-        Ok(None) => return not_found("invite does not exist"),
-        Err(e) => {
-            warn!(error = %e, "failed to fetch invite");
-            return internal_error();
-        }
-    };
-
-    match invite.status {
-        InviteStatus::Pending => {}
-        InviteStatus::Redeemed => {
-            if !constant_time_eq(&hash_invite_secret(&invite_secret), &invite.secret_hash) {
-                return unauthorized("invite_secret does not match");
-            }
-
-            if let Some(old_tid) = invite.tenant_id {
-                state.db.remove_tenant(&old_tid, now_ms()).await.ok();
-                state.policy.write().await.remove(&old_tid);
-            }
-
-            if let Err(e) = state
-                .db
-                .re_redeem_invite(&invite_id, &tenant_id, &pq_public_key, now_ms())
-                .await
-            {
-                warn!(error = %e, "failed to re-redeem invite");
-                return internal_error();
-            }
-
-            state.policy.write().await.register_tenant(
-                &tenant_id,
-                pq_public_key.clone(),
-                invite.hostnames.iter().cloned(),
-            );
-
-            maybe_sync_push(&state, &tenant_id, &pq_public_key, &invite.hostnames).await;
-
-            return json_ok(RedeemResponse {
-                status: "ok",
-                tenant_id: tenant_id.to_string(),
-                hostnames: invite.hostnames,
-                hub_node_id: state.identity.node_id.clone(),
-                edge_node_id: state.identity.edge_node_id.clone(),
-                edge_addresses: state.identity.edge_addresses.clone(),
-            });
-        }
-        InviteStatus::Revoked => return conflict("invite_revoked", "invite has been revoked"),
-    }
-
-    if now_ms() > invite.expires_at_ms {
-        return gone("invite has expired");
-    }
-
-    if !constant_time_eq(&hash_invite_secret(&invite_secret), &invite.secret_hash) {
-        return unauthorized("invite_secret does not match");
-    }
-
-    {
-        let policy = state.policy.read().await;
-        for h in &invite.hostnames {
-            for (owner, patterns) in policy.iter_patterns() {
-                if patterns.contains(&h.to_lowercase()) && *owner != tenant_id {
-                    return conflict(
-                        "hostname_conflict",
-                        format!("hostname `{h}` is already owned by another tenant"),
-                    );
-                }
-            }
-        }
-    }
-
-    match state
-        .db
-        .redeem_invite(&invite_id, &tenant_id, &pq_public_key, now_ms())
-        .await
-    {
-        Ok(true) => {}
-        Ok(false) => {
-            return conflict(
-                "invite_already_redeemed",
-                "invite was redeemed concurrently",
-            );
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to redeem invite");
-            return internal_error();
-        }
-    }
-
-    {
-        let mut policy = state.policy.write().await;
-        policy.register_tenant(
-            &tenant_id,
-            pq_public_key.clone(),
-            invite.hostnames.iter().cloned(),
-        );
-    }
-
-    maybe_sync_push(&state, &tenant_id, &pq_public_key, &invite.hostnames).await;
-
-    json_ok(RedeemResponse {
-        status: "ok",
-        tenant_id: tenant_id.to_string(),
-        hostnames: invite.hostnames,
-        hub_node_id: state.identity.node_id.clone(),
-        edge_node_id: state.identity.edge_node_id.clone(),
-        edge_addresses: state.identity.edge_addresses.clone(),
-    })
-}
-
 async fn maybe_sync_push(
     state: &AppState,
     tenant_id: &TenantId,
-    pq_public_key: &PqPublicKey,
+    pq_public_key: &towonel_common::identity::PqPublicKey,
     hostnames: &[String],
 ) {
     if !state.federation.sync_invite_redeem {

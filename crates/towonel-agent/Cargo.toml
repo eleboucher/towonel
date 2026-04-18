@@ -26,6 +26,11 @@ tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 ppp = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+getrandom = { workspace = true }
 
 [lints]
 workspace = true

@@ -21,7 +21,6 @@ async fn metrics_endpoint_exposes_counters() {
     for name in [
         "towonel_hub_entries_accepted",
         "towonel_hub_sse_subscribers_connected",
-        "towonel_hub_invites_pending",
         "towonel_hub_tenants_total",
     ] {
         assert!(

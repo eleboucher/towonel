@@ -8,7 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::Serialize;
 use towonel_common::routing::RouteTable;
 
-use super::{AppState, internal_error, json_ok, unauthorized};
+use super::{AGENT_LIVE_TTL_MS, AppState, internal_error, json_ok, unauthorized};
 
 /// Timestamp window for signature freshness. Replay within this window is
 /// acceptable (the endpoint just opens another identical SSE stream).
@@ -27,6 +27,7 @@ async fn authenticate_edge_subscriber(
         headers,
         EDGE_SUB_AUTH_DOMAIN,
         EDGE_SUB_MAX_CLOCK_SKEW_MS,
+        &[], // GET has no body
     )?;
 
     if !state
@@ -79,13 +80,22 @@ pub(super) async fn routes_subscribe(
 
     let initial_table = {
         let policy_snapshot = state.policy.read().await.clone();
-        match state.db.get_all_entries().await {
-            Ok(entries) => RouteTable::from_entries(&entries, &policy_snapshot),
+        let entries = match state.db.get_all_entries().await {
+            Ok(e) => e,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to fetch entries for initial snapshot");
                 return internal_error();
             }
-        }
+        };
+        let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
+        let live = match state.db.live_agents(cutoff).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to fetch liveness for initial snapshot");
+                return internal_error();
+            }
+        };
+        RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live))
     };
 
     let mut rx = state.route_tx.subscribe();
