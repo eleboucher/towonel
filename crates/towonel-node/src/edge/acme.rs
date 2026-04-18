@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::response::IntoResponse;
 use backon::{ExponentialBuilder, Retryable};
 use instant_acme::{
-    Account, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt, NewAccount, NewOrder,
+    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
+    NewAccount, NewOrder,
 };
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, Notify, OnceCell, RwLock};
 use tracing::{debug, info, warn};
 
 use super::tls::CertStore;
@@ -29,7 +31,10 @@ const MAX_ATTEMPTS: usize = 3;
 const ISSUANCE_TIMEOUT: Duration = Duration::from_mins(3);
 
 pub struct AcmeCoordinator {
-    account: Account,
+    account: OnceCell<Account>,
+    account_path: PathBuf,
+    directory_url: String,
+    acme_email: String,
     cert_store: CertStore,
     tokens: ChallengeTokens,
     inflight: Mutex<HashMap<String, Arc<Notify>>>,
@@ -37,39 +42,77 @@ pub struct AcmeCoordinator {
 }
 
 impl AcmeCoordinator {
-    pub async fn new(
+    pub fn new(
         cert_store: CertStore,
         tokens: ChallengeTokens,
         acme_email: String,
         staging: bool,
-    ) -> anyhow::Result<Self> {
+    ) -> Self {
         let directory_url = if staging {
             LetsEncrypt::Staging.url()
         } else {
             LetsEncrypt::Production.url()
         };
+        let account_path = cert_store.cert_dir().join("account.json");
+        info!(
+            staging,
+            account_path = %account_path.display(),
+            "ACME coordinator ready (lazy account; will register on first cert request)"
+        );
 
-        let builder = Account::builder()?;
-        let (account, _creds) = builder
-            .create(
-                &NewAccount {
-                    contact: &[&format!("mailto:{acme_email}")],
-                    terms_of_service_agreed: true,
-                    only_return_existing: false,
-                },
-                directory_url.to_string(),
-                None,
-            )
-            .await?;
-        info!(staging, "ACME account ready (on-demand mode)");
-
-        Ok(Self {
-            account,
+        Self {
+            account: OnceCell::new(),
+            account_path,
+            directory_url: directory_url.to_string(),
+            acme_email,
             cert_store,
             tokens,
             inflight: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
-        })
+        }
+    }
+
+    /// Lazily load (or create + persist) the LE account on first use.
+    async fn account(&self) -> anyhow::Result<&Account> {
+        self.account
+            .get_or_try_init(|| async { self.load_or_create_account().await })
+            .await
+    }
+
+    async fn load_or_create_account(&self) -> anyhow::Result<Account> {
+        if let Ok(bytes) = tokio::fs::read(&self.account_path).await {
+            let creds: AccountCredentials = serde_json::from_slice(&bytes)?;
+            let account = Account::builder()?.from_credentials(creds).await?;
+            info!(account_path = %self.account_path.display(), "ACME account loaded from disk");
+            return Ok(account);
+        }
+
+        let (account, creds) = Account::builder()?
+            .create(
+                &NewAccount {
+                    contact: &[&format!("mailto:{}", self.acme_email)],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                self.directory_url.clone(),
+                None,
+            )
+            .await?;
+
+        let json = serde_json::to_vec(&creds)?;
+        tokio::fs::write(&self.account_path, json).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.account_path.clone();
+            tokio::task::spawn_blocking(move || {
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("set_permissions join failed: {e}"))??;
+        }
+        info!(account_path = %self.account_path.display(), "ACME account registered and persisted");
+        Ok(account)
     }
 
     pub async fn ensure_cert(&self, hostname: &str) -> anyhow::Result<()> {
@@ -123,8 +166,12 @@ impl AcmeCoordinator {
             };
         }
 
-        let result =
-            issue_with_retry(&self.account, hostname, &self.cert_store, &self.tokens).await;
+        let result = match self.account().await {
+            Ok(account) => {
+                issue_with_retry(account, hostname, &self.cert_store, &self.tokens).await
+            }
+            Err(e) => Err(e),
+        };
 
         // Reload the cert store before notify_waiters() so followers see has_cert() == true.
         let outcome = match result {

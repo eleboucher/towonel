@@ -293,30 +293,33 @@ async fn build_edge(
     if let Some(tls) = &edge_config.tls {
         let cert_store = edge::tls::CertStore::new(&tls.cert_dir)?;
 
-        let acme = if let Some(email) = tls.acme_email.clone() {
-            let tokens: edge::acme::ChallengeTokens = Arc::default();
+        let acme = tls.acme_email.clone().map_or_else(
+            || {
+                info!("TLS termination enabled without ACME; certs must be user-provided");
+                None
+            },
+            |email| {
+                let tokens: edge::acme::ChallengeTokens = Arc::default();
 
-            // HTTP-01 challenge server on :80 (or wherever `http_listen_addr` points).
-            let http_addr = tls.http_listen_addr.clone();
-            let tokens_for_http = tokens.clone();
-            tokio::spawn(async move {
-                if let Err(e) = edge::acme::run_http01_server(&http_addr, tokens_for_http).await {
-                    tracing::error!(error = %e, "ACME HTTP-01 server exited");
-                }
-            });
+                // HTTP-01 challenge server on :80 (or wherever `http_listen_addr` points).
+                let http_addr = tls.http_listen_addr.clone();
+                let tokens_for_http = tokens.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = edge::acme::run_http01_server(&http_addr, tokens_for_http).await
+                    {
+                        tracing::error!(error = %e, "ACME HTTP-01 server exited");
+                    }
+                });
 
-            let coordinator = edge::acme::AcmeCoordinator::new(
-                cert_store.clone(),
-                tokens,
-                email,
-                tls.acme_staging,
-            )
-            .await?;
-            Some(Arc::new(coordinator))
-        } else {
-            info!("TLS termination enabled without ACME; certs must be user-provided");
-            None
-        };
+                let coordinator = edge::acme::AcmeCoordinator::new(
+                    cert_store.clone(),
+                    tokens,
+                    email,
+                    tls.acme_staging,
+                );
+                Some(Arc::new(coordinator))
+            },
+        );
 
         edge = edge.with_tls(cert_store, acme);
     }
