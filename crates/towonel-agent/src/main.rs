@@ -73,12 +73,12 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let token = stateless::token_from_env()?;
     let ctx = Arc::new(stateless::bootstrap(&token).await?);
 
-    let agent_config = if let Some(path) = resolve_config_path(cli.config.as_deref()) {
-        info!(path = %path.display(), "loading agent config");
-        config::AgentConfig::load(&path)?
-    } else {
-        info!("no agent config found, using empty service list");
-        config::AgentConfig::default()
+    let agent_config = match resolve_config_path(cli.config.as_deref()) {
+        Some(path) => {
+            info!(path = %path.display(), "loading agent config");
+            config::AgentConfig::load(&path)?
+        }
+        None => config::AgentConfig::load(std::path::Path::new(""))?,
     };
 
     let service_map = Arc::new(tunnel::ServiceMap::from_config(&agent_config.services).await);
