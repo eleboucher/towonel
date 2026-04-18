@@ -11,26 +11,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  goreleaser:
+  release:
     runs-on: docker
     steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: https://data.forgejo.org/actions/checkout@v6
         with:
           fetch-depth: 0
 
-      - name: Setup Rust
-        uses: https://github.com/dtolnay/rust-toolchain@stable
+      - name: Generate release notes
+        id: changelog
+        uses: https://github.com/orhun/git-cliff-action@v4
         with:
-          toolchain: 1.95.0
+          config: cliff.toml
+          args: --latest --strip all
 
-      - name: Run GoReleaser
-        run: curl -sfL https://goreleaser.com/static/run | VERSION=v2.15.2 bash -s --
-          release --clean
+      - name: Create Forgejo release
         env:
-          GORELEASER_FORCE_TOKEN: gitea
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITEA_SERVER_URL: https://git.erwanleboucher.dev
+          RELEASE_BODY: ${{ steps.changelog.outputs.content }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          jq -n \
+            --arg tag "$TAG" \
+            --arg name "$TAG" \
+            --arg body "$RELEASE_BODY" \
+            '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}' \
+            | curl -fsSL -X POST \
+                -H "Authorization: token ${GITEA_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data-binary @- \
+                "https://git.erwanleboucher.dev/api/v1/repos/${GITHUB_REPOSITORY}/releases"
 
   container:
     runs-on: docker
