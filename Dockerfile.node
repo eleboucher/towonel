@@ -9,9 +9,13 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo chef cook --release --recipe-path recipe.json
 COPY . .
-RUN cargo build --release -p towonel-node -p towonel-cli && \
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    cargo build --release --bin towonel-node --bin towonel-cli && \
     mkdir -p /out && \
     cp target/release/towonel-node target/release/towonel-cli /out/
 
