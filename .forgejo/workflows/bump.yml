@@ -1,0 +1,98 @@
+---
+name: Bump version
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "auto (infer from commits), patch, minor, major, or explicit X.Y.Z"
+        required: true
+        default: "auto"
+        type: string
+
+concurrency:
+  group: bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: docker
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Rust
+        uses: https://github.com/dtolnay/rust-toolchain@stable
+
+      - name: Install git-cliff
+        env:
+          GIT_CLIFF_VERSION: "2.12.0"
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/orhun/git-cliff/releases/download/v${GIT_CLIFF_VERSION}/git-cliff-${GIT_CLIFF_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /tmp
+          install -m 0755 "/tmp/git-cliff-${GIT_CLIFF_VERSION}/git-cliff" /usr/local/bin/git-cliff
+
+      - name: Compute next version
+        id: version
+        env:
+          INPUT: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          case "$INPUT" in
+            auto)
+              NEXT="$(git-cliff --config cliff.toml --bumped-version)"
+              ;;
+            major|minor|patch)
+              NEXT="$(git-cliff --config cliff.toml --bump "$INPUT" --bumped-version)"
+              ;;
+            [0-9]*.[0-9]*.[0-9]*) NEXT="v$INPUT" ;;
+            v[0-9]*) NEXT="$INPUT" ;;
+            *) echo "Unknown bump input: $INPUT" >&2; exit 1 ;;
+          esac
+          NEXT="${NEXT#v}"
+          if [ -z "$NEXT" ]; then
+            echo "git-cliff returned empty version" >&2; exit 1
+          fi
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
+          echo "Next version: v$NEXT"
+
+      - name: Update workspace version
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib
+          nxt = os.environ["NEXT"]
+          p = pathlib.Path("Cargo.toml")
+          txt = p.read_text()
+          new = re.sub(
+              r'(\[workspace\.package\][^\[]*?\nversion\s*=\s*")[^"]+(")',
+              rf'\g<1>{nxt}\g<2>',
+              txt, count=1, flags=re.S,
+          )
+          if new == txt:
+              raise SystemExit("failed to update workspace.package.version")
+          p.write_text(new)
+          PY
+          cargo update --workspace --offline
+
+      - name: Commit and push tag
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "forgejo-actions[bot]"
+          git config user.email "actions@git.erwanleboucher.dev"
+          git remote set-url origin \
+            "https://x-access-token:${GITEA_TOKEN}@git.erwanleboucher.dev/${GITHUB_REPOSITORY}.git"
+          git add Cargo.toml Cargo.lock
+          git commit -m "chore(release): ${TAG}"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "HEAD:${GITHUB_REF_NAME}" "${TAG}"

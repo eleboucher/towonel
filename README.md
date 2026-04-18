@@ -218,7 +218,7 @@ Alternatively, have the agent re-wrap the TCP connection with TLS before sending
 Set `tls_mode` on the service and the edge terminates TLS using an on-demand Let's Encrypt cert, then forwards plaintext to the agent which forwards to the origin over plain TCP.
 
 ```json
-{"hostname":"*.bob.example","origin":"127.0.0.1:8080",
+{"hostname":"*.bob.example.eu","origin":"127.0.0.1:8080",
  "tls_mode":{"mode":"terminate"}}
 ```
 
@@ -227,8 +227,8 @@ Cert lifecycle:
 - First request for a hostname triggers HTTP-01 issuance against Let's Encrypt. Subsequent requests reuse the cached cert. Renewed lazily.
 - Transient failures (network blips, ACME rate limits, challenge propagation) are retried with exponential backoff + jitter up to 3 attempts per request before the hostname enters a 5-minute failure cooldown.
 - Requires `TOWONEL_EDGE__TLS__ACME_EMAIL` on the node and inbound :80 reachable for ACME challenges.
-- Wildcards (`*.bob.example`) issue per exact subdomain on first contact — no DNS-01 required. Subject to Let's Encrypt rate limits (50 certs/week/registered domain).
-- The community member just needs a CNAME from their domain (e.g. `*.bob.example`) to an edge hostname; no DNS provider API access needed.
+- Wildcards (`*.bob.example.eu`) issue per exact subdomain on first contact — no DNS-01 required. Subject to Let's Encrypt rate limits (50 certs/week/registered domain).
+- The community member just needs a CNAME from their domain (e.g. `*.bob.example.eu`) to an edge hostname; no DNS provider API access needed.
 
 ## Deploy
 
@@ -288,7 +288,7 @@ towonel-agent (`TOWONEL_AGENT_*`):
     "tls_mode": { "mode": "passthrough" }
   },
   {
-    "hostname": "*.bob.example",
+    "hostname": "*.bob.example.eu",
     "origin": "127.0.0.1:9000",
     "tls_mode": { "mode": "terminate" }
   }
