@@ -242,11 +242,12 @@ async fn rebuild_and_broadcast(state: &Arc<super::api::AppState>) {
     }
 }
 
-/// Run forever pushing this hub's state to one peer. Discovers the peer's
-/// iroh `node_id` via GET /v1/health, then loops over local DB state and
-/// pushes unseen items. Idempotent — peers de-dupe.
+/// Run forever pushing this hub's state to one peer. When `peer.node_id` is
+/// pinned in config, the hub trusts that id from the start and refuses any
+/// mismatching `/v1/health` response. Otherwise it discovers the id on first
+/// contact — already warned at config load.
 pub async fn run_peer(
-    peer_url: String,
+    peer: crate::config::FederationPeer,
     secret_key: iroh::SecretKey,
     state: Arc<AppState>,
 ) -> anyhow::Result<()> {
@@ -254,41 +255,75 @@ pub async fn run_peer(
         .timeout(Duration::from_secs(30))
         .build()?;
 
-    let peer_node_id = bootstrap_peer(&client, &peer_url, &state.federation.trusted_peers).await;
+    let pinned = parse_pinned_node_id(peer.node_id.as_deref(), &peer.url)?;
+    let peer_node_id =
+        bootstrap_peer(&client, &peer.url, pinned, &state.federation.trusted_peers).await;
     info!(
-        peer = %peer_url,
+        peer = %peer.url,
         node_id = %hex::encode(peer_node_id),
+        pinned = pinned.is_some(),
         "federation: peer bootstrapped"
     );
 
     let mut interval = tokio::time::interval(Duration::from_secs(15));
     loop {
         interval.tick().await;
-        if let Err(e) = push_round(&client, &peer_url, &peer_node_id, &secret_key, &state).await {
-            warn!(peer = %peer_url, error = %e, "federation: push round failed");
+        if let Err(e) = push_round(&client, &peer.url, &peer_node_id, &secret_key, &state).await {
+            warn!(peer = %peer.url, error = %e, "federation: push round failed");
         }
     }
 }
 
-/// Resolve the peer's iroh `node_id` by polling its `/v1/health` until a
-/// response is received. Backs off between attempts.
+fn parse_pinned_node_id(hex_id: Option<&str>, peer_url: &str) -> anyhow::Result<Option<[u8; 32]>> {
+    let Some(hex_id) = hex_id else {
+        return Ok(None);
+    };
+    let bytes: [u8; 32] = hex::FromHex::from_hex(hex_id)
+        .map_err(|e| anyhow::anyhow!("peer {peer_url} node_id is not 32 hex bytes: {e}"))?;
+    Ok(Some(bytes))
+}
+
+/// Resolve the peer's iroh `node_id`. When `pinned` is set, a `/v1/health`
+/// mismatch is a hard error: we keep backing off rather than trust a stray
+/// response, which would defeat the pin. When `pinned` is `None`, we accept
+/// the first response (legacy behaviour, already warned at config load).
 async fn bootstrap_peer(
     client: &reqwest::Client,
     peer_url: &str,
+    pinned: Option<[u8; 32]>,
     trusted_peers: &TrustedPeerSet,
 ) -> [u8; 32] {
+    if let Some(id) = pinned {
+        trusted_peers.write().await.insert(id);
+    }
     let url = format!("{}/v1/health", peer_url.trim_end_matches('/'));
     let mut backoff = Duration::from_secs(1);
     loop {
         match fetch_node_id(client, &url).await {
             Ok(node_id) => {
-                trusted_peers.write().await.insert(node_id);
+                if let Some(expected) = pinned
+                    && node_id != expected
+                {
+                    warn!(
+                        peer = %peer_url,
+                        expected = %hex::encode(expected),
+                        got = %hex::encode(node_id),
+                        "federation: peer /v1/health returned a different node_id than pinned; \
+                         trusting pinned and retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_mins(1));
+                    continue;
+                }
+                if pinned.is_none() {
+                    trusted_peers.write().await.insert(node_id);
+                }
                 return node_id;
             }
             Err(e) => {
                 warn!(peer = %peer_url, error = %e, "federation: bootstrap failed; retrying");
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                backoff = (backoff * 2).min(Duration::from_mins(1));
             }
         }
     }
@@ -540,4 +575,69 @@ async fn post_signed_cbor(
         )
         .body(body);
     send_signed(request, secret_key, &url).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pinned_accepts_64_hex() {
+        let hex = "a".repeat(64);
+        let got = parse_pinned_node_id(Some(&hex), "https://peer.test").unwrap();
+        assert_eq!(got, Some([0xaa_u8; 32]));
+    }
+
+    #[test]
+    fn parse_pinned_none_when_unset() {
+        assert!(
+            parse_pinned_node_id(None, "https://peer.test")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parse_pinned_rejects_wrong_length() {
+        let err = parse_pinned_node_id(Some("deadbeef"), "https://peer.test").unwrap_err();
+        assert!(err.to_string().contains("32 hex bytes"));
+    }
+
+    #[test]
+    fn parse_pinned_rejects_non_hex() {
+        let err = parse_pinned_node_id(Some(&"z".repeat(64)), "https://peer.test").unwrap_err();
+        assert!(err.to_string().contains("32 hex bytes"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_trusts_pinned_id_immediately() {
+        let trusted: TrustedPeerSet =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new()));
+        let pinned = [0x33_u8; 32];
+        // Dead URL so fetch_node_id never succeeds. We assert the pin was
+        // trusted *before* any health probe by polling after insertion.
+        let trusted_clone = trusted.clone();
+        let handle = tokio::spawn(async move {
+            bootstrap_peer(
+                &reqwest::Client::new(),
+                "http://127.0.0.1:1",
+                Some(pinned),
+                &trusted_clone,
+            )
+            .await
+        });
+
+        // Give the task a tick to perform the pre-loop insert.
+        for _ in 0..20 {
+            if trusted.read().await.contains(&pinned) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            trusted.read().await.contains(&pinned),
+            "pinned id must be trusted before health probe"
+        );
+        handle.abort();
+    }
 }

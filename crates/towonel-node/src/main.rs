@@ -203,7 +203,7 @@ fn build_hub_params(
     let policy = build_ownership_policy(&config.tenants)?;
     let operator_api_key = hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
     let public_url = default_public_url(&config.hub);
-    let peer_urls = config.hub.peer_urls.clone();
+    let peers = config.hub.peers.clone();
     Ok(hub::HubParams {
         listen_addr: config.hub.listen_addr.clone(),
         database: config.hub.database.clone(),
@@ -212,7 +212,7 @@ fn build_hub_params(
         identity,
         operator_api_key,
         public_url,
-        peer_urls,
+        peers,
         secret_key,
         dns_webhook_url: config.hub.dns_webhook_url.clone(),
         sync_invite_redeem: config.hub.federation.sync_invite_redeem(),

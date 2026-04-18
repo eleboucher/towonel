@@ -333,19 +333,23 @@ Migrations run automatically at boot via `sea-orm-migration`. The same schema ap
 
 ### Federation
 
-Replicate tenants and entries across hub instances. Peers are bidirectional over HTTPS; each hub discovers the peer's iroh `node_id` at boot via `GET /v1/health`, so you only configure URLs:
-
-```bash
-# CSV — best for Kubernetes env vars
-TOWONEL_HUB__PEER_URLS=https://hub-b.example.eu:8443,https://hub-c.example.eu:8443
-```
-
-Or in TOML:
+Replicate tenants and entries across hub instances. Peers are bidirectional over HTTPS. Each peer is pinned by its iroh `node_id` to close an MITM window at first contact — omit the id and the hub will still discover it via `GET /v1/health`, but will log a warn on startup.
 
 ```toml
 [hub]
-peer_urls = ["https://hub-b.example.eu:8443", "https://hub-c.example.eu:8443"]
+peers = [
+  { url = "https://hub-b.example.eu:8443", node_id = "deadbeef..." },
+  { url = "https://hub-c.example.eu:8443", node_id = "cafebabe..." },
+]
 ```
+
+Via env (JSON — structured config doesn't fit CSV):
+
+```bash
+TOWONEL_HUB__PEERS='[{"url":"https://hub-b.example.eu:8443","node_id":"deadbeef..."}]'
+```
+
+Get a peer's `node_id` from its `GET /v1/health` before pinning.
 
 Push state (which tenants/entries have been delivered to which peer) is persisted, so a hub restart does not re-push everything. Inbound pushes are Ed25519-signed with replay protection.
 

@@ -130,6 +130,7 @@ pub struct IdentityConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HubConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -148,13 +149,21 @@ pub struct HubConfig {
     /// URL so tenants can resolve it.
     #[serde(default)]
     pub public_url: Option<String>,
-    /// Peer hub URLs for federation (option A — bidirectional HTTPS
-    /// replication). Each peer's iroh `node_id` is discovered at boot by
-    /// querying `GET /v1/health`; the URL is where this hub pushes its own
-    /// state. TOML: `peer_urls = ["https://hub-b.example.eu:8443"]`.
-    /// Env: `TOWONEL_HUB__PEER_URLS=https://a,https://b` (CSV or JSON).
+    /// Federation peers (option A — bidirectional HTTPS replication). Each
+    /// entry is `{ url, node_id }`; `node_id` is the peer's 64-hex iroh id
+    /// and is strongly recommended — pinning it closes an MITM window at
+    /// first contact. If omitted, the hub discovers it via `GET /v1/health`
+    /// and emits a warn at startup.
+    ///
+    /// TOML:
+    /// ```toml
+    /// peers = [
+    ///   { url = "https://hub-b.example.eu:8443", node_id = "deadbeef..." },
+    /// ]
+    /// ```
+    /// Env (JSON): `TOWONEL_HUB__PEERS='[{"url":"https://hub-b...","node_id":"..."}]'`.
     #[serde(default)]
-    pub peer_urls: Vec<String>,
+    pub peers: Vec<FederationPeer>,
     #[serde(default)]
     pub federation: FederationConfig,
     /// Optional webhook URL for DNS automation. When set, the hub POSTs a
@@ -165,6 +174,18 @@ pub struct HubConfig {
     /// Payload: `{ "added": ["app.example.eu"], "removed": ["old.example.eu"] }`
     #[serde(default)]
     pub dns_webhook_url: Option<String>,
+}
+
+/// A federation peer. `node_id` is optional but strongly recommended —
+/// see [`HubConfig::peers`] for the MITM race it closes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FederationPeer {
+    pub url: String,
+    /// 64-hex iroh node id of the peer. When set, the hub refuses to trust
+    /// any other node id returned by this peer's `/v1/health`.
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 /// Operator-selected operations that push state to peers before returning
@@ -300,7 +321,7 @@ impl Default for HubConfig {
             listen_addr: default_hub_listen(),
             operator_api_key_path: default_operator_key_path(),
             public_url: None,
-            peer_urls: Vec::new(),
+            peers: Vec::new(),
             federation: FederationConfig::default(),
             dns_webhook_url: None,
         }
@@ -330,7 +351,6 @@ const STRING_LIST_ENVS: &[(&str, StringListSetter)] = &[
         c.edge.public_addresses = v;
     }),
     ("TOWONEL_EDGE__HUB_URLS", |c, v| c.edge.hub_urls = v),
-    ("TOWONEL_HUB__PEER_URLS", |c, v| c.hub.peer_urls = v),
 ];
 
 /// Parse a list-valued env var. Accepts JSON (`["a","b"]`) for backwards
@@ -368,9 +388,9 @@ impl NodeConfig {
     /// TOWONEL_HUB__DATABASE__DRIVER=postgres
     /// TOWONEL_HUB__DATABASE__DSN=postgresql://...
     /// # String lists: CSV (preferred in K8s) or JSON.
-    /// TOWONEL_HUB__PEER_URLS=https://hub-b.example.eu:8443,https://hub-c.example.eu:8443
     /// TOWONEL_EDGE__HUB_URLS=https://hub-a.example.eu:8443
     /// # Complex structured lists: JSON only.
+    /// TOWONEL_HUB__PEERS='[{"url":"https://hub-b.example.eu:8443","node_id":"deadbeef..."}]'
     /// TOWONEL_TENANTS='[{"name":"alice","hostnames":["app.alice.test"],...}]'
     /// ```
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
@@ -380,7 +400,7 @@ impl NodeConfig {
         let list_env_names: Vec<&str> = STRING_LIST_ENVS.iter().map(|(name, _)| *name).collect();
         let figment_filter_keys: Vec<String> = list_env_names
             .iter()
-            .chain(&["TOWONEL_TENANTS"])
+            .chain(&["TOWONEL_TENANTS", "TOWONEL_HUB__PEERS"])
             .map(|name| {
                 name.trim_start_matches("TOWONEL_")
                     .to_lowercase()
@@ -406,9 +426,26 @@ impl NodeConfig {
         if let Ok(v) = std::env::var("TOWONEL_TENANTS") {
             config.tenants = serde_json::from_str(&v)?;
         }
+        if let Ok(v) = std::env::var("TOWONEL_HUB__PEERS") {
+            config.hub.peers = serde_json::from_str(&v)?;
+        }
 
-        for url in &config.hub.peer_urls {
-            require_https(url, "federation peer URL")?;
+        for peer in &config.hub.peers {
+            require_https(&peer.url, "federation peer URL")?;
+            if let Some(id) = &peer.node_id {
+                if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    anyhow::bail!(
+                        "federation peer node_id must be 64 hex chars: got {id:?} for {}",
+                        peer.url
+                    );
+                }
+            } else {
+                tracing::warn!(
+                    peer = %peer.url,
+                    "federation peer has no pinned node_id; bootstrap will trust the first /v1/health response (MITM-able). \
+                     Set hub.peers[].node_id to close this window."
+                );
+            }
         }
         for url in &config.edge.hub_urls {
             require_https(url, "hub_urls entry")?;
@@ -468,6 +505,54 @@ mod tests {
             msg.contains("hub_url"),
             "error should name the offending field, got: {msg}"
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn peers_table_loads_with_pinned_node_id() {
+        let toml_str = format!(
+            r#"{IDENTITY}
+            [hub]
+            peers = [
+              {{ url = "https://hub-b.example.eu:8443", node_id = "{}" }},
+            ]
+            "#,
+            "a".repeat(64)
+        );
+        let config: NodeConfig = toml::from_str(&toml_str).expect("valid peers table parses");
+        assert_eq!(config.hub.peers.len(), 1);
+        assert_eq!(config.hub.peers[0].url, "https://hub-b.example.eu:8443");
+        assert_eq!(
+            config.hub.peers[0].node_id.as_deref(),
+            Some(&*"a".repeat(64))
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn peers_table_accepts_omitted_node_id() {
+        let toml_str = format!(
+            r#"{IDENTITY}
+            [hub]
+            peers = [{{ url = "https://hub-b.example.eu:8443" }}]
+            "#
+        );
+        let config: NodeConfig = toml::from_str(&toml_str).expect("parses without node_id");
+        assert!(config.hub.peers[0].node_id.is_none());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn legacy_peer_urls_is_rejected() {
+        let toml_str = format!(
+            r#"{IDENTITY}
+            [hub]
+            peer_urls = ["https://legacy.example.eu:8443"]
+            "#
+        );
+        let err = toml::from_str::<NodeConfig>(&toml_str)
+            .expect_err("legacy peer_urls field must be rejected");
+        assert!(err.to_string().contains("peer_urls"));
     }
 
     #[test]

@@ -75,7 +75,7 @@ pub struct HubParams {
     pub identity: HubIdentity,
     pub operator_api_key: String,
     pub public_url: String,
-    pub peer_urls: Vec<String>,
+    pub peers: Vec<crate::config::FederationPeer>,
     pub secret_key: iroh::SecretKey,
     pub dns_webhook_url: Option<String>,
     pub sync_invite_redeem: bool,
@@ -147,13 +147,14 @@ impl Hub {
             Err(e) => tracing::warn!(error = %e, "initial route broadcast skipped"),
         }
 
-        let trusted_peers = Arc::new(RwLock::new(std::collections::HashSet::new()));
-        let outbound = (!self.p.peer_urls.is_empty()).then(|| api::OutboundFederation {
-            peer_urls: self.p.peer_urls.clone(),
+        let trusted_peers = init_trusted_peers(&self.p.peers).await?;
+        let peer_urls: Vec<String> = self.p.peers.iter().map(|p| p.url.clone()).collect();
+        let outbound = (!peer_urls.is_empty()).then(|| api::OutboundFederation {
+            peer_urls: peer_urls.clone(),
             signing_key: iroh::SecretKey::from(self.p.secret_key.to_bytes()),
         });
         let metrics = metrics::HubMetrics::new();
-        let peer_statuses = peer_status::new_peer_status_map(&self.p.peer_urls);
+        let peer_statuses = peer_status::new_peer_status_map(&peer_urls);
         let state = Arc::new(api::AppState {
             db,
             route_tx: self.p.route_tx.clone(),
@@ -180,12 +181,12 @@ impl Hub {
             peer_statuses,
         });
 
-        for peer_url in &self.p.peer_urls {
-            let url = peer_url.clone();
+        for peer in &self.p.peers {
+            let peer_cfg = peer.clone();
             let sk = iroh::SecretKey::from(self.p.secret_key.to_bytes());
             let state_for_peer = state.clone();
             tokio::spawn(async move {
-                if let Err(e) = federation::run_peer(url, sk, state_for_peer).await {
+                if let Err(e) = federation::run_peer(peer_cfg, sk, state_for_peer).await {
                     tracing::error!(error = %e, "federation peer task exited");
                 }
             });
@@ -201,6 +202,35 @@ impl Hub {
         axum::serve(listener, app).await?;
         Ok(())
     }
+}
+
+/// Decode and validate the pinned `node_id` on a [`FederationPeer`]. Returns
+/// `None` when the operator didn't pin one (bootstrap will discover it at
+/// cost of an MITM window, already warned at config load).
+fn peer_pinned_node_id(peer: &crate::config::FederationPeer) -> anyhow::Result<Option<[u8; 32]>> {
+    let Some(hex_id) = peer.node_id.as_deref() else {
+        return Ok(None);
+    };
+    let bytes: [u8; 32] = hex::FromHex::from_hex(hex_id)
+        .map_err(|e| anyhow::anyhow!("peer {} node_id is not 32 hex bytes: {e}", peer.url))?;
+    Ok(Some(bytes))
+}
+
+/// Seed the `trusted_peers` set with any operator-pinned peer `node_ids`, so
+/// inbound federation pushes are accepted immediately without waiting for the
+/// per-peer bootstrap task to probe `/v1/health`.
+async fn init_trusted_peers(
+    peers: &[crate::config::FederationPeer],
+) -> anyhow::Result<federation::TrustedPeerSet> {
+    let trusted = Arc::new(RwLock::new(std::collections::HashSet::new()));
+    let mut set = trusted.write().await;
+    for peer in peers {
+        if let Some(pinned) = peer_pinned_node_id(peer)? {
+            set.insert(pinned);
+        }
+    }
+    drop(set);
+    Ok(trusted)
 }
 
 /// Periodically refresh metrics gauges derived from DB/policy state.
