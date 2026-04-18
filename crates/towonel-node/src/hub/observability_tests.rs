@@ -89,6 +89,31 @@ async fn response_propagates_x_request_id() {
 }
 
 #[tokio::test]
+async fn requests_metric_labels_endpoint_and_status() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    // Drive a 200 on a matched route.
+    let resp = client
+        .get(hub.url("/v1/health"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+
+    let (_status, metrics_body) = get_text(&client, &hub.url("/metrics")).await;
+    // Expect matched-path + status labels to appear literally.
+    assert!(
+        metrics_body.contains("endpoint=\"/v1/health\""),
+        "expected endpoint=/v1/health label in metrics; got:\n{metrics_body}"
+    );
+    assert!(
+        metrics_body.contains("status=\"200\""),
+        "expected status=200 label in metrics; got:\n{metrics_body}"
+    );
+}
+
+#[tokio::test]
 async fn rejected_entries_increment_reason_counter() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();

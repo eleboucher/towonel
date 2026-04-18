@@ -30,6 +30,12 @@ pub struct PeerLabels {
     pub peer: String,
 }
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct RequestLabels {
+    pub endpoint: String,
+    pub status: String,
+}
+
 /// Hub observability surface. Cheap to clone: all inner metrics hold `Arc`s.
 #[derive(Clone)]
 pub struct HubMetrics {
@@ -41,6 +47,7 @@ pub struct HubMetrics {
     pub sse_subscribers_connected: Gauge,
     pub invites_pending: Gauge,
     pub tenants_total: Gauge,
+    pub requests_total: Family<RequestLabels, Counter>,
     registry: Arc<Registry>,
 }
 
@@ -56,6 +63,7 @@ impl HubMetrics {
         let sse_subscribers_connected = Gauge::default();
         let invites_pending = Gauge::default();
         let tenants_total = Gauge::default();
+        let requests_total: Family<RequestLabels, Counter> = Family::default();
 
         registry.register(
             "towonel_hub_entries_accepted",
@@ -97,6 +105,11 @@ impl HubMetrics {
             "Tenants currently active in the ownership policy",
             tenants_total.clone(),
         );
+        registry.register(
+            "towonel_hub_requests",
+            "HTTP requests to the hub API, by matched route and response status",
+            requests_total.clone(),
+        );
 
         Self {
             entries_accepted,
@@ -107,8 +120,18 @@ impl HubMetrics {
             sse_subscribers_connected,
             invites_pending,
             tenants_total,
+            requests_total,
             registry: Arc::new(registry),
         }
+    }
+
+    pub fn record_request(&self, endpoint: &str, status: u16) {
+        self.requests_total
+            .get_or_create(&RequestLabels {
+                endpoint: endpoint.to_string(),
+                status: status.to_string(),
+            })
+            .inc();
     }
 
     pub fn registry(&self) -> &Registry {

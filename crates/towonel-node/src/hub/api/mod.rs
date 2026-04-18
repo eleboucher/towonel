@@ -188,7 +188,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         );
         let limiter = governor_conf.limiter().clone();
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            let mut interval = tokio::time::interval(std::time::Duration::from_mins(1));
             interval.tick().await; // skip the immediate first tick
             loop {
                 interval.tick().await;
@@ -245,8 +245,33 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         .merge(unlimited_public)
         .merge(federation_routes)
         .merge(operator_routes)
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            record_request_metric,
+        ))
         .layer(correlated)
         .with_state(state)
+}
+
+/// Bump `towonel_hub_requests{endpoint,status}` per response. Uses the
+/// matched axum route pattern as `endpoint` to keep cardinality bounded —
+/// dynamic path segments like `/v1/invites/{id}` collapse to one label.
+/// Unmatched requests get `endpoint="unmatched"`.
+async fn record_request_metric(
+    State(state): State<Arc<AppState>>,
+    req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let endpoint = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("unmatched", axum::extract::MatchedPath::as_str)
+        .to_string();
+    let resp = next.run(req).await;
+    state
+        .metrics
+        .record_request(&endpoint, resp.status().as_u16());
+    resp
 }
 
 pub(super) fn error_response(
