@@ -7,18 +7,39 @@ use towonel_common::identity::{AgentId, TenantId};
 use super::entities::agent_liveness;
 use super::{Db, bytes_to_array, tenant_id_bytes};
 
+/// Whether [`Db::bump_agent_liveness`] created a new row or refreshed an
+/// existing one. Callers use this to decide whether a route rebuild is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LivenessBump {
+    /// First heartbeat for this `(tenant, agent)` pair.
+    Inserted,
+    /// Row already existed; `last_seen_ms` was bumped.
+    Refreshed,
+}
+
 impl Db {
-    /// UPSERT the `(tenant_id, agent_id)` liveness row to `now_ms`. A missing
-    /// row is created; an existing one has its `last_seen_ms` bumped.
+    /// UPSERT the `(tenant_id, agent_id)` liveness row to `now_ms`. Returns
+    /// [`LivenessBump::Inserted`] when the row did not previously exist
+    /// (i.e. the agent just came online) or [`LivenessBump::Refreshed`] when
+    /// an existing row's `last_seen_ms` was bumped.
     pub async fn bump_agent_liveness(
         &self,
         tenant_id: &TenantId,
         agent_id: &AgentId,
         now_ms: u64,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<LivenessBump> {
+        let tenant_bytes = tenant_id_bytes(tenant_id);
+        let agent_bytes = agent_id.as_bytes().to_vec();
+
+        let existed =
+            agent_liveness::Entity::find_by_id((tenant_bytes.clone(), agent_bytes.clone()))
+                .one(&self.conn)
+                .await?
+                .is_some();
+
         let model = agent_liveness::ActiveModel {
-            tenant_id: ActiveValue::Set(tenant_id_bytes(tenant_id)),
-            agent_id: ActiveValue::Set(agent_id.as_bytes().to_vec()),
+            tenant_id: ActiveValue::Set(tenant_bytes),
+            agent_id: ActiveValue::Set(agent_bytes),
             last_seen_ms: ActiveValue::Set(now_ms.cast_signed()),
         };
         agent_liveness::Entity::insert(model)
@@ -32,7 +53,12 @@ impl Db {
             )
             .exec(&self.conn)
             .await?;
-        Ok(())
+
+        Ok(if existed {
+            LivenessBump::Refreshed
+        } else {
+            LivenessBump::Inserted
+        })
     }
 
     /// Delete rows older than `cutoff_ms`. Returns the number of rows pruned
@@ -70,6 +96,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::super::temp_db;
+    use super::LivenessBump;
     use towonel_common::identity::{AgentKeypair, TenantKeypair};
 
     #[tokio::test]
@@ -78,17 +105,22 @@ mod tests {
         let tenant = TenantKeypair::generate();
         let agent = AgentKeypair::generate();
 
-        db.bump_agent_liveness(&tenant.id(), &agent.id(), 1_000)
+        let first = db
+            .bump_agent_liveness(&tenant.id(), &agent.id(), 1_000)
             .await
             .unwrap();
+        assert_eq!(first, LivenessBump::Inserted);
 
         let live = db.live_agents(0).await.unwrap();
         assert_eq!(live.len(), 1);
         assert!(live.contains(&(tenant.id(), agent.id())));
 
-        db.bump_agent_liveness(&tenant.id(), &agent.id(), 5_000)
+        let second = db
+            .bump_agent_liveness(&tenant.id(), &agent.id(), 5_000)
             .await
             .unwrap();
+        assert_eq!(second, LivenessBump::Refreshed);
+
         let live_recent = db.live_agents(3_000).await.unwrap();
         assert_eq!(live_recent.len(), 1);
         let live_future = db.live_agents(10_000).await.unwrap();
@@ -114,5 +146,24 @@ mod tests {
         let live = db.live_agents(0).await.unwrap();
         assert!(live.contains(&(tenant.id(), a2.id())));
         assert!(!live.contains(&(tenant.id(), a1.id())));
+    }
+
+    #[tokio::test]
+    async fn re_insert_after_prune_returns_inserted() {
+        let db = temp_db().await;
+        let tenant = TenantKeypair::generate();
+        let agent = AgentKeypair::generate();
+
+        db.bump_agent_liveness(&tenant.id(), &agent.id(), 1_000)
+            .await
+            .unwrap();
+        let pruned = db.prune_agent_liveness(2_000).await.unwrap();
+        assert_eq!(pruned, 1);
+
+        let outcome = db
+            .bump_agent_liveness(&tenant.id(), &agent.id(), 3_000)
+            .await
+            .unwrap();
+        assert_eq!(outcome, LivenessBump::Inserted);
     }
 }

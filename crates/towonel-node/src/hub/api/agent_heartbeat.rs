@@ -1,6 +1,11 @@
 //! `POST /v1/agent/heartbeat` -- pods call this every ~20s so the hub can
 //! reap stale agents from the route table. The signature header proves the
 //! caller holds the ephemeral iroh key authorized earlier via `UpsertAgent`.
+//!
+//! A heartbeat that transitions an agent from not-live to live triggers a
+//! route rebuild so edges learn about the new agent immediately. Subsequent
+//! heartbeats are cheap: they bump `last_seen_ms` and return without
+//! touching the route table.
 
 use std::sync::Arc;
 
@@ -10,12 +15,15 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use towonel_common::identity::{AgentId, TenantId};
-use tracing::warn;
+use tracing::{info, warn};
 
 use towonel_common::time::now_ms;
 
-use super::{AppState, internal_error, invalid_request, json_ok, unauthorized};
+use super::{
+    AppState, internal_error, invalid_request, json_ok, rebuild_and_broadcast_routes, unauthorized,
+};
 use crate::hub::auth::verify_signature_header;
+use crate::hub::db::LivenessBump;
 
 /// Domain string prepended to the signed message. Keyed per-endpoint so a
 /// signature captured elsewhere can't be replayed here.
@@ -69,13 +77,30 @@ pub(super) async fn post_heartbeat(
     }
     drop(policy);
 
-    if let Err(e) = state
+    let outcome = match state
         .db
         .bump_agent_liveness(&req.tenant_id, &req.agent_id, now_ms())
         .await
     {
-        warn!(error = %e, "failed to bump agent_liveness");
-        return internal_error();
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "failed to bump agent_liveness");
+            return internal_error();
+        }
+    };
+
+    // Transition from not-live to live requires a route rebuild so edges can
+    // start dispatching traffic to this agent. A refreshed row means the
+    // agent was already live and in the route table; nothing changed.
+    if matches!(outcome, LivenessBump::Inserted) {
+        info!(
+            tenant = %req.tenant_id,
+            agent = %req.agent_id,
+            "agent went live, rebuilding routes"
+        );
+        if let Err(e) = rebuild_and_broadcast_routes(&state).await {
+            warn!(error = %e, "failed to rebuild routes after agent went live");
+        }
     }
 
     json_ok(HeartbeatResponse {
