@@ -204,9 +204,9 @@ impl Hub {
     }
 }
 
-/// Decode and validate the pinned `node_id` on a [`FederationPeer`]. Returns
-/// `None` when the operator didn't pin one (bootstrap will discover it at
-/// cost of an MITM window, already warned at config load).
+/// Decode and validate the pinned `node_id` on a [`crate::config::FederationPeer`].
+/// Returns `None` when the operator didn't pin one (bootstrap will discover it
+/// at cost of an MITM window, already warned at config load).
 fn peer_pinned_node_id(peer: &crate::config::FederationPeer) -> anyhow::Result<Option<[u8; 32]>> {
     let Some(hex_id) = peer.node_id.as_deref() else {
         return Ok(None);
