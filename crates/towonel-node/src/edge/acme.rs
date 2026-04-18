@@ -15,7 +15,7 @@ use super::tls::CertStore;
 
 pub type ChallengeTokens = Arc<RwLock<HashMap<String, String>>>;
 
-const FAILURE_COOLDOWN: Duration = Duration::from_secs(300);
+const FAILURE_COOLDOWN: Duration = Duration::from_mins(5);
 
 /// Time budget for a single ACME order attempt. Three retry attempts with
 /// exponential backoff and jitter can cap total wall time at roughly
@@ -26,7 +26,7 @@ const MAX_ATTEMPTS: usize = 3;
 /// Total wait the follower allows while the leader retries. Must be bigger
 /// than `MAX_ATTEMPTS × ATTEMPT_TIMEOUT` plus backoff, or followers give up
 /// before the leader can declare success.
-const ISSUANCE_TIMEOUT: Duration = Duration::from_secs(180);
+const ISSUANCE_TIMEOUT: Duration = Duration::from_mins(3);
 
 pub struct AcmeCoordinator {
     account: Account,
