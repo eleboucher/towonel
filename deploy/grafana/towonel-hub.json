@@ -1,0 +1,529 @@
+{
+  "title": "towonel-hub",
+  "uid": "towonel-hub",
+  "tags": ["towonel", "towonel-hub"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 0
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {
+          "query": "label_values(towonel_edge_active_connections, instance)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Edge — Overview",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Active connections",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(towonel_edge_active_connections{instance=~\"$instance\"})",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "New connections / s",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_edge_total_connections_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "conns/s"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Ingress",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_edge_bytes_in_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "in"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Egress",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "purple", "value": null}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_edge_bytes_out_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "out"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Active connections",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "towonel_edge_active_connections{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Connection rate",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(towonel_edge_total_connections_total{instance=~\"$instance\"}[5m])",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Throughput (in / out)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 13},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/ out$/"},
+            "properties": [{"id": "custom.transform", "value": "negative-Y"}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance) (rate(towonel_edge_bytes_in_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} in"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (instance) (rate(towonel_edge_bytes_out_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} out"
+        }
+      ]
+    },
+
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Hub — Config Entries",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "Tenants",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 22},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "none",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {"unit": "short", "decimals": 0, "color": {"mode": "fixed", "fixedColor": "blue"}},
+        "overrides": []
+      },
+      "targets": [{"refId": "A", "expr": "max(towonel_hub_tenants_total)", "legendFormat": "tenants"}]
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "SSE subscribers",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 22},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {"unit": "short", "decimals": 0, "color": {"mode": "fixed", "fixedColor": "green"}},
+        "overrides": []
+      },
+      "targets": [{"refId": "A", "expr": "sum(towonel_hub_sse_subscribers_connected)", "legendFormat": "subscribers"}]
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Entries accepted / s",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 22},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {"unit": "ops", "decimals": 2, "color": {"mode": "fixed", "fixedColor": "green"}},
+        "overrides": []
+      },
+      "targets": [{"refId": "A", "expr": "sum(rate(towonel_hub_entries_accepted_total[5m]))", "legendFormat": "accepted"}]
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Entries rejected / s",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 22},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 0.1},
+              {"color": "red", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [{"refId": "A", "expr": "sum(rate(towonel_hub_entries_rejected_total[5m]))", "legendFormat": "rejected"}]
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "Entries accepted vs rejected",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "sum(rate(towonel_hub_entries_accepted_total[5m]))", "legendFormat": "accepted"},
+        {"refId": "B", "expr": "sum(rate(towonel_hub_entries_rejected_total[5m]))", "legendFormat": "rejected"}
+      ]
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "Rejections by reason",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never", "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "sum by (reason) (rate(towonel_hub_entries_rejected_total[5m]))", "legendFormat": "{{reason}}"}
+      ]
+    },
+
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Hub — HTTP API",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 34},
+      "collapsed": false
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Requests by endpoint",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 35},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "sum by (endpoint) (rate(towonel_hub_requests_total[5m]))", "legendFormat": "{{endpoint}}"}
+      ]
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Requests by status",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 35},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never", "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "sum by (status) (rate(towonel_hub_requests_total[5m]))", "legendFormat": "{{status}}"}
+      ]
+    },
+    {
+      "id": 43,
+      "type": "timeseries",
+      "title": "Error ratio (4xx / 5xx over total)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 43},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "list", "placement": "bottom"},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_hub_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(towonel_hub_requests_total[5m])), 1)",
+          "legendFormat": "5xx ratio"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(towonel_hub_requests_total{status=~\"4..\"}[5m])) / clamp_min(sum(rate(towonel_hub_requests_total[5m])), 1)",
+          "legendFormat": "4xx ratio"
+        }
+      ]
+    },
+
+    {
+      "id": 60,
+      "type": "row",
+      "title": "Hub — Federation",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 51},
+      "collapsed": false
+    },
+    {
+      "id": 61,
+      "type": "timeseries",
+      "title": "Federation pushes by peer",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 52},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/ failures$/"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "sum by (peer) (rate(towonel_hub_federation_push_success_total[5m]))", "legendFormat": "{{peer}} success"},
+        {"refId": "B", "expr": "sum by (peer) (rate(towonel_hub_federation_push_failures_total[5m]))", "legendFormat": "{{peer}} failures"}
+      ]
+    },
+    {
+      "id": 62,
+      "type": "timeseries",
+      "title": "Time since last successful push",
+      "description": "Seconds since last successful federation push per peer. Rising values indicate a stuck/broken peer.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 52},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 300},
+              {"color": "red", "value": 900}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(time() * 1000 - towonel_hub_federation_push_last_ok_ms) / 1000",
+          "legendFormat": "{{peer}}"
+        }
+      ]
+    }
+  ]
+}
