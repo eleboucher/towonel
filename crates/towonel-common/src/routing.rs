@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::config_entry::{ConfigOp, SignedConfigEntry};
+use crate::hostname::{ascii_lowercase_cow, wildcard_lookup_ascii_lower};
 use crate::identity::{AgentId, TenantId};
 use crate::ownership::OwnershipPolicy;
 use crate::tls_policy::{TlsMode, TlsPolicyTable};
@@ -163,6 +164,20 @@ impl RouteTable {
         })
     }
 
+    /// Combined `lookup` + TLS-mode resolution that shares a single
+    /// ASCII-lowercase allocation across both hot-path probes. Preserves the
+    /// independent wildcard semantics (each table is probed with its own
+    /// exact-then-wildcard order).
+    #[must_use]
+    pub fn lookup_with_tls(&self, hostname: &str) -> Option<(&HashSet<AgentId>, TlsMode)> {
+        let lower = ascii_lowercase_cow(hostname);
+        let agents = wildcard_lookup_ascii_lower(&lower, |key| {
+            self.routes.get(key).filter(|a| !a.is_empty())
+        })?;
+        let tls = self.tls_policies.lookup_ascii_lower(&lower);
+        Some((agents, tls))
+    }
+
     /// Build a route table from a pre-computed map (e.g. from TOML config).
     ///
     /// Use this when you already have the final hostname->agents mapping and
@@ -196,6 +211,14 @@ impl RouteTable {
             .filter(|(_, agents)| !agents.is_empty())
             .map(|(h, _)| h.clone())
             .collect()
+    }
+
+    /// Every unique agent that serves at least one hostname. Intended for
+    /// callers (e.g. the edge's address cache) that need to enumerate the
+    /// active set once per table swap.
+    #[must_use]
+    pub fn unique_agents(&self) -> HashSet<&AgentId> {
+        self.routes.values().flatten().collect()
     }
 }
 

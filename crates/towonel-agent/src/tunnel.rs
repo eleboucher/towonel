@@ -6,10 +6,12 @@ use std::time::{Duration, Instant};
 use anyhow::Context;
 use arc_swap::ArcSwap;
 use iroh::EndpointId;
+use rustls::pki_types::ServerName;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, lookup_host};
 use tracing::{Instrument, debug, info, info_span, warn};
 
+use towonel_common::hostname::wildcard_lookup;
 use towonel_common::tunnel::{ClientAddrs, read_client_addrs, read_hostname_header};
 
 use crate::config::{ProxyProtocol, ServiceConfig};
@@ -39,7 +41,10 @@ struct OriginTarget {
     /// startup doesn't permanently break a service.
     resolved: ArcSwap<Vec<SocketAddr>>,
     is_literal: bool,
-    server_name: Option<String>,
+    /// Precomputed rustls `ServerName` for TLS-wrapped origins. Parsed once
+    /// at config load time; cloning at stream open is cheap (owned `DnsName`
+    /// wrapper, no extra validation).
+    server_name: Option<ServerName<'static>>,
     proxy_protocol: ProxyProtocol,
 }
 
@@ -72,15 +77,27 @@ pub struct ServiceMap {
 }
 
 impl ServiceMap {
-    pub async fn from_config(services: &[ServiceConfig]) -> Self {
+    pub async fn from_config(services: &[ServiceConfig]) -> anyhow::Result<Self> {
         let mut map: HashMap<String, Arc<OriginTarget>> = HashMap::new();
         for svc in services {
             let (initial, is_literal) = resolve_origin(&svc.origin).await;
+            let server_name = svc
+                .origin_server_name
+                .as_deref()
+                .map(|name| {
+                    ServerName::try_from(name.to_string()).map_err(|e| {
+                        anyhow::anyhow!(
+                            "service {:?}: invalid origin_server_name {name:?}: {e}",
+                            svc.hostname
+                        )
+                    })
+                })
+                .transpose()?;
             let target = Arc::new(OriginTarget {
                 address: svc.origin.clone(),
                 resolved: ArcSwap::from_pointee(initial),
                 is_literal,
-                server_name: svc.origin_server_name.clone(),
+                server_name,
                 proxy_protocol: svc.resolved_proxy_protocol(),
             });
             map.insert(svc.hostname.to_lowercase(), target);
@@ -94,10 +111,10 @@ impl ServiceMap {
         config.resumption = rustls::client::Resumption::in_memory_sessions(1024);
         let tls_config = Arc::new(config);
 
-        Self {
+        Ok(Self {
             services: map,
             tls_config,
-        }
+        })
     }
 
     /// Runs for the lifetime of the agent; no handle is returned because
@@ -136,17 +153,7 @@ impl ServiceMap {
     }
 
     fn lookup(&self, hostname: &str) -> Option<&Arc<OriginTarget>> {
-        let lower = hostname.to_lowercase();
-        if let Some(target) = self.services.get(&lower) {
-            return Some(target);
-        }
-        if let Some(dot_pos) = lower.find('.') {
-            let wildcard = format!("*.{}", &lower[dot_pos + 1..]);
-            if let Some(target) = self.services.get(&wildcard) {
-                return Some(target);
-            }
-        }
-        None
+        wildcard_lookup(hostname, |key| self.services.get(key))
     }
 }
 
@@ -265,7 +272,7 @@ async fn handle_stream(
     );
 
     async {
-        info!("forwarding to origin");
+        debug!("forwarding to origin");
 
         let tcp_stream = target.connect().await?;
         if let Err(e) = tcp_stream.set_nodelay(true) {
@@ -276,7 +283,7 @@ async fn handle_stream(
             Some(sni) => {
                 forward_tls(
                     tcp_stream,
-                    sni,
+                    sni.clone(),
                     Arc::clone(&service_map.tls_config),
                     target.proxy_protocol,
                     client_addrs,
@@ -300,7 +307,7 @@ async fn handle_stream(
         // truncation is intentional: streams won't last 584 million years
         #[allow(clippy::cast_possible_truncation)]
         let duration_ms = start.elapsed().as_millis() as u64;
-        info!(duration_ms, "stream closed");
+        debug!(duration_ms, "stream closed");
         Ok(())
     }
     .instrument(span)
@@ -316,12 +323,11 @@ async fn forward_plain(
 ) -> anyhow::Result<()> {
     let (origin_read, mut origin_write) = origin.into_split();
     let mut origin_read = io::BufReader::with_capacity(COPY_BUF_SIZE, origin_read);
-    let mut quic_recv = io::BufReader::with_capacity(COPY_BUF_SIZE, quic_recv);
 
     write_proxy_header(&mut origin_write, proxy, addrs).await?;
 
     let q2o = async {
-        let res = io::copy_buf(&mut quic_recv, &mut origin_write).await;
+        let res = forward_quic_to_writer(quic_recv, &mut origin_write).await;
         let _ = origin_write.shutdown().await;
         res
     };
@@ -343,7 +349,7 @@ async fn forward_plain(
 
 async fn forward_tls(
     mut origin: TcpStream,
-    server_name: &str,
+    server_name: ServerName<'static>,
     tls_config: Arc<rustls::ClientConfig>,
     proxy: ProxyProtocol,
     addrs: ClientAddrs,
@@ -354,21 +360,18 @@ async fn forward_tls(
     // sees a normal handshake after consuming the header.
     write_proxy_header(&mut origin, proxy, addrs).await?;
 
+    let sni_for_log = format!("{server_name:?}");
     let connector = tokio_rustls::TlsConnector::from(tls_config);
-    let dns_name = rustls::pki_types::ServerName::try_from(server_name.to_string())
-        .map_err(|e| anyhow::anyhow!("invalid origin_server_name `{server_name}`: {e}"))?;
-
     let tls_stream = connector
-        .connect(dns_name, origin)
+        .connect(server_name, origin)
         .await
-        .with_context(|| format!("TLS handshake with origin failed (SNI: {server_name})"))?;
+        .with_context(|| format!("TLS handshake with origin failed (SNI: {sni_for_log})"))?;
 
     let (tls_read, mut tls_write) = tokio::io::split(tls_stream);
     let mut tls_read = io::BufReader::with_capacity(COPY_BUF_SIZE, tls_read);
-    let mut quic_recv = io::BufReader::with_capacity(COPY_BUF_SIZE, quic_recv);
 
     let q2o = async {
-        let res = io::copy_buf(&mut quic_recv, &mut tls_write).await;
+        let res = forward_quic_to_writer(quic_recv, &mut tls_write).await;
         let _ = tls_write.shutdown().await;
         res
     };
@@ -386,6 +389,28 @@ async fn forward_tls(
         warn!("origin(tls)->edge: {e}");
     }
     Ok(())
+}
+
+/// Zero-copy forward from a QUIC `RecvStream` to any `AsyncWrite`. Uses
+/// `read_chunk` to avoid the intermediate `BufReader` memcpy.
+async fn forward_quic_to_writer<W>(
+    recv: &mut iroh::endpoint::RecvStream,
+    writer: &mut W,
+) -> std::io::Result<u64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut total = 0u64;
+    loop {
+        match recv.read_chunk(usize::MAX).await {
+            Ok(Some(chunk)) => {
+                writer.write_all(&chunk.bytes).await?;
+                total = total.saturating_add(chunk.bytes.len() as u64);
+            }
+            Ok(None) => return Ok(total),
+            Err(e) => return Err(std::io::Error::other(e)),
+        }
+    }
 }
 
 #[cfg(test)]
