@@ -42,56 +42,64 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         }
     };
 
-    let policy = state.policy.read().await;
+    // Hold the read guard only long enough to snapshot the tenant-specific
+    // data we need. Dropping it before the DB insert avoids contending with
+    // concurrent `policy.write()` (e.g. from invite redemption) across an
+    // `.await`, which would serialize unrelated writers behind I/O.
+    let payload: ConfigPayload = {
+        let policy = state.policy.read().await;
 
-    let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
-        state
-            .metrics
-            .record_reject(reject_reason::TENANT_NOT_ALLOWED);
-        return tenant_not_allowed("tenant is not on the operator's allowlist");
-    };
-
-    let payload: ConfigPayload = match entry.verify(pq_pubkey) {
-        Ok(p) => p,
-        Err(e) => {
+        let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
             state
                 .metrics
-                .record_reject(reject_reason::INVALID_SIGNATURE);
-            warn!(error = %e, "rejected entry: signature or tenant_id mismatch");
-            return invalid_signature(format!("signature verification failed: {e}"));
-        }
-    };
+                .record_reject(reject_reason::TENANT_NOT_ALLOWED);
+            return tenant_not_allowed("tenant is not on the operator's allowlist");
+        };
 
-    if payload.version != PROTOCOL_VERSION {
-        state
-            .metrics
-            .record_reject(reject_reason::UNSUPPORTED_VERSION);
-        return unsupported_version(format!(
-            "payload version {} is not supported by this hub (expected {PROTOCOL_VERSION})",
-            payload.version
-        ));
-    }
+        let payload: ConfigPayload = match entry.verify(pq_pubkey) {
+            Ok(p) => p,
+            Err(e) => {
+                state
+                    .metrics
+                    .record_reject(reject_reason::INVALID_SIGNATURE);
+                warn!(error = %e, "rejected entry: signature or tenant_id mismatch");
+                return invalid_signature(format!("signature verification failed: {e}"));
+            }
+        };
 
-    let hostname_for_check = match &payload.op {
-        ConfigOp::UpsertHostname { hostname }
-        | ConfigOp::DeleteHostname { hostname }
-        | ConfigOp::SetHostnameTls { hostname, .. } => Some(hostname),
-        ConfigOp::UpsertAgent { .. } | ConfigOp::RevokeAgent { .. } => None,
-    };
-    if let Some(hostname) = hostname_for_check {
-        if let Err(e) = towonel_common::hostname::validate_hostname(hostname) {
-            state.metrics.record_reject(reject_reason::INVALID_HOSTNAME);
-            return invalid_request(format!("invalid hostname `{hostname}`: {e}"));
-        }
-        if !policy.is_hostname_allowed(&payload.tenant_id, hostname) {
+        if payload.version != PROTOCOL_VERSION {
             state
                 .metrics
-                .record_reject(reject_reason::HOSTNAME_NOT_OWNED);
-            return hostname_not_owned(format!(
-                "tenant is not authorized for hostname: {hostname}"
+                .record_reject(reject_reason::UNSUPPORTED_VERSION);
+            return unsupported_version(format!(
+                "payload version {} is not supported by this hub (expected {PROTOCOL_VERSION})",
+                payload.version
             ));
         }
-    }
+
+        let hostname_for_check = match &payload.op {
+            ConfigOp::UpsertHostname { hostname }
+            | ConfigOp::DeleteHostname { hostname }
+            | ConfigOp::SetHostnameTls { hostname, .. } => Some(hostname),
+            ConfigOp::UpsertAgent { .. } | ConfigOp::RevokeAgent { .. } => None,
+        };
+        if let Some(hostname) = hostname_for_check {
+            if let Err(e) = towonel_common::hostname::validate_hostname(hostname) {
+                state.metrics.record_reject(reject_reason::INVALID_HOSTNAME);
+                return invalid_request(format!("invalid hostname `{hostname}`: {e}"));
+            }
+            if !policy.is_hostname_allowed(&payload.tenant_id, hostname) {
+                state
+                    .metrics
+                    .record_reject(reject_reason::HOSTNAME_NOT_OWNED);
+                return hostname_not_owned(format!(
+                    "tenant is not authorized for hostname: {hostname}"
+                ));
+            }
+        }
+
+        payload
+    };
 
     let sequence = payload.sequence;
 
@@ -109,7 +117,6 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
 
     state.metrics.entries_accepted.inc();
 
-    drop(policy);
     if let Err(e) = rebuild_and_broadcast_routes(&state).await {
         warn!(error = %e, "failed to rebuild routes after insert");
     }
