@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         export RUSTC_WRAPPER=sccache \
                SCCACHE_BUCKET=sccache \
                SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
-               SCCACHE_REGION=auto \
+               SCCACHE_REGION=us-east-1 \
                SCCACHE_S3_USE_SSL=true \
                AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
                AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
@@ -38,7 +38,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         export RUSTC_WRAPPER=sccache \
                SCCACHE_BUCKET=sccache \
                SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
-               SCCACHE_REGION=auto \
+               SCCACHE_REGION=us-east-1 \
                SCCACHE_S3_USE_SSL=true \
                AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
                AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
