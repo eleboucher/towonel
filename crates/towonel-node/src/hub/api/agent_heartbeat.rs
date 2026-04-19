@@ -81,11 +81,9 @@ pub(super) async fn post_heartbeat(
         return unauthorized("signature node_id does not match body agent_id");
     }
 
-    let policy = state.policy.read().await;
-    if !policy.is_known_tenant(&req.tenant_id) {
+    if !state.policy.load().is_known_tenant(&req.tenant_id) {
         return unauthorized("tenant is not registered with this hub");
     }
-    drop(policy);
 
     let outcome = match state
         .db

@@ -79,7 +79,7 @@ pub(super) async fn routes_subscribe(
     tracing::info!(edge = %hex::encode(node_id), "edge subscriber connected");
 
     let initial_table = {
-        let policy_snapshot = state.policy.read().await.clone();
+        let policy_snapshot = state.policy.load_full();
         let entries = match state.db.get_all_entries().await {
             Ok(e) => e,
             Err(e) => {

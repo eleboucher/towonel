@@ -245,14 +245,13 @@ async fn do_resync(
         parsed_tenants.push(federated);
     }
 
-    {
-        let mut policy = state.policy.write().await;
+    state.policy_update(|policy| {
         for t in &parsed_tenants {
             if !policy.is_known_tenant(&t.tenant_id) {
                 policy.register_tenant(&t.tenant_id, t.pq_public_key.clone(), t.hostnames.clone());
             }
         }
-    }
+    });
 
     for r in &snapshot.removals {
         let tid: TenantId = r
@@ -260,7 +259,7 @@ async fn do_resync(
             .parse()
             .map_err(|e| bad(format!("snapshot removal tenant_id: {e}")))?;
         state.db.remove_tenant(&tid, r.removed_at_ms).await?;
-        state.policy.write().await.remove(&tid);
+        state.policy_update(|p| p.remove(&tid));
     }
 
     let pq_lookup: HashMap<TenantId, &PqPublicKey> = parsed_tenants
