@@ -11,12 +11,15 @@ use instant_acme::{
 };
 use normpath::PathExt;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Notify, OnceCell, RwLock};
+use tokio::sync::{Mutex, Notify, OnceCell};
 use tracing::{debug, info, warn};
 
 use super::tls::CertStore;
 
-pub type ChallengeTokens = Arc<RwLock<HashMap<String, String>>>;
+/// Lock-free map of in-flight HTTP-01 challenge tokens → key authorizations.
+/// Short-lived: entries are inserted before `challenge.set_ready()` and
+/// removed once the order either succeeds or fails.
+pub type ChallengeTokens = Arc<papaya::HashMap<String, String>>;
 
 const FAILURE_COOLDOWN: Duration = Duration::from_mins(5);
 
@@ -126,12 +129,7 @@ impl AcmeCoordinator {
         if let Some(ts) = self.failures.lock().await.get(hostname).copied()
             && ts.elapsed() < FAILURE_COOLDOWN
         {
-            // checked_sub is infallible here: ts.elapsed() < FAILURE_COOLDOWN
-            #[allow(clippy::unwrap_used)]
-            let remaining_secs = FAILURE_COOLDOWN
-                .checked_sub(ts.elapsed())
-                .unwrap()
-                .as_secs();
+            let remaining_secs = FAILURE_COOLDOWN.saturating_sub(ts.elapsed()).as_secs();
             anyhow::bail!(
                 "recent ACME failure for {hostname} (cooldown {remaining_secs}s remaining)",
             );
@@ -213,7 +211,7 @@ pub async fn run_http01_server(listen_addr: &str, tokens: ChallengeTokens) -> an
                 move |axum::extract::Path(token): axum::extract::Path<String>| {
                     let tokens = tokens.clone();
                     async move {
-                        let auth = tokens.read().await.get(&token).cloned();
+                        let auth = tokens.pin().get(&token).cloned();
                         // map_or_else would not be cleaner here due to the tuple construction.
                         #[allow(clippy::option_if_let_else)]
                         if let Some(auth) = auth {
@@ -287,7 +285,7 @@ async fn provision_cert(
     let result = run_order(&mut order, hostname, cert_store, tokens, &mut issued_tokens).await;
 
     if !issued_tokens.is_empty() {
-        let mut map = tokens.write().await;
+        let map = tokens.pin();
         for token in issued_tokens {
             map.remove(&token);
         }
@@ -313,7 +311,7 @@ async fn run_order(
             .ok_or_else(|| anyhow::anyhow!("no HTTP-01 challenge offered"))?;
         let key_auth = challenge.key_authorization().as_str().to_string();
         let token = challenge.token.clone();
-        tokens.write().await.insert(token.clone(), key_auth);
+        tokens.pin().insert(token.clone(), key_auth);
         issued_tokens.push(token);
         challenge.set_ready().await?;
     }

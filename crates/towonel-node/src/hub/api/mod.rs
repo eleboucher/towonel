@@ -10,6 +10,7 @@ mod subscribe;
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -74,8 +75,10 @@ pub struct AppState {
     pub federation: FederationState,
     /// Optional webhook URL for DNS automation.
     pub dns_webhook_url: Option<String>,
-    /// Hostnames present in the last broadcasted route table.
-    pub prev_hostnames: RwLock<std::collections::HashSet<String>>,
+    /// Hostnames present in the last broadcasted route table. Single-writer
+    /// (the route-rebuild path) / many-reader (`/v1/dns/records`); `ArcSwap`
+    /// keeps reads lock-free.
+    pub prev_hostnames: ArcSwap<std::collections::HashSet<String>>,
     /// Prometheus metrics surface exposed on `/metrics`.
     pub metrics: HubMetrics,
     /// Per-peer federation push status, surfaced via `/v1/federation/status`.
@@ -127,17 +130,19 @@ pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Resu
     let (entries, live) =
         tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
     let table = RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live));
-    broadcast_routes(state, table).await;
+    broadcast_routes(state, table);
     Ok(())
 }
 
 /// Broadcast `table` to edges and fire the DNS webhook if hostnames changed.
-pub async fn broadcast_routes(state: &Arc<AppState>, table: RouteTable) {
+pub fn broadcast_routes(state: &Arc<AppState>, table: RouteTable) {
     let new_hostnames = table.hostnames();
-    let _ = state.route_tx.send(table);
+    if state.route_tx.send(table).is_err() {
+        tracing::debug!("route broadcast: no active subscribers");
+    }
 
     if let Some(url) = &state.dns_webhook_url {
-        let mut prev = state.prev_hostnames.write().await;
+        let prev = state.prev_hostnames.load();
         let added: Vec<&String> = new_hostnames.difference(&prev).collect();
         let removed: Vec<&String> = prev.difference(&new_hostnames).collect();
 
@@ -169,7 +174,7 @@ pub async fn broadcast_routes(state: &Arc<AppState>, table: RouteTable) {
             });
         }
 
-        *prev = new_hostnames;
+        state.prev_hostnames.store(Arc::new(new_hostnames));
     }
 }
 
