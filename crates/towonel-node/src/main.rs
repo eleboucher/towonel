@@ -202,7 +202,7 @@ fn build_hub_params(
 ) -> anyhow::Result<hub::HubParams> {
     let policy = build_ownership_policy(&config.tenants)?;
     let operator_api_key = hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
-    let invite_hash_key = hub::load_invite_hash_key()?;
+    let invite_hash_key = std::sync::Arc::new(hub::load_invite_hash_key()?);
     let public_url = default_public_url(&config.hub);
     let peers = config.hub.peers.clone();
     Ok(hub::HubParams {

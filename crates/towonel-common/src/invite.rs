@@ -2,7 +2,7 @@ use std::fmt;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Length of `invite_id` in bytes.
 pub const INVITE_ID_LEN: usize = 16;
@@ -128,13 +128,13 @@ impl InviteToken {
             .try_into()
             .map_err(|_| InviteTokenError::BadInviteIdLen(id_bytes.len()))?;
 
-        let secret_bytes = B64.decode(parts[2])?;
+        let secret_bytes = Zeroizing::new(B64.decode(parts[2])?);
         let invite_secret: [u8; INVITE_SECRET_LEN] = secret_bytes
             .as_slice()
             .try_into()
             .map_err(|_| InviteTokenError::BadInviteSecretLen(secret_bytes.len()))?;
 
-        let seed_bytes = B64.decode(parts[3])?;
+        let seed_bytes = Zeroizing::new(B64.decode(parts[3])?);
         let tenant_seed: [u8; TENANT_SEED_LEN] = seed_bytes
             .as_slice()
             .try_into()
@@ -235,7 +235,7 @@ impl EdgeInviteToken {
             .try_into()
             .map_err(|_| InviteTokenError::BadInviteIdLen(id_bytes.len()))?;
 
-        let secret_bytes = B64.decode(parts[2])?;
+        let secret_bytes = Zeroizing::new(B64.decode(parts[2])?);
         let invite_secret: [u8; INVITE_SECRET_LEN] = secret_bytes
             .as_slice()
             .try_into()
@@ -256,33 +256,38 @@ impl EdgeInviteToken {
 
 /// Operator secret for keyed hashing of invite secrets before DB storage.
 /// Rotating invalidates every outstanding invite hash; treat as long-lived.
-#[derive(Clone)]
-pub struct InviteHashKey([u8; 32]);
+///
+/// Not `Clone` — duplicating would leave two live copies of the secret
+/// material. Wrap in `Arc<InviteHashKey>` at call sites that need sharing.
+/// Zeroized on drop via [`Zeroizing`].
+pub struct InviteHashKey(Zeroizing<[u8; 32]>);
 
 impl InviteHashKey {
     pub fn from_hex(hex_str: &str) -> anyhow::Result<Self> {
-        let bytes = hex::decode(hex_str.trim())
-            .map_err(|e| anyhow::anyhow!("invite hash key is not valid hex: {e}"))?;
+        let bytes = Zeroizing::new(
+            hex::decode(hex_str.trim())
+                .map_err(|e| anyhow::anyhow!("invite hash key is not valid hex: {e}"))?,
+        );
         let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!("invite hash key must be exactly 32 bytes (64 hex chars)")
         })?;
-        Ok(Self(arr))
+        Ok(Self(Zeroizing::new(arr)))
     }
 
     #[must_use]
     pub fn generate() -> Self {
-        let mut k = [0u8; 32];
+        let mut k = Zeroizing::new([0u8; 32]);
         #[allow(clippy::expect_used)]
-        getrandom::fill(&mut k).expect("OS RNG failed");
+        getrandom::fill(k.as_mut_slice()).expect("OS RNG failed");
         Self(k)
     }
 
     #[must_use]
     pub fn to_hex(&self) -> String {
-        hex::encode(self.0)
+        hex::encode(*self.0)
     }
 
-    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
