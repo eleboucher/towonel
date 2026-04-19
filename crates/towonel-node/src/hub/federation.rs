@@ -6,10 +6,9 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use towonel_common::auth::sign_auth_header;
 use towonel_common::config_entry::SignedConfigEntry;
 use towonel_common::identity::{PqPublicKey, TenantId};
 use towonel_common::routing::RouteTable;
@@ -261,7 +260,7 @@ async fn rebuild_and_broadcast(state: &Arc<super::api::AppState>) {
     match state.db.get_all_entries().await {
         Ok(entries) => {
             let table = RouteTable::from_entries(&entries, &policy_snapshot);
-            super::api::broadcast_routes(state, table).await;
+            super::api::broadcast_routes(state, table);
         }
         Err(e) => warn!(error = %e, "federation: route rebuild failed"),
     }
@@ -509,16 +508,6 @@ pub async fn push_round(
     Ok(())
 }
 
-fn signed_auth_header(secret_key: &iroh::SecretKey) -> String {
-    let node_id = secret_key.public();
-    let ts = now_ms();
-    // Pass &[] to match authenticate_peer, which cannot access the raw body.
-    let body_hex = super::auth::body_hash_hex(&[]);
-    let message = format!("{FEDERATION_AUTH_DOMAIN}/{node_id}/{ts}/{body_hex}");
-    let sig = secret_key.sign(message.as_bytes());
-    format!("Signature {node_id}.{ts}.{}", B64.encode(sig.to_bytes()))
-}
-
 fn peer_url_path(peer_url: &str, path: &str) -> String {
     format!("{}{path}", peer_url.trim_end_matches('/'))
 }
@@ -529,11 +518,12 @@ async fn send_signed(
     secret_key: &iroh::SecretKey,
     url: &str,
 ) -> anyhow::Result<()> {
+    // Federation POST handlers consume the body before auth runs, so we can't
+    // bind the signature to the body on this path (it'd be unverifiable on the
+    // other side). Replay protection comes from the (node_id, ts) nonce cache.
+    let auth = sign_auth_header(secret_key, FEDERATION_AUTH_DOMAIN, now_ms(), &[]);
     let resp = request
-        .header(
-            reqwest::header::AUTHORIZATION,
-            signed_auth_header(secret_key),
-        )
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await?;
     let status = resp.status();

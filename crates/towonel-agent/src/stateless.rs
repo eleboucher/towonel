@@ -9,12 +9,11 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use ed25519_dalek::Signer;
 use iroh::EndpointId;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::task::JoinHandle;
 use towonel_common::CBOR_CONTENT_TYPE;
+use towonel_common::auth::sign_auth_header;
 use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
 use towonel_common::identity::{AgentId, AgentKeypair, TenantId, TenantKeypair};
 use towonel_common::invite::InviteToken;
@@ -306,26 +305,6 @@ async fn send_heartbeat(ctx: &BootstrapContext) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build an `Authorization: Signature <node_id>.<ts>.<sig>` header signed by
-/// `kp`. Body bytes are hashed into the signed message so the hub's
-/// `verify_signature_header` can verify the signature covers the request
-/// body, not just the timestamp. Pass `&[]` for GET handlers.
-fn sign_auth_header(
-    kp: &ed25519_dalek::SigningKey,
-    domain: &str,
-    ts_ms: u64,
-    body: &[u8],
-) -> String {
-    let node_id_hex = hex::encode(kp.verifying_key().as_bytes());
-    let body_hex = hex::encode(Sha256::digest(body));
-    let message = format!("{domain}/{node_id_hex}/{ts_ms}/{body_hex}");
-    let sig = kp.sign(message.as_bytes());
-    format!(
-        "Signature {node_id_hex}.{ts_ms}.{}",
-        B64.encode(sig.to_bytes())
-    )
-}
-
 /// The hub's `/v1/bootstrap` response; we only need the two fields the
 /// agent actually uses (`tenant_id` for verification, `edge_node_id` for
 /// trusted-edge seeding). Serde ignores unknown fields by default, so new
@@ -417,23 +396,6 @@ mod tests {
     fn backoff_grows_and_caps() {
         assert!(backoff_ms(1) >= 50);
         assert!(backoff_ms(10) <= 2_050);
-    }
-
-    #[test]
-    fn sign_auth_header_shape_and_body_binding() {
-        let kp = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
-        let header_a = sign_auth_header(&kp, "towonel/agent-heartbeat/v1", 42, b"body-a");
-        let header_b = sign_auth_header(&kp, "towonel/agent-heartbeat/v1", 42, b"body-b");
-        assert!(header_a.starts_with("Signature "));
-        // Same key + ts + domain but different body -> different signature.
-        // Without body-binding this invariant would fail.
-        assert_ne!(header_a, header_b);
-
-        let auth_body = header_a.strip_prefix("Signature ").unwrap();
-        let parts: Vec<&str> = auth_body.split('.').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0].len(), 64);
-        assert_eq!(parts[1], "42");
     }
 
     #[tokio::test]
