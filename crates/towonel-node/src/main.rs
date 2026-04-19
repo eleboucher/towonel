@@ -290,7 +290,8 @@ async fn build_edge(
         Arc::new(ep),
         edge_config.listen_addr.clone(),
         edge_config.health_listen_addr.clone(),
-    );
+    )
+    .with_listen_workers(edge_config.listen_workers);
 
     if let Some(tls) = &edge_config.tls {
         let cert_store = edge::tls::CertStore::new(&tls.cert_dir)?;

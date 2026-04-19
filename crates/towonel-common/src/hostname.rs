@@ -1,3 +1,16 @@
+use std::borrow::Cow;
+
+/// Returns `hostname` borrowed if already ASCII-lowercase, otherwise owned.
+/// DNS hostnames are ASCII (IDN uses punycode), so the common case is borrow.
+#[must_use]
+pub fn ascii_lowercase_cow(hostname: &str) -> Cow<'_, str> {
+    if hostname.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(hostname.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(hostname)
+    }
+}
+
 /// Given a hostname, try an exact key lookup, then a single-level wildcard
 /// (`*.example.eu` matches `app.example.eu`). Returns the value if found.
 ///
@@ -6,8 +19,16 @@ pub fn wildcard_lookup<'m, V>(
     hostname: &str,
     get: impl Fn(&str) -> Option<&'m V>,
 ) -> Option<&'m V> {
-    let lower = hostname.to_lowercase();
-    if let Some(v) = get(&lower) {
+    wildcard_lookup_ascii_lower(&ascii_lowercase_cow(hostname), get)
+}
+
+/// Same as [`wildcard_lookup`] but skips the lowercasing step; the caller has
+/// already produced an ASCII-lowercase key.
+pub fn wildcard_lookup_ascii_lower<'m, V>(
+    lower: &str,
+    get: impl Fn(&str) -> Option<&'m V>,
+) -> Option<&'m V> {
+    if let Some(v) = get(lower) {
         return Some(v);
     }
     if let Some(dot_pos) = lower.find('.') {

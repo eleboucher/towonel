@@ -1,4 +1,4 @@
-use crate::hostname::wildcard_lookup;
+use crate::hostname::{wildcard_lookup, wildcard_lookup_ascii_lower};
 
 use std::collections::HashMap;
 
@@ -46,6 +46,15 @@ impl TlsPolicyTable {
     #[must_use]
     pub fn lookup(&self, hostname: &str) -> TlsMode {
         wildcard_lookup(hostname, |key| self.policies.get(key))
+            .copied()
+            .unwrap_or(TlsMode::Passthrough)
+    }
+
+    /// Same as [`Self::lookup`] but the caller has already ASCII-lowercased
+    /// the hostname; avoids a redundant allocation on the edge hot path.
+    #[must_use]
+    pub fn lookup_ascii_lower(&self, lower: &str) -> TlsMode {
+        wildcard_lookup_ascii_lower(lower, |key| self.policies.get(key))
             .copied()
             .unwrap_or(TlsMode::Passthrough)
     }

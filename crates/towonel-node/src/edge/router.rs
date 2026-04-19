@@ -16,6 +16,9 @@ use crate::config::TenantEntry;
 /// [`EndpointAddr`] and folding in direct socket addresses.
 pub struct Router {
     table: ArcSwap<RouteTable>,
+    /// `EndpointAddr` per known agent, precomputed once at load/replace time
+    /// so route lookups on the hot path don't rebuild them per connection.
+    addr_cache: ArcSwap<HashMap<AgentId, EndpointAddr>>,
     /// Direct socket addresses per agent, used when relay discovery is
     /// unavailable (e.g. Docker e2e tests).
     direct_addrs: HashMap<AgentId, Vec<SocketAddr>>,
@@ -76,8 +79,10 @@ impl Router {
         }
 
         let table = RouteTable::from_raw(routes);
+        let addr_cache = build_addr_cache(&table, &direct_addrs);
         Ok(Self {
             table: ArcSwap::from_pointee(table),
+            addr_cache: ArcSwap::from_pointee(addr_cache),
             direct_addrs,
         })
     }
@@ -85,34 +90,49 @@ impl Router {
     /// Called by the dynamic config sync after the hub broadcasts a new
     /// table. Readers see the swap atomically.
     pub fn replace(&self, new_table: RouteTable) {
+        let addr_cache = build_addr_cache(&new_table, &self.direct_addrs);
+        self.addr_cache.store(Arc::new(addr_cache));
         self.table.store(Arc::new(new_table));
     }
 
-    /// Missing TLS entries default to `Passthrough`.
+    /// Missing TLS entries default to `Passthrough`. Performs a single
+    /// lowercase + wildcard walk across both the route and TLS tables.
     #[must_use]
     pub fn route(&self, hostname: &str) -> Option<(Vec<EndpointAddr>, TlsMode)> {
         let table = self.table.load();
-        let agents = table.lookup(hostname)?;
+        let (agents, tls) = table.lookup_with_tls(hostname)?;
         let addrs = self.agents_to_addrs(agents)?;
-        Some((addrs, table.tls_mode(hostname)))
+        Some((addrs, tls))
     }
 
     fn agents_to_addrs(&self, agents: &HashSet<AgentId>) -> Option<Vec<EndpointAddr>> {
+        let cache = self.addr_cache.load();
         let addrs: Vec<EndpointAddr> = agents
             .iter()
-            .filter_map(|aid| {
-                let eid = EndpointId::from_bytes(aid.as_bytes()).ok()?;
-                let mut addr = EndpointAddr::new(eid);
-                if let Some(sockets) = self.direct_addrs.get(aid) {
-                    for sock in sockets {
-                        addr = addr.with_ip_addr(*sock);
-                    }
-                }
-                Some(addr)
-            })
+            .filter_map(|aid| cache.get(aid).cloned())
             .collect();
         (!addrs.is_empty()).then_some(addrs)
     }
+}
+
+fn build_addr_cache(
+    table: &RouteTable,
+    direct_addrs: &HashMap<AgentId, Vec<SocketAddr>>,
+) -> HashMap<AgentId, EndpointAddr> {
+    table
+        .unique_agents()
+        .into_iter()
+        .filter_map(|aid| {
+            let eid = EndpointId::from_bytes(aid.as_bytes()).ok()?;
+            let mut addr = EndpointAddr::new(eid);
+            if let Some(sockets) = direct_addrs.get(aid) {
+                for sock in sockets {
+                    addr = addr.with_ip_addr(*sock);
+                }
+            }
+            Some((aid.clone(), addr))
+        })
+        .collect()
 }
 
 #[cfg(test)]

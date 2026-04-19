@@ -81,7 +81,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         None => config::AgentConfig::load(std::path::Path::new(""))?,
     };
 
-    let service_map = Arc::new(tunnel::ServiceMap::from_config(&agent_config.services).await);
+    let service_map = Arc::new(tunnel::ServiceMap::from_config(&agent_config.services).await?);
     service_map.spawn_dns_refresher();
 
     let endpoint = Endpoint::builder(N0)

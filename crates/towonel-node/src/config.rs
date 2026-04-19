@@ -236,6 +236,12 @@ pub struct EdgeConfig {
     pub public_addresses: Vec<String>,
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    /// Number of TCP accept workers sharing `listen_addr` via `SO_REUSEPORT`
+    /// on Unix. Defaults to 1 (single accept loop — existing behaviour). Set
+    /// higher (e.g. `num_cpus`) to scale accept across cores under bursty
+    /// load. Ignored on non-Unix platforms.
+    #[serde(default = "default_listen_workers")]
+    pub listen_workers: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,6 +315,10 @@ fn default_health_listen() -> String {
     "0.0.0.0:9090".to_string()
 }
 
+const fn default_listen_workers() -> usize {
+    1
+}
+
 fn default_operator_key_path() -> PathBuf {
     PathBuf::from("operator.key")
 }
@@ -337,6 +347,7 @@ impl Default for EdgeConfig {
             hub_urls: Vec::new(),
             public_addresses: Vec::new(),
             tls: None,
+            listen_workers: default_listen_workers(),
         }
     }
 }
