@@ -71,7 +71,7 @@ impl TestHub {
                 sync_invite_redeem,
             },
             dns_webhook_url: None,
-            prev_hostnames: tokio::sync::RwLock::new(std::collections::HashSet::new()),
+            prev_hostnames: arc_swap::ArcSwap::from_pointee(std::collections::HashSet::new()),
             metrics: super::metrics::HubMetrics::new(),
             peer_statuses: super::peer_status::new_peer_status_map(&[]),
             tasks: tokio_util::task::TaskTracker::new(),

@@ -194,7 +194,11 @@ impl Hub {
         match db.get_all_entries().await {
             Ok(entries) => {
                 let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&live));
-                let _ = self.p.route_tx.send(table);
+                // No edges have subscribed yet at startup; the broadcast
+                // just primes the channel buffer.
+                if self.p.route_tx.send(table).is_err() {
+                    tracing::debug!("startup route broadcast: no subscribers yet");
+                }
             }
             Err(e) => tracing::warn!(error = %e, "initial route broadcast skipped"),
         }
@@ -228,7 +232,7 @@ impl Hub {
                 sync_invite_redeem: self.p.sync_invite_redeem,
             },
             dns_webhook_url: self.p.dns_webhook_url.clone(),
-            prev_hostnames: RwLock::new(std::collections::HashSet::new()),
+            prev_hostnames: arc_swap::ArcSwap::from_pointee(std::collections::HashSet::new()),
             metrics,
             peer_statuses,
             tasks: tokio_util::task::TaskTracker::new(),

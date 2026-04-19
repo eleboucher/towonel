@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use iroh::{EndpointAddr, EndpointId};
+use smallvec::SmallVec;
 use tracing::warn;
 
 use towonel_common::identity::AgentId;
@@ -11,6 +12,9 @@ use towonel_common::routing::RouteTable;
 use towonel_common::tls_policy::TlsMode;
 
 use crate::config::TenantEntry;
+
+/// Inline candidate list; 4 slots cover HA tenants without allocating.
+pub type Candidates = SmallVec<[EndpointAddr; 4]>;
 
 /// Thin adapter around [`RouteTable`] converting [`AgentId`] to
 /// [`EndpointAddr`] and folding in direct socket addresses.
@@ -98,16 +102,16 @@ impl Router {
     /// Missing TLS entries default to `Passthrough`. Performs a single
     /// lowercase + wildcard walk across both the route and TLS tables.
     #[must_use]
-    pub fn route(&self, hostname: &str) -> Option<(Vec<EndpointAddr>, TlsMode)> {
+    pub fn route(&self, hostname: &str) -> Option<(Candidates, TlsMode)> {
         let table = self.table.load();
         let (agents, tls) = table.lookup_with_tls(hostname)?;
         let addrs = self.agents_to_addrs(agents)?;
         Some((addrs, tls))
     }
 
-    fn agents_to_addrs(&self, agents: &HashSet<AgentId>) -> Option<Vec<EndpointAddr>> {
+    fn agents_to_addrs(&self, agents: &HashSet<AgentId>) -> Option<Candidates> {
         let cache = self.addr_cache.load();
-        let addrs: Vec<EndpointAddr> = agents
+        let addrs: Candidates = agents
             .iter()
             .filter_map(|aid| cache.get(aid).cloned())
             .collect();

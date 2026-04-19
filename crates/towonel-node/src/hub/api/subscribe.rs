@@ -132,8 +132,7 @@ struct DnsRecord<'a> {
 }
 
 pub(super) async fn get_dns_records(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let hostnames: Vec<String> = state.prev_hostnames.read().await.iter().cloned().collect();
-
+    let hostnames = state.prev_hostnames.load();
     let records: Vec<DnsRecord<'_>> = hostnames
         .iter()
         .map(|h| DnsRecord {
