@@ -67,12 +67,20 @@ jobs:
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.OWNER_PACKAGE_SECRET }}
 
+      - name: Login to registry.erwanleboucher.dev
+        uses: https://data.forgejo.org/docker/login-action@v4
+        with:
+          registry: registry.erwanleboucher.dev
+          username: ${{ vars.USERNAME }}
+          password: ${{ secrets.APOCI_REGISTRY_TOKEN }}
+
       - name: Compute node image metadata
         id: meta-node
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
             git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
+            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -88,6 +96,11 @@ jobs:
           labels: ${{ steps.meta-node.outputs.labels }}
           cache-from: type=gha,scope=towonel-node
           cache-to: type=gha,scope=towonel-node,mode=max
+          build-args: |
+            ENABLE_SCCACHE=1
+          secrets: |
+            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
 
       - name: Compute agent image metadata
         id: meta-agent
@@ -95,6 +108,7 @@ jobs:
         with:
           images: |
             git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
+            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -110,3 +124,8 @@ jobs:
           labels: ${{ steps.meta-agent.outputs.labels }}
           cache-from: type=gha,scope=towonel-agent
           cache-to: type=gha,scope=towonel-agent,mode=max
+          build-args: |
+            ENABLE_SCCACHE=1
+          secrets: |
+            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
