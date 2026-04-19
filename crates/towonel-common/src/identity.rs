@@ -506,8 +506,6 @@ pub fn load_tenant_keypair(path: &Path) -> anyhow::Result<TenantKeypair> {
 mod tests {
     use super::*;
 
-    // --- TenantKeypair / TenantId / PqPublicKey ---
-
     #[test]
     fn tenant_keypair_deterministic_from_seed() {
         let seed = [42u8; PQ_SEED_LEN];
@@ -563,8 +561,6 @@ mod tests {
         assert_eq!(id, parsed);
     }
 
-    // --- PqPublicKey encoding ---
-
     #[test]
     fn pq_pubkey_base64url_roundtrip() {
         let kp = TenantKeypair::from_seed([3u8; PQ_SEED_LEN]);
@@ -616,8 +612,6 @@ mod tests {
         );
     }
 
-    // --- Sign / verify ---
-
     #[test]
     fn sign_verify_round_trip() {
         let kp = TenantKeypair::from_seed([11u8; PQ_SEED_LEN]);
@@ -665,8 +659,6 @@ mod tests {
         assert_eq!(&a[..], &b[..]);
     }
 
-    // --- Key file helpers ---
-
     #[test]
     fn load_or_generate_tenant_keypair_creates_file() {
         let dir = std::env::temp_dir().join(format!("towonel-test-tkp-{}", std::process::id()));
@@ -701,8 +693,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // --- Agent identity (unchanged) ---
-
     #[test]
     fn agent_keypair_hex_roundtrip() {
         let kp = AgentKeypair::generate();
@@ -710,8 +700,6 @@ mod tests {
         let parsed: AgentId = id.to_string().parse().unwrap();
         assert_eq!(id, parsed);
     }
-
-    // --- Secret key helpers ---
 
     #[test]
     fn load_or_generate_secret_key_roundtrips() {
