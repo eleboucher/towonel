@@ -138,6 +138,12 @@ pub struct HubConfig {
     pub database: DatabaseConfig,
     #[serde(default = "default_hub_listen")]
     pub listen_addr: String,
+    /// Bind address for the hub's private health + Prometheus `/metrics`
+    /// listener. Kept off the public API port so `/metrics` never leaves the
+    /// internal network and the `requests_total` counter isn't polluted by
+    /// scrape traffic.
+    #[serde(default = "default_hub_health_listen")]
+    pub health_listen_addr: String,
     /// Path to a file containing the operator API key. If missing, a fresh
     /// random key is generated on first boot. The key protects the invite
     /// management endpoints (create, list, revoke). Never commit this file.
@@ -315,6 +321,10 @@ fn default_health_listen() -> String {
     "0.0.0.0:9090".to_string()
 }
 
+fn default_hub_health_listen() -> String {
+    "0.0.0.0:9091".to_string()
+}
+
 const fn default_listen_workers() -> usize {
     1
 }
@@ -329,6 +339,7 @@ impl Default for HubConfig {
             enabled: true,
             database: DatabaseConfig::default(),
             listen_addr: default_hub_listen(),
+            health_listen_addr: default_hub_health_listen(),
             operator_api_key_path: default_operator_key_path(),
             public_url: None,
             peers: Vec::new(),
