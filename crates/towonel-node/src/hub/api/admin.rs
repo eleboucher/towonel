@@ -140,14 +140,63 @@ pub(super) async fn resync(
     }
 }
 
+/// Reject SSRF-prone URLs: require https scheme and refuse IP-literal hosts
+/// that point at loopback, link-local, private, or unspecified ranges. Does
+/// not guard against DNS names resolving to private IPs — operators should
+/// point resync at public peers only. `allow_loopback` is enabled only by
+/// integration-test scaffolding.
+fn validate_resync_url(raw: &str, allow_loopback: bool) -> Result<(), ResyncError> {
+    let parsed = url::Url::parse(raw).map_err(|e| bad(format!("peer_url is not a URL: {e}")))?;
+    let scheme = parsed.scheme();
+    if scheme != "https" && !(allow_loopback && scheme == "http") {
+        return Err(bad("peer_url must use https://"));
+    }
+    let Some(host) = parsed.host() else {
+        return Err(bad("peer_url is missing a host"));
+    };
+    match host {
+        url::Host::Ipv4(ip) => {
+            if allow_loopback && ip.is_loopback() {
+                return Ok(());
+            }
+            if ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+            {
+                return Err(bad("peer_url host is in a non-routable IPv4 range"));
+            }
+        }
+        url::Host::Ipv6(ip) => {
+            if allow_loopback && ip.is_loopback() {
+                return Ok(());
+            }
+            if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+                return Err(bad("peer_url host is in a non-routable IPv6 range"));
+            }
+            let seg = ip.segments()[0];
+            if (seg & 0xfe00) == 0xfc00 || (seg & 0xffc0) == 0xfe80 {
+                return Err(bad("peer_url host is in a non-routable IPv6 range"));
+            }
+        }
+        url::Host::Domain(name) => {
+            let lower = name.to_ascii_lowercase();
+            if !allow_loopback && (lower == "localhost" || lower.ends_with(".localhost")) {
+                return Err(bad("peer_url host resolves to loopback"));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn do_resync(
     state: &Arc<AppState>,
     req: &ResyncRequest,
 ) -> Result<ResyncResponse, ResyncError> {
-    if !req.peer_url.starts_with("http://") && !req.peer_url.starts_with("https://") {
-        return Err(bad("peer_url must start with http:// or https://"));
-    }
+    validate_resync_url(&req.peer_url, state.allow_loopback_peers)?;
 
     let url = format!(
         "{}/v1/admin/federation/snapshot",

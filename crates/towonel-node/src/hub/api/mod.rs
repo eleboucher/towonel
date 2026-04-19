@@ -83,7 +83,14 @@ pub struct AppState {
     /// Tracker for fire-and-forget background tasks (DNS webhook, etc.).
     pub tasks: TaskTracker,
     /// Operator secret used to keyed-hash invite secrets before persistence.
-    pub invite_hash_key: InviteHashKey,
+    pub invite_hash_key: Arc<InviteHashKey>,
+    /// Replay cache for heartbeat (`node_id`, `ts_ms`) pairs. Stops an
+    /// attacker with a captured heartbeat from keeping a revoked agent
+    /// looking live within the ±60s clock-skew window.
+    pub heartbeat_nonces: super::federation::NonceCache,
+    /// Accept `http://` and loopback hosts in `/v1/admin/resync`. Only set
+    /// by the integration-test scaffolding; production leaves this `false`.
+    pub allow_loopback_peers: bool,
 }
 
 /// Federation-related runtime state.
@@ -116,9 +123,9 @@ pub struct OutboundFederation {
 /// their heartbeat lapses.
 pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Result<()> {
     let policy_snapshot = state.policy.read().await.clone();
-    let entries = state.db.get_all_entries().await?;
     let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
-    let live = state.db.live_agents(cutoff).await?;
+    let (entries, live) =
+        tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
     let table = RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live));
     broadcast_routes(state, table).await;
     Ok(())
@@ -285,6 +292,7 @@ fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<A
     let limiter = governor_conf.limiter().clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_mins(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await; // skip the immediate first tick
         loop {
             interval.tick().await;
@@ -303,15 +311,17 @@ async fn record_request_metric(
     req: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let endpoint = req
+    let matched = req
         .extensions()
         .get::<axum::extract::MatchedPath>()
-        .map_or("unmatched", axum::extract::MatchedPath::as_str)
-        .to_string();
+        .cloned();
     let resp = next.run(req).await;
+    let endpoint = matched
+        .as_ref()
+        .map_or("unmatched", axum::extract::MatchedPath::as_str);
     state
         .metrics
-        .record_request(&endpoint, resp.status().as_u16());
+        .record_request(endpoint, resp.status().as_u16());
     resp
 }
 
