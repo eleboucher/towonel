@@ -409,6 +409,8 @@ pub fn token_from_env() -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::large_futures)]
+
     use super::*;
 
     #[test]
@@ -435,7 +437,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::large_futures)]
     async fn bootstrap_fails_clearly_when_hub_unreachable() {
         // Point at a loopback port we never bind; the reqwest connect error
         // must surface as a non-panicking anyhow::Error with a URL-bearing
@@ -452,7 +453,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::large_futures)]
     async fn invalid_token_fails_bootstrap_at_parse_time() {
         let Err(err) = bootstrap("not-a-real-token").await else {
             panic!("garbage token must not reach the hub");

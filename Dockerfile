@@ -1,10 +1,15 @@
 # syntax=docker/dockerfile:1.23
+ARG ENABLE_SCCACHE=0
 
 FROM rust:1.95-bookworm AS chef
 ARG CARGO_CHEF_VERSION=0.1.77
-RUN curl -fsSL "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/cargo-chef-v${CARGO_CHEF_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-    | tar -xzO "cargo-chef-v${CARGO_CHEF_VERSION}-x86_64-unknown-linux-musl/cargo-chef" > /usr/local/bin/cargo-chef \
-    && chmod +x /usr/local/bin/cargo-chef
+ARG SCCACHE_VERSION=0.10.0
+RUN curl -fsSL "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/cargo-chef-x86_64-unknown-linux-musl.tar.xz" \
+    | tar -xJO "cargo-chef-x86_64-unknown-linux-musl/cargo-chef" > /usr/local/bin/cargo-chef \
+    && chmod +x /usr/local/bin/cargo-chef \
+    && curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+    | tar -xzO "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" > /usr/local/bin/sccache \
+    && chmod +x /usr/local/bin/sccache
 WORKDIR /app
 
 FROM chef AS planner
@@ -14,15 +19,40 @@ COPY src/ src/
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
+ARG ENABLE_SCCACHE
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/root/.cache/sccache \
+    --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
+    --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
+    if [ "$ENABLE_SCCACHE" = "1" ]; then \
+        export RUSTC_WRAPPER=sccache \
+               SCCACHE_BUCKET=sccache \
+               SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
+               SCCACHE_REGION=us-east-1 \
+               SCCACHE_S3_USE_SSL=true \
+               AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
+               AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
+    fi && \
     cargo chef cook --release --workspace --recipe-path recipe.json
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY src/ src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/root/.cache/sccache \
+    --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
+    --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
+    if [ "$ENABLE_SCCACHE" = "1" ]; then \
+        export RUSTC_WRAPPER=sccache \
+               SCCACHE_BUCKET=sccache \
+               SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
+               SCCACHE_REGION=us-east-1 \
+               SCCACHE_S3_USE_SSL=true \
+               AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
+               AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
+    fi && \
     cargo build --release -p towonel-agent -p towonel-node -p towonel-cli \
     && mkdir -p /out \
     && cp target/release/towonel-agent target/release/towonel-node target/release/towonel-cli /out/

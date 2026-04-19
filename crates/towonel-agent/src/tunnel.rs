@@ -273,8 +273,6 @@ async fn handle_stream(
     metrics.streams_accepted.inc();
     let _active = ActiveStreamGuard::new(metrics);
 
-    // Bound the pre-forward handshake so a misbehaving or silent edge can't
-    // pin a spawned task open forever.
     let handshake = async {
         let hostname = read_hostname_header(&mut quic_recv)
             .await
