@@ -15,6 +15,7 @@ use towonel_common::hostname::wildcard_lookup;
 use towonel_common::tunnel::{ClientAddrs, read_client_addrs, read_hostname_header};
 
 use crate::config::{ProxyProtocol, ServiceConfig};
+use crate::metrics::{self, ActiveStreamGuard, AgentMetrics};
 
 mod proxy_protocol;
 
@@ -186,6 +187,7 @@ pub async fn run(
     service_map: Arc<ServiceMap>,
     trusted_edges: HashSet<EndpointId>,
     allow_any_edge: bool,
+    metrics: Arc<AgentMetrics>,
 ) -> anyhow::Result<()> {
     if allow_any_edge {
         warn!(
@@ -219,15 +221,18 @@ pub async fn run(
                 remote = %remote_id.fmt_short(),
                 "rejected connection from untrusted edge"
             );
+            metrics.edge_connections_rejected.inc();
             conn.close(403u32.into(), b"not authorized");
             continue;
         }
 
         info!(%remote_id, "accepted connection from edge");
+        metrics.edge_connections_accepted.inc();
 
         let map = Arc::clone(&service_map);
+        let m = Arc::clone(&metrics);
         tokio::spawn(async move {
-            handle_connection(conn, remote_id, map).await;
+            handle_connection(conn, remote_id, map, m).await;
         });
     }
 }
@@ -236,6 +241,7 @@ async fn handle_connection(
     conn: iroh::endpoint::Connection,
     remote_id: iroh::EndpointId,
     service_map: Arc<ServiceMap>,
+    metrics: Arc<AgentMetrics>,
 ) {
     loop {
         let (send, recv) = match conn.accept_bi().await {
@@ -247,8 +253,9 @@ async fn handle_connection(
         };
 
         let map = Arc::clone(&service_map);
+        let m = Arc::clone(&metrics);
         tokio::spawn(async move {
-            if let Err(e) = handle_stream(send, recv, &map, remote_id).await {
+            if let Err(e) = handle_stream(send, recv, &map, remote_id, &m).await {
                 warn!("stream error: {e}");
             }
         });
@@ -260,8 +267,11 @@ async fn handle_stream(
     mut quic_recv: iroh::endpoint::RecvStream,
     service_map: &ServiceMap,
     edge_id: iroh::EndpointId,
+    metrics: &AgentMetrics,
 ) -> anyhow::Result<()> {
     let start = Instant::now();
+    metrics.streams_accepted.inc();
+    let _active = ActiveStreamGuard::new(metrics);
 
     // Bound the pre-forward handshake so a misbehaving or silent edge can't
     // pin a spawned task open forever.
@@ -274,13 +284,25 @@ async fn handle_stream(
             .context("failed to read client-addrs header")?;
         Ok::<_, anyhow::Error>((hostname, client_addrs))
     };
-    let (hostname, client_addrs) = tokio::time::timeout(STREAM_HANDSHAKE_TIMEOUT, handshake)
-        .await
-        .context("stream handshake timed out")??;
+    let (hostname, client_addrs) =
+        match tokio::time::timeout(STREAM_HANDSHAKE_TIMEOUT, handshake).await {
+            Err(_) => {
+                metrics.record_stream_error(metrics::stream_error::HANDSHAKE_TIMEOUT);
+                return Err(anyhow::anyhow!("stream handshake timed out"));
+            }
+            Ok(Err(e)) => {
+                metrics.record_stream_error(metrics::stream_error::HANDSHAKE_ERROR);
+                return Err(e);
+            }
+            Ok(Ok(v)) => v,
+        };
 
-    let target = service_map
-        .lookup(&hostname)
-        .ok_or_else(|| anyhow::anyhow!("no service configured for hostname {hostname}"))?;
+    let Some(target) = service_map.lookup(&hostname) else {
+        metrics.record_stream_error(metrics::stream_error::NO_SERVICE);
+        return Err(anyhow::anyhow!(
+            "no service configured for hostname {hostname}"
+        ));
+    };
 
     let span = info_span!("stream",
         %hostname,
@@ -292,12 +314,18 @@ async fn handle_stream(
     async {
         debug!("forwarding to origin");
 
-        let tcp_stream = target.connect().await?;
+        let tcp_stream = match target.connect().await {
+            Ok(s) => s,
+            Err(e) => {
+                metrics.record_stream_error(metrics::stream_error::ORIGIN_CONNECT);
+                return Err(e);
+            }
+        };
         if let Err(e) = tcp_stream.set_nodelay(true) {
             warn!(origin = %target.address, error = %e, "failed to set TCP_NODELAY on origin socket");
         }
 
-        match &target.server_name {
+        let forward_res = match &target.server_name {
             Some(sni) => {
                 forward_tls(
                     tcp_stream,
@@ -307,6 +335,7 @@ async fn handle_stream(
                     client_addrs,
                     &mut quic_recv,
                     &mut quic_send,
+                    metrics,
                 )
                 .await
             }
@@ -317,11 +346,18 @@ async fn handle_stream(
                     client_addrs,
                     &mut quic_recv,
                     &mut quic_send,
+                    metrics,
                 )
                 .await
             }
-        }?;
+        };
 
+        if let Err(e) = forward_res {
+            metrics.record_stream_error(metrics::stream_error::FORWARD_ERROR);
+            return Err(e);
+        }
+
+        metrics.streams_completed.inc();
         // truncation is intentional: streams won't last 584 million years
         #[allow(clippy::cast_possible_truncation)]
         let duration_ms = start.elapsed().as_millis() as u64;
@@ -338,6 +374,7 @@ async fn forward_plain(
     addrs: ClientAddrs,
     quic_recv: &mut iroh::endpoint::RecvStream,
     quic_send: &mut iroh::endpoint::SendStream,
+    metrics: &AgentMetrics,
 ) -> anyhow::Result<()> {
     let (origin_read, mut origin_write) = origin.into_split();
     let mut origin_read = io::BufReader::with_capacity(COPY_BUF_SIZE, origin_read);
@@ -356,15 +393,18 @@ async fn forward_plain(
     };
 
     let (r1, r2) = tokio::join!(q2o, o2q);
-    if let Err(e) = &r1 {
-        warn!("edge->origin: {e}");
+    match &r1 {
+        Ok(n) => metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, *n),
+        Err(e) => warn!("edge->origin: {e}"),
     }
-    if let Err(e) = &r2 {
-        warn!("origin->edge: {e}");
+    match &r2 {
+        Ok(n) => metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, *n),
+        Err(e) => warn!("origin->edge: {e}"),
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn forward_tls(
     mut origin: TcpStream,
     server_name: ServerName<'static>,
@@ -373,6 +413,7 @@ async fn forward_tls(
     addrs: ClientAddrs,
     quic_recv: &mut iroh::endpoint::RecvStream,
     quic_send: &mut iroh::endpoint::SendStream,
+    metrics: &AgentMetrics,
 ) -> anyhow::Result<()> {
     // PROXY v2 must precede the TLS ClientHello so the origin's TLS layer
     // sees a normal handshake after consuming the header.
@@ -400,11 +441,13 @@ async fn forward_tls(
     };
 
     let (r1, r2) = tokio::join!(q2o, o2q);
-    if let Err(e) = &r1 {
-        warn!("edge->origin(tls): {e}");
+    match &r1 {
+        Ok(n) => metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, *n),
+        Err(e) => warn!("edge->origin(tls): {e}"),
     }
-    if let Err(e) = &r2 {
-        warn!("origin(tls)->edge: {e}");
+    match &r2 {
+        Ok(n) => metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, *n),
+        Err(e) => warn!("origin(tls)->edge: {e}"),
     }
     Ok(())
 }
