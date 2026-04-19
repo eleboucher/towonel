@@ -14,13 +14,6 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
-  RUSTC_WRAPPER: sccache
-  SCCACHE_BUCKET: sccache
-  SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
-  SCCACHE_REGION: us-east-1
-  SCCACHE_S3_USE_SSL: "true"
-  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
-  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
 
 jobs:
   fmt:
@@ -28,42 +21,42 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
-          components: rustfmt
       - run: cargo fmt --all -- --check
 
   clippy:
     runs-on: docker
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BUCKET: sccache
+      SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_USE_SSL: "true"
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
-          components: clippy
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: sccache
-      # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
-      - uses: https://github.com/Swatinem/rust-cache@469cb0e24707e1f169c4501c23d77da83a83fce8
-        with:
-          shared-key: clippy
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     runs-on: docker
+    env:
+      RUSTC_WRAPPER: sccache
+      SCCACHE_BUCKET: sccache
+      SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
+      SCCACHE_REGION: us-east-1
+      SCCACHE_S3_USE_SSL: "true"
+      AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-nextest,sccache
-      # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
-      - uses: https://github.com/Swatinem/rust-cache@469cb0e24707e1f169c4501c23d77da83a83fce8
-        with:
-          shared-key: test
       - run: cargo nextest run --workspace --all-features --no-fail-fast
 
   deny:
@@ -71,8 +64,6 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.95.0"
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-deny
