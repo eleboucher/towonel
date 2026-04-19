@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
+use backon::{BackoffBuilder, ExponentialBuilder, Retryable};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use iroh::EndpointId;
@@ -36,7 +37,17 @@ pub const TRUSTED_EDGES_ENV: &str = "TOWONEL_AGENT_TRUSTED_EDGES";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Register retries to tolerate sequence conflicts from sibling replicas.
-const REGISTER_MAX_ATTEMPTS: u32 = 10;
+const REGISTER_MAX_ATTEMPTS: usize = 10;
+
+/// Backoff policy for sequence-conflict retries. Jittered so N replicas
+/// booting simultaneously don't re-collide on every retry.
+fn retry_policy() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(Duration::from_millis(50))
+        .with_max_delay(Duration::from_secs(2))
+        .with_max_times(REGISTER_MAX_ATTEMPTS - 1)
+        .with_jitter()
+}
 
 /// Boot-time context derived from the invite token + hub bootstrap response.
 /// Shared across the register + heartbeat paths and dropped when the agent
@@ -91,15 +102,10 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
     }
 
     let mut trusted_edges = parse_trusted_edges_env();
-    if let Some(edge) = resp.edge_node_id.as_deref()
+    if let Some(edge) = resp.edge_node_id
         && trusted_edges.is_empty()
     {
-        match edge.parse::<EndpointId>() {
-            Ok(e) => {
-                trusted_edges.insert(e);
-            }
-            Err(e) => warn!(%edge, error = %e, "bootstrap: ignoring invalid edge_node_id"),
-        }
+        trusted_edges.insert(edge);
     }
 
     info!(
@@ -127,36 +133,28 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
 /// racing at startup all eventually succeed.
 pub async fn register(ctx: &BootstrapContext) -> anyhow::Result<()> {
     let agent_id = ctx.agent_id();
-    let mut attempt: u32 = 0;
-    loop {
-        attempt += 1;
+    (|| async {
         let latest = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await?;
+        let sequence = latest + 1;
         let payload = ConfigPayload {
             version: 1,
             tenant_id: ctx.tenant_id,
-            sequence: latest + 1,
+            sequence,
             timestamp: towonel_common::time::now_ms(),
             op: ConfigOp::UpsertAgent {
                 agent_id: agent_id.clone(),
             },
         };
-        match submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await {
-            Ok(()) => {
-                info!(%agent_id, sequence = latest + 1, attempt, "registered agent");
-                return Ok(());
-            }
-            Err(e) if is_sequence_conflict(&e) && attempt < REGISTER_MAX_ATTEMPTS => {
-                let backoff = backoff_ms(attempt);
-                warn!(
-                    attempt,
-                    backoff_ms = backoff,
-                    "sequence conflict on UpsertAgent, retrying"
-                );
-                tokio::time::sleep(Duration::from_millis(backoff)).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
+        submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await?;
+        info!(%agent_id, sequence, "registered agent");
+        Ok(())
+    })
+    .retry(retry_policy())
+    .when(is_sequence_conflict)
+    .notify(|e, dur| {
+        warn!(error = %e, backoff_ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX), "sequence conflict on UpsertAgent, retrying");
+    })
+    .await
 }
 
 /// Submit `UpsertHostname` entries for each hostname from the bootstrap
@@ -182,15 +180,21 @@ pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Fetch once, then increment locally. On a sequence conflict we re-fetch
+    // and retry; the happy path stays O(N) instead of O(N²) round-trips.
+    // The per-hostname retry state (mutable `next_seq` and re-fetch on
+    // conflict) doesn't fit backon's FnMut closure model cleanly, so we
+    // keep the loop manual here.
+    let mut next_seq = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+    let policy = retry_policy();
+
     for hostname in missing {
-        let mut attempt: u32 = 0;
+        let mut backoff_iter = policy.build();
         loop {
-            attempt += 1;
-            let latest = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await?;
             let payload = ConfigPayload {
                 version: 1,
                 tenant_id: ctx.tenant_id,
-                sequence: latest + 1,
+                sequence: next_seq,
                 timestamp: towonel_common::time::now_ms(),
                 op: ConfigOp::UpsertHostname {
                     hostname: hostname.clone(),
@@ -198,13 +202,20 @@ pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
             };
             match submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await {
                 Ok(()) => {
-                    info!(%hostname, sequence = latest + 1, "published hostname");
+                    info!(%hostname, sequence = next_seq, "published hostname");
+                    next_seq += 1;
                     break;
                 }
-                Err(e) if is_sequence_conflict(&e) && attempt < REGISTER_MAX_ATTEMPTS => {
-                    let backoff = backoff_ms(attempt);
-                    warn!(attempt, backoff_ms = backoff, %hostname, "sequence conflict on UpsertHostname, retrying");
-                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                Err(e) if is_sequence_conflict(&e) => {
+                    let Some(delay) = backoff_iter.next() else {
+                        return Err(e);
+                    };
+                    #[allow(clippy::cast_possible_truncation)]
+                    let backoff_ms = delay.as_millis() as u64;
+                    warn!(backoff_ms, %hostname, "sequence conflict on UpsertHostname, retrying");
+                    tokio::time::sleep(delay).await;
+                    next_seq =
+                        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
                 }
                 Err(e) => return Err(e),
             }
@@ -314,7 +325,7 @@ struct BootstrapResponse {
     tenant_id: String,
     #[serde(default)]
     hostnames: Vec<String>,
-    edge_node_id: Option<String>,
+    edge_node_id: Option<EndpointId>,
 }
 
 async fn post_bootstrap(
@@ -365,21 +376,6 @@ fn parse_trusted_edges_env() -> HashSet<EndpointId> {
     }
 }
 
-/// Capped exponential backoff with random jitter. Attempt 1 → ~50ms,
-/// attempt 2 → ~100ms, 4 → ~400ms, clamped at ~2s. The jitter (0..=49 ms)
-/// is drawn from the OS RNG so N replicas booting at the same instant
-/// don't resynchronise their retries after the first conflict.
-fn backoff_ms(attempt: u32) -> u64 {
-    let base = 50u64.saturating_mul(1u64 << attempt.min(6));
-    let capped = base.min(2_000);
-    let mut byte = [0u8; 1];
-    // OS RNG can't meaningfully fail here; on the impossible error we still
-    // want to make progress, so fall back to zero jitter.
-    let _ = getrandom::fill(&mut byte);
-    let jitter = u64::from(byte[0] % 50);
-    capped.saturating_add(jitter)
-}
-
 /// Read [`INVITE_TOKEN_ENV`] or return a helpful error.
 pub fn token_from_env() -> anyhow::Result<String> {
     std::env::var(INVITE_TOKEN_ENV)
@@ -391,12 +387,6 @@ mod tests {
     #![allow(clippy::large_futures)]
 
     use super::*;
-
-    #[test]
-    fn backoff_grows_and_caps() {
-        assert!(backoff_ms(1) >= 50);
-        assert!(backoff_ms(10) <= 2_050);
-    }
 
     #[tokio::test]
     async fn bootstrap_fails_clearly_when_hub_unreachable() {
