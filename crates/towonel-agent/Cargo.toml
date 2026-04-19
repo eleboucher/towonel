@@ -28,11 +28,8 @@ rustls = { workspace = true }
 webpki-roots = { workspace = true }
 ppp = { workspace = true }
 arc-swap = { workspace = true }
-ed25519-dalek = { workspace = true }
-hex = { workspace = true }
-sha2 = { workspace = true }
+backon = { workspace = true }
 thiserror = { workspace = true }
-getrandom = { workspace = true }
 prometheus-client = { workspace = true }
 
 [lints]
