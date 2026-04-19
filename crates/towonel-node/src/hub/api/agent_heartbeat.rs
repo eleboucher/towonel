@@ -52,15 +52,25 @@ pub(super) async fn post_heartbeat(
     // Body-bound signature: verifier hashes the exact bytes we then decode.
     // This prevents an attacker with a captured header from substituting a
     // different tenant_id within the clock-skew window.
-    let node_id_bytes = match verify_signature_header(
+    let (node_id_bytes, ts_ms) = match verify_signature_header(
         &headers,
         HEARTBEAT_AUTH_DOMAIN,
         HEARTBEAT_MAX_CLOCK_SKEW_MS,
         body.as_ref(),
     ) {
-        Ok((id, _)) => id,
+        Ok(v) => v,
         Err(msg) => return unauthorized(msg),
     };
+
+    let fresh = state
+        .heartbeat_nonces
+        .entry((node_id_bytes, ts_ms))
+        .or_insert_with(async {})
+        .await
+        .is_fresh();
+    if !fresh {
+        return unauthorized("replayed heartbeat signature");
+    }
 
     let req: HeartbeatBody = match ciborium::from_reader(body.as_ref()) {
         Ok(b) => b,
