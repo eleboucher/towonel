@@ -254,6 +254,7 @@ async fn fetch_existing_hostnames(ctx: &BootstrapContext) -> anyhow::Result<Hash
 pub fn spawn_heartbeat(ctx: Arc<BootstrapContext>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await; // first tick is immediate -- send one right away
         loop {
             if let Err(e) = send_heartbeat(&ctx).await {

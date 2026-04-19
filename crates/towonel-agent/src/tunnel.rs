@@ -21,6 +21,10 @@ mod proxy_protocol;
 const DNS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const COPY_BUF_SIZE: usize = 64 * 1024;
 
+/// Cap on how long we wait for an edge to send the (hostname, client-addrs)
+/// handshake bytes. Bounded to stop silent/malicious edges pinning tasks open.
+const STREAM_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 async fn write_proxy_header(
     stream: &mut (impl AsyncWrite + Unpin),
     mode: ProxyProtocol,
@@ -259,13 +263,20 @@ async fn handle_stream(
 ) -> anyhow::Result<()> {
     let start = Instant::now();
 
-    let hostname = read_hostname_header(&mut quic_recv)
+    // Bound the pre-forward handshake so a misbehaving or silent edge can't
+    // pin a spawned task open forever.
+    let handshake = async {
+        let hostname = read_hostname_header(&mut quic_recv)
+            .await
+            .context("failed to read hostname header")?;
+        let client_addrs = read_client_addrs(&mut quic_recv)
+            .await
+            .context("failed to read client-addrs header")?;
+        Ok::<_, anyhow::Error>((hostname, client_addrs))
+    };
+    let (hostname, client_addrs) = tokio::time::timeout(STREAM_HANDSHAKE_TIMEOUT, handshake)
         .await
-        .context("failed to read hostname header")?;
-
-    let client_addrs = read_client_addrs(&mut quic_recv)
-        .await
-        .context("failed to read client-addrs header")?;
+        .context("stream handshake timed out")??;
 
     let target = service_map
         .lookup(&hostname)
@@ -415,7 +426,7 @@ where
 {
     let mut total = 0u64;
     loop {
-        match recv.read_chunk(usize::MAX).await {
+        match recv.read_chunk(COPY_BUF_SIZE).await {
             Ok(Some(chunk)) => {
                 total = total.saturating_add(chunk.bytes.len() as u64);
                 if prefix.is_empty() {
