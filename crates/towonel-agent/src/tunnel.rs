@@ -26,12 +26,19 @@ async fn write_proxy_header(
     mode: ProxyProtocol,
     addrs: ClientAddrs,
 ) -> anyhow::Result<()> {
-    if mode != ProxyProtocol::V2 {
-        return Ok(());
+    let bytes = encode_proxy_header(mode, addrs)?;
+    if !bytes.is_empty() {
+        stream.write_all(&bytes).await?;
     }
-    let bytes = proxy_protocol::encode_v2(addrs)?;
-    stream.write_all(&bytes).await?;
     Ok(())
+}
+
+fn encode_proxy_header(mode: ProxyProtocol, addrs: ClientAddrs) -> anyhow::Result<Vec<u8>> {
+    if mode == ProxyProtocol::V2 {
+        proxy_protocol::encode_v2(addrs)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 struct OriginTarget {
@@ -324,10 +331,10 @@ async fn forward_plain(
     let (origin_read, mut origin_write) = origin.into_split();
     let mut origin_read = io::BufReader::with_capacity(COPY_BUF_SIZE, origin_read);
 
-    write_proxy_header(&mut origin_write, proxy, addrs).await?;
+    let proxy_prefix = encode_proxy_header(proxy, addrs)?;
 
     let q2o = async {
-        let res = forward_quic_to_writer(quic_recv, &mut origin_write).await;
+        let res = forward_quic_to_writer(proxy_prefix, quic_recv, &mut origin_write).await;
         let _ = origin_write.shutdown().await;
         res
     };
@@ -371,7 +378,7 @@ async fn forward_tls(
     let mut tls_read = io::BufReader::with_capacity(COPY_BUF_SIZE, tls_read);
 
     let q2o = async {
-        let res = forward_quic_to_writer(quic_recv, &mut tls_write).await;
+        let res = forward_quic_to_writer(Vec::new(), quic_recv, &mut tls_write).await;
         let _ = tls_write.shutdown().await;
         res
     };
@@ -391,9 +398,15 @@ async fn forward_tls(
     Ok(())
 }
 
-/// Zero-copy forward from a QUIC `RecvStream` to any `AsyncWrite`. Uses
-/// `read_chunk` to avoid the intermediate `BufReader` memcpy.
+/// Zero-copy forward from a QUIC `RecvStream` to any `AsyncWrite` via
+/// `read_chunk` (avoids an intermediate `BufReader` memcpy).
+///
+/// An optional `prefix` (e.g. a PROXY v2 header) is coalesced with the first
+/// QUIC chunk into a single `write_all`, so with `TCP_NODELAY` set the origin
+/// sees one segment instead of two back-to-back tiny ones. Pass `Vec::new()`
+/// when no prefix is needed.
 async fn forward_quic_to_writer<W>(
+    mut prefix: Vec<u8>,
     recv: &mut iroh::endpoint::RecvStream,
     writer: &mut W,
 ) -> std::io::Result<u64>
@@ -404,10 +417,21 @@ where
     loop {
         match recv.read_chunk(usize::MAX).await {
             Ok(Some(chunk)) => {
-                writer.write_all(&chunk.bytes).await?;
                 total = total.saturating_add(chunk.bytes.len() as u64);
+                if prefix.is_empty() {
+                    writer.write_all(&chunk.bytes).await?;
+                } else {
+                    prefix.extend_from_slice(&chunk.bytes);
+                    writer.write_all(&prefix).await?;
+                    prefix = Vec::new();
+                }
             }
-            Ok(None) => return Ok(total),
+            Ok(None) => {
+                if !prefix.is_empty() {
+                    writer.write_all(&prefix).await?;
+                }
+                return Ok(total);
+            }
             Err(e) => return Err(std::io::Error::other(e)),
         }
     }
