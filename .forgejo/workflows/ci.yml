@@ -17,7 +17,7 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_BUCKET: sccache
   SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
-  SCCACHE_REGION: auto
+  SCCACHE_REGION: us-east-1
   SCCACHE_S3_USE_SSL: "true"
   AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
   AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
