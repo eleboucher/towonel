@@ -441,21 +441,31 @@ impl NodeConfig {
             config.hub.peers = serde_json::from_str(&v)?;
         }
 
+        let allow_unpinned = std::env::var("TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
         for peer in &config.hub.peers {
             require_https(&peer.url, "federation peer URL")?;
-            if let Some(id) = &peer.node_id {
-                if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            match &peer.node_id {
+                Some(id) => {
+                    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        anyhow::bail!(
+                            "federation peer node_id must be 64 hex chars: got {id:?} for {}",
+                            peer.url
+                        );
+                    }
+                }
+                None if allow_unpinned => {
+                    tracing::warn!(
+                        peer = %peer.url,
+                        "federation peer has no pinned node_id and TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=1; bootstrap will trust the first /v1/health response (MITM-able)"
+                    );
+                }
+                None => {
                     anyhow::bail!(
-                        "federation peer node_id must be 64 hex chars: got {id:?} for {}",
+                        "federation peer {} has no pinned node_id — set hub.peers[].node_id to close the MITM window, or set TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=1 to override (not recommended)",
                         peer.url
                     );
                 }
-            } else {
-                tracing::warn!(
-                    peer = %peer.url,
-                    "federation peer has no pinned node_id; bootstrap will trust the first /v1/health response (MITM-able). \
-                     Set hub.peers[].node_id to close this window."
-                );
             }
         }
         for url in &config.edge.hub_urls {
