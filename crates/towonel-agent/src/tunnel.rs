@@ -12,7 +12,9 @@ use tokio::net::{TcpStream, lookup_host};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::hostname::wildcard_lookup;
-use towonel_common::tunnel::{ClientAddrs, read_client_addrs, read_hostname_header};
+use towonel_common::tunnel::{
+    COPY_BUF_SIZE, ClientAddrs, forward_quic_to_writer, read_client_addrs, read_hostname_header,
+};
 
 use crate::config::{ProxyProtocol, ServiceConfig};
 use crate::metrics::{self, ActiveStreamGuard, AgentMetrics};
@@ -20,7 +22,6 @@ use crate::metrics::{self, ActiveStreamGuard, AgentMetrics};
 mod proxy_protocol;
 
 const DNS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
-const COPY_BUF_SIZE: usize = 64 * 1024;
 
 /// Cap on how long we wait for an edge to send the (hostname, client-addrs)
 /// handshake bytes. Bounded to stop silent/malicious edges pinning tasks open.
@@ -448,45 +449,6 @@ async fn forward_tls(
         Err(e) => warn!("origin(tls)->edge: {e}"),
     }
     Ok(())
-}
-
-/// Zero-copy forward from a QUIC `RecvStream` to any `AsyncWrite` via
-/// `read_chunk` (avoids an intermediate `BufReader` memcpy).
-///
-/// An optional `prefix` (e.g. a PROXY v2 header) is coalesced with the first
-/// QUIC chunk into a single `write_all`, so with `TCP_NODELAY` set the origin
-/// sees one segment instead of two back-to-back tiny ones. Pass `Vec::new()`
-/// when no prefix is needed.
-async fn forward_quic_to_writer<W>(
-    mut prefix: Vec<u8>,
-    recv: &mut iroh::endpoint::RecvStream,
-    writer: &mut W,
-) -> std::io::Result<u64>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut total = 0u64;
-    loop {
-        match recv.read_chunk(COPY_BUF_SIZE).await {
-            Ok(Some(chunk)) => {
-                total = total.saturating_add(chunk.bytes.len() as u64);
-                if prefix.is_empty() {
-                    writer.write_all(&chunk.bytes).await?;
-                } else {
-                    prefix.extend_from_slice(&chunk.bytes);
-                    writer.write_all(&prefix).await?;
-                    prefix = Vec::new();
-                }
-            }
-            Ok(None) => {
-                if !prefix.is_empty() {
-                    writer.write_all(&prefix).await?;
-                }
-                return Ok(total);
-            }
-            Err(e) => return Err(std::io::Error::other(e)),
-        }
-    }
 }
 
 #[cfg(test)]

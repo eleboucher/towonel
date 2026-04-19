@@ -2,6 +2,50 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+/// Buffer size for `tokio::io::copy_buf` on agent↔edge bidirectional pipes.
+/// 64 KiB matches QUIC's typical window-unit and keeps syscall count low on
+/// bulk transfers.
+pub const COPY_BUF_SIZE: usize = 64 * 1024;
+
+/// Zero-copy forward from an iroh `RecvStream` to any `AsyncWrite` via
+/// `read_chunk` (bypasses an intermediate `BufReader` memcpy).
+///
+/// An optional `prefix` (e.g. PROXY v2 header) is coalesced with the first
+/// QUIC chunk into a single `write_all`, so with `TCP_NODELAY` set the peer
+/// sees one segment instead of two back-to-back tiny ones. Pass `Vec::new()`
+/// when no prefix is needed — the `is_empty` branch elides the extra copy.
+pub async fn forward_quic_to_writer<W>(
+    mut prefix: Vec<u8>,
+    recv: &mut iroh::endpoint::RecvStream,
+    writer: &mut W,
+) -> std::io::Result<u64>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut total = 0u64;
+    loop {
+        match recv.read_chunk(COPY_BUF_SIZE).await {
+            Ok(Some(chunk)) => {
+                total = total.saturating_add(chunk.bytes.len() as u64);
+                if prefix.is_empty() {
+                    writer.write_all(&chunk.bytes).await?;
+                } else {
+                    prefix.extend_from_slice(&chunk.bytes);
+                    writer.write_all(&prefix).await?;
+                    prefix = Vec::new();
+                }
+            }
+            Ok(None) => {
+                if !prefix.is_empty() {
+                    writer.write_all(&prefix).await?;
+                }
+                return Ok(total);
+            }
+            Err(e) => return Err(std::io::Error::other(e)),
+        }
+    }
+}
+
 /// RFC 1035 maximum domain name length.
 const MAX_HOSTNAME_LEN: u16 = 253;
 
