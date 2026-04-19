@@ -148,7 +148,7 @@ async fn resync_pulls_tenant_and_entry_from_peer() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].tenant_id, tenant.id());
     let is_known = {
-        let policy = target.state.policy.read().await;
+        let policy = target.state.policy.load();
         policy.is_known_tenant(&tenant.id())
     };
     assert!(is_known);
@@ -220,7 +220,7 @@ async fn resync_propagates_removal() {
     assert_eq!(body["removals_ingested"], 1);
 
     let is_known = {
-        let policy = target.state.policy.read().await;
+        let policy = target.state.policy.load();
         policy.is_known_tenant(&tenant.id())
     };
     assert!(!is_known, "removed tenant must not be active on target");

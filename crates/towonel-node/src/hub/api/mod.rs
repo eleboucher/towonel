@@ -20,7 +20,7 @@ use axum::routing::{delete, get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::Serialize;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, broadcast};
 use tokio_util::task::TaskTracker;
 use tower_http::ServiceBuilderExt;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -58,9 +58,12 @@ pub struct AppState {
     pub db: Db,
     pub route_tx: broadcast::Sender<RouteTable>,
     /// Mutable ownership policy. Invite redemption inserts new tenants at
-    /// runtime; the route table rebuilds pull from this same policy via a
-    /// read lock.
-    pub policy: Arc<RwLock<OwnershipPolicy>>,
+    /// runtime; the route table rebuilds pull from this same policy.
+    /// Copy-on-write via `ArcSwap`: readers do a pointer-bump `.load()`;
+    /// writers clone, mutate, and `.store()` a new `Arc`. Serialization
+    /// across concurrent writers is provided by `invite_lock` for the
+    /// check-then-register windows that need it.
+    pub policy: ArcSwap<OwnershipPolicy>,
     /// Shared HTTP client for outbound requests (DNS webhook, etc.).
     pub http_client: reqwest::Client,
     /// Identity information (`node_id`, edge info, version).
@@ -118,6 +121,19 @@ pub struct OutboundFederation {
     pub signing_key: iroh::SecretKey,
 }
 
+impl AppState {
+    /// Copy-on-write mutator for the ownership policy. Clones the current
+    /// snapshot, applies `mutate`, and stores the new `Arc`. Concurrent
+    /// writers race like last-writer-wins; callers that need serialization
+    /// (check-then-register) hold `invite_lock` for the whole window.
+    pub fn policy_update(&self, mutate: impl FnOnce(&mut OwnershipPolicy)) {
+        let current = self.policy.load_full();
+        let mut next = (*current).clone();
+        mutate(&mut next);
+        self.policy.store(Arc::new(next));
+    }
+}
+
 /// Build a route table from the hub's current state (policy + entries +
 /// agent liveness) and broadcast it to edges.
 ///
@@ -125,7 +141,7 @@ pub struct OutboundFederation {
 /// through; it guarantees stale agents vanish from the edge view as soon as
 /// their heartbeat lapses.
 pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Result<()> {
-    let policy_snapshot = state.policy.read().await.clone();
+    let policy_snapshot = state.policy.load_full();
     let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
     let (entries, live) =
         tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
@@ -183,6 +199,15 @@ pub fn router(state: Arc<AppState>) -> Router {
     build_router(state, /* rate_limit */ true)
 }
 
+/// Router for the private health/metrics listener. Bound to a separate port
+/// so `/metrics` isn't exposed on the public API and scrape traffic doesn't
+/// show up in `towonel_hub_requests_total`.
+pub fn health_router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/metrics", get(metrics_handler::metrics))
+        .with_state(state)
+}
+
 /// Build the router without the rate limiter. Used by integration tests
 /// which hammer the same 127.0.0.1 loopback with many requests per second.
 #[cfg(test)]
@@ -195,8 +220,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let public_write = maybe_rate_limit(public_write_routes(), rate_limit);
     let unlimited_public = Router::new()
         .route("/v1/health", get(entries::health))
-        .route("/v1/edges", get(entries::list_edges))
-        .route("/metrics", get(metrics_handler::metrics));
+        .route("/v1/edges", get(entries::list_edges));
     let federation_routes = Router::new()
         .route(
             "/v1/federation/tenants",
