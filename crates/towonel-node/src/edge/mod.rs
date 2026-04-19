@@ -549,7 +549,7 @@ where
 {
     let mut total = 0u64;
     loop {
-        match recv.read_chunk(usize::MAX).await {
+        match recv.read_chunk(COPY_BUF_SIZE).await {
             Ok(Some(chunk)) => {
                 writer.write_all(&chunk.bytes).await?;
                 total = total.saturating_add(chunk.bytes.len() as u64);

@@ -52,14 +52,14 @@ pub fn load_invite_hash_key() -> anyhow::Result<InviteHashKey> {
 
 /// Load the operator API key from `path`, or generate a new random one and
 /// save it with 0o600 permissions.
-pub fn load_or_generate_operator_key(path: &Path) -> anyhow::Result<String> {
+pub fn load_or_generate_operator_key(path: &Path) -> anyhow::Result<zeroize::Zeroizing<String>> {
     if path.exists() {
         let content = std::fs::read_to_string(path)?;
         let trimmed = content.trim().to_string();
         if trimmed.is_empty() {
             anyhow::bail!("operator API key file {} is empty", path.display());
         }
-        Ok(trimmed)
+        Ok(zeroize::Zeroizing::new(trimmed))
     } else {
         let mut bytes = [0u8; OPERATOR_KEY_BYTES];
         // OS RNG failures are unrecoverable on any supported platform.
@@ -71,7 +71,7 @@ pub fn load_or_generate_operator_key(path: &Path) -> anyhow::Result<String> {
             path = %path.display(),
             "generated new operator API key (pass via `Authorization: Bearer <key>` for /v1/invites)"
         );
-        Ok(key)
+        Ok(zeroize::Zeroizing::new(key))
     }
 }
 
@@ -91,7 +91,7 @@ pub struct HubParams {
     pub route_tx: broadcast::Sender<RouteTable>,
     pub static_policy: OwnershipPolicy,
     pub identity: HubIdentity,
-    pub operator_api_key: String,
+    pub operator_api_key: zeroize::Zeroizing<String>,
     pub invite_hash_key: Arc<InviteHashKey>,
     pub public_url: String,
     pub peers: Vec<crate::config::FederationPeer>,
@@ -188,7 +188,9 @@ impl Hub {
         // anything still present at boot is either a currently-alive pod
         // (about to bump its heartbeat) or within the TTL window.
         let initial_cutoff = towonel_common::time::now_ms().saturating_sub(api::AGENT_LIVE_TTL_MS);
-        let live = db.live_agents(initial_cutoff).await.unwrap_or_default();
+        let live = db.live_agents(initial_cutoff).await
+            .inspect_err(|e| tracing::error!(error = %e, "failed to load live agents at startup; initial route table will be empty"))
+            .unwrap_or_default();
         match db.get_all_entries().await {
             Ok(entries) => {
                 let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&live));

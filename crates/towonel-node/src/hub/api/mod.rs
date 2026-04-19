@@ -65,7 +65,7 @@ pub struct AppState {
     /// Identity information (`node_id`, edge info, version).
     pub identity: super::HubIdentity,
     /// Bearer token protecting operator-only endpoints.
-    pub operator_api_key: String,
+    pub operator_api_key: zeroize::Zeroizing<String>,
     /// Public URL of the hub (e.g. "<https://node.towonel.example.eu:8443>").
     pub public_url: String,
     /// Serializes the check+insert window in `POST /v1/invites`.
