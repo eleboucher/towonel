@@ -11,14 +11,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use iroh::EndpointAddr;
 use iroh::endpoint::{Connection, Endpoint};
 use smallvec::SmallVec;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::protocol::ALPN_TUNNEL;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
-use towonel_common::tunnel::{ClientAddrs, write_handshake};
+use towonel_common::tunnel::{COPY_BUF_SIZE, ClientAddrs, forward_quic_to_writer, write_handshake};
 
 use self::acme::AcmeCoordinator;
 use self::health::EdgeMetrics;
@@ -28,10 +28,6 @@ use self::tls::CertStore;
 /// Maximum bytes to peek from a TCP connection to extract the TLS `ClientHello`.
 /// 16 KiB is more than enough for any realistic `ClientHello`.
 const PEEK_BUF_SIZE: usize = 16_384;
-
-/// Byte-pipe buffer size for `tokio::io::copy_buf`. 64 KiB matches QUIC's typical
-/// window-unit and keeps syscall overhead low on bulk transfers.
-const COPY_BUF_SIZE: usize = 64 * 1024;
 
 /// Cap on retries while waiting for a full `ClientHello` to arrive in the
 /// kernel peek buffer. With a 5 ms sleep between attempts this gives the peer
@@ -162,7 +158,9 @@ impl Edge {
         let health_listener = TcpListener::bind(&self.health_listen_addr).await?;
         info!(listen = %self.health_listen_addr, "edge health server listening");
         tokio::spawn(async move {
-            axum::serve(health_listener, health_app).await.ok();
+            if let Err(e) = axum::serve(health_listener, health_app).await {
+                tracing::error!(error = %e, "edge health server exited");
+            }
         });
 
         let ctx = Arc::new(ConnCtx {
@@ -215,6 +213,9 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<ConnCtx>) {
         debug!(%peer_addr, "accepted TCP connection");
 
         let ctx = Arc::clone(&ctx);
+        // Stack-allocated `PEEK_BUF_SIZE` buffer lives inside the future; the
+        // tokio spawn already boxes it, so there's no extra allocation.
+        #[allow(clippy::large_futures)]
         tokio::spawn(async move {
             if let Err(e) = handle_connection(tcp_stream, peer_addr, &ctx).await {
                 debug!(%peer_addr, error = %e, "connection handling failed");
@@ -280,6 +281,7 @@ struct ConnCtx {
 /// Dispatch a single incoming TCP connection. Peek the SNI, look up the
 /// hostname's policy, then either terminate TLS here or pass through to the
 /// agent.
+#[allow(clippy::large_futures)]
 async fn handle_connection(
     tcp_stream: TcpStream,
     peer_addr: std::net::SocketAddr,
@@ -315,7 +317,7 @@ fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentHealthS
 /// Returns the chosen agent plus an open bidirectional QUIC stream.
 async fn pick_agent_and_open_stream(
     ctx: &ConnCtx,
-    candidates: Vec<EndpointAddr>,
+    candidates: self::router::Candidates,
 ) -> anyhow::Result<(
     EndpointAddr,
     iroh::endpoint::SendStream,
@@ -380,6 +382,7 @@ fn tls_record_complete(buf: &[u8]) -> bool {
     buf.len() >= 5 && buf.len() >= 5 + usize::from(u16::from_be_bytes([buf[3], buf[4]]))
 }
 
+#[allow(clippy::large_futures)]
 async fn handle_connection_inner(
     tcp_stream: TcpStream,
     peer_addr: std::net::SocketAddr,
@@ -389,7 +392,7 @@ async fn handle_connection_inner(
     async move {
         let start = Instant::now();
 
-        let mut peek_buf = vec![0u8; PEEK_BUF_SIZE];
+        let mut peek_buf = [0u8; PEEK_BUF_SIZE];
         let n = peek_client_hello(&tcp_stream, &mut peek_buf).await?;
 
         let hostname = extract_sni(&peek_buf[..n])
@@ -398,7 +401,7 @@ async fn handle_connection_inner(
 
         let (candidates, policy) = ctx
             .router
-            .route(&hostname)
+            .route(hostname)
             .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
         debug!(
             %hostname,
@@ -419,19 +422,13 @@ async fn handle_connection_inner(
 
         let (bytes_in, bytes_out) = match policy {
             TlsMode::Passthrough => {
-                pipe_passthrough(
-                    tcp_stream,
-                    &hostname,
-                    client_addrs,
-                    send_stream,
-                    recv_stream,
-                )
-                .await?
+                pipe_passthrough(tcp_stream, hostname, client_addrs, send_stream, recv_stream)
+                    .await?
             }
             TlsMode::Terminate => {
                 pipe_terminate(
                     tcp_stream,
-                    &hostname,
+                    hostname,
                     client_addrs,
                     send_stream,
                     recv_stream,
@@ -480,7 +477,7 @@ async fn pipe_passthrough(
         res.unwrap_or(0)
     };
     let a2c = async {
-        let res = forward_quic_to_writer(&mut recv_stream, &mut tcp_write).await;
+        let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
         let _ = tcp_write.shutdown().await;
         res.unwrap_or(0)
     };
@@ -526,38 +523,13 @@ async fn pipe_terminate(
         res.unwrap_or(0)
     };
     let a2c = async {
-        let res = forward_quic_to_writer(&mut recv_stream, &mut tls_write).await;
+        let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tls_write).await;
         let _ = tls_write.shutdown().await;
         res.unwrap_or(0)
     };
 
     let (c2a, a2c) = tokio::join!(c2a, a2c);
     Ok((c2a, a2c))
-}
-
-/// Zero-copy forward from an iroh `RecvStream` to any `AsyncWrite`. Uses
-/// `read_chunk` so the bytes stay in Quinn's receive buffer; we hand a `Bytes`
-/// slice straight to the writer without passing through an intermediate
-/// `BufReader`. This saves one `memcpy` per byte and ~64 KiB of RSS per
-/// stream direction compared to `BufReader + copy_buf`.
-async fn forward_quic_to_writer<W>(
-    recv: &mut iroh::endpoint::RecvStream,
-    writer: &mut W,
-) -> std::io::Result<u64>
-where
-    W: AsyncWrite + Unpin,
-{
-    let mut total = 0u64;
-    loop {
-        match recv.read_chunk(COPY_BUF_SIZE).await {
-            Ok(Some(chunk)) => {
-                writer.write_all(&chunk.bytes).await?;
-                total = total.saturating_add(chunk.bytes.len() as u64);
-            }
-            Ok(None) => return Ok(total),
-            Err(e) => return Err(std::io::Error::other(e)),
-        }
-    }
 }
 
 /// Return a new bidirectional QUIC stream to the agent, reusing a pooled
