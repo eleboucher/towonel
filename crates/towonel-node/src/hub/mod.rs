@@ -92,7 +92,7 @@ pub struct HubParams {
     pub static_policy: OwnershipPolicy,
     pub identity: HubIdentity,
     pub operator_api_key: String,
-    pub invite_hash_key: InviteHashKey,
+    pub invite_hash_key: Arc<InviteHashKey>,
     pub public_url: String,
     pub peers: Vec<crate::config::FederationPeer>,
     pub secret_key: iroh::SecretKey,
@@ -104,6 +104,34 @@ pub struct HubParams {
 /// API, persists them to `SQLite`, and serves config updates to edges.
 pub struct Hub {
     p: HubParams,
+}
+
+fn spawn_background_loops(
+    state: &Arc<api::AppState>,
+    peers: &[crate::config::FederationPeer],
+    secret_key: &iroh::SecretKey,
+) {
+    for peer in peers {
+        let peer_cfg = peer.clone();
+        let sk = iroh::SecretKey::from(secret_key.to_bytes());
+        let state_for_peer = Arc::clone(state);
+        tokio::spawn(async move {
+            if let Err(e) = federation::run_peer(peer_cfg, sk, state_for_peer).await {
+                tracing::error!(error = %e, "federation peer task exited");
+            }
+        });
+    }
+    tokio::spawn(refresh_metrics_loop(Arc::clone(state)));
+    tokio::spawn(agent_liveness_prune_loop(Arc::clone(state)));
+}
+
+/// Shared HTTP client used by the hub for outbound requests (DNS webhook,
+/// admin resync). Federation `run_peer` builds its own longer-timeout client.
+fn build_http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .build()
 }
 
 impl Hub {
@@ -181,7 +209,7 @@ impl Hub {
             db,
             route_tx: self.p.route_tx.clone(),
             policy: Arc::new(RwLock::new(policy)),
-            http_client: reqwest::Client::new(),
+            http_client: build_http_client()?,
             identity: HubIdentity {
                 node_id: self.p.identity.node_id.clone(),
                 edge_node_id: self.p.identity.edge_node_id.clone(),
@@ -202,22 +230,12 @@ impl Hub {
             metrics,
             peer_statuses,
             tasks: tokio_util::task::TaskTracker::new(),
-            invite_hash_key: self.p.invite_hash_key.clone(),
+            invite_hash_key: Arc::clone(&self.p.invite_hash_key),
+            heartbeat_nonces: federation::new_nonce_cache(),
+            allow_loopback_peers: false,
         });
 
-        for peer in &self.p.peers {
-            let peer_cfg = peer.clone();
-            let sk = iroh::SecretKey::from(self.p.secret_key.to_bytes());
-            let state_for_peer = state.clone();
-            tokio::spawn(async move {
-                if let Err(e) = federation::run_peer(peer_cfg, sk, state_for_peer).await {
-                    tracing::error!(error = %e, "federation peer task exited");
-                }
-            });
-        }
-
-        tokio::spawn(refresh_metrics_loop(state.clone()));
-        tokio::spawn(agent_liveness_prune_loop(state.clone()));
+        spawn_background_loops(&state, &self.p.peers, &self.p.secret_key);
 
         let app = api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
 
@@ -263,6 +281,7 @@ async fn init_trusted_peers(
 /// dies without sending SIGTERM (OOM-kill, node failure).
 async fn agent_liveness_prune_loop(state: Arc<api::AppState>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tick.tick().await; // skip immediate first tick
     loop {
         tick.tick().await;
@@ -291,6 +310,7 @@ async fn agent_liveness_prune_loop(state: Arc<api::AppState>) {
 /// sub-second accuracy on. A 15 s refresh is fine for dashboards.
 async fn refresh_metrics_loop(state: Arc<api::AppState>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
         let tenants = state.policy.read().await.iter_patterns().count();
