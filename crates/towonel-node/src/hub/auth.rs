@@ -1,16 +1,9 @@
 use axum::http::{HeaderMap, header};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use sha2::{Digest, Sha256};
 use towonel_common::time::now_ms;
 
-/// SHA-256 of `body` hex-encoded; pass this to the signer on the wire format.
-/// Keeps signatures body-bound so a captured header can't be replayed with a
-/// different payload within the freshness window.
-#[must_use]
-pub fn body_hash_hex(body: &[u8]) -> String {
-    hex::encode(Sha256::digest(body))
-}
+pub use towonel_common::auth::body_hash_hex;
 
 /// Parse and verify `Authorization: Signature <node_id_hex>.<ts_ms>.<sig_b64>`.
 ///

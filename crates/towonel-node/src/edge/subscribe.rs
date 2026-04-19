@@ -5,6 +5,7 @@ use anyhow::{Context, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use eventsource_stream::Eventsource;
+use towonel_common::auth::sign_auth_header;
 use towonel_common::routing::RouteTable;
 
 use super::router::Router;
@@ -82,7 +83,12 @@ async fn connect_and_stream(
 ) -> anyhow::Result<()> {
     use tokio_stream::StreamExt;
 
-    let auth = signed_auth_header(secret_key);
+    let auth = sign_auth_header(
+        secret_key,
+        "towonel/edge-sub/v1",
+        towonel_common::time::now_ms(),
+        &[],
+    );
     let resp = client
         .get(url)
         .header(reqwest::header::AUTHORIZATION, auth)
@@ -112,14 +118,6 @@ async fn connect_and_stream(
     Ok(())
 }
 
-fn signed_auth_header(secret_key: &iroh::SecretKey) -> String {
-    let node_id = secret_key.public();
-    let ts = towonel_common::time::now_ms();
-    let message = format!("towonel/edge-sub/v1/{node_id}/{ts}");
-    let sig = secret_key.sign(message.as_bytes());
-    format!("Signature {node_id}.{ts}.{}", B64.encode(sig.to_bytes()))
-}
-
 fn apply_route_data(router: &Router, data: &str) -> anyhow::Result<()> {
     let cbor_bytes = B64
         .decode(data)
@@ -135,20 +133,6 @@ fn apply_route_data(router: &Router, data: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn signed_auth_header_shape() {
-        let sk = iroh::SecretKey::from([7u8; 32]);
-        let h = signed_auth_header(&sk);
-        assert!(h.starts_with("Signature "));
-        let body = h.strip_prefix("Signature ").unwrap();
-        let parts: Vec<&str> = body.split('.').collect();
-        assert_eq!(parts.len(), 3, "node_id.ts.sig");
-        assert_eq!(parts[0].len(), 64, "node_id is 64 hex chars");
-        let _ts: u64 = parts[1].parse().expect("ts parses as u64");
-        let sig = B64.decode(parts[2]).expect("sig is base64url");
-        assert_eq!(sig.len(), 64, "ed25519 sig is 64 bytes");
-    }
 
     #[tokio::test]
     async fn empty_hub_urls_returns_immediately() {

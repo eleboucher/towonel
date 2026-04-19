@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod config_entry;
 pub mod hostname;
 pub mod identity;
