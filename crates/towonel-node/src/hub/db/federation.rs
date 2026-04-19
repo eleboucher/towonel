@@ -110,35 +110,54 @@ impl Db {
         Ok(state)
     }
 
-    pub async fn mark_federation_tenant_pushed(
+    /// Batch UPSERT: mark many tenants as pushed to `peer_node_id` in a
+    /// single `INSERT ... ON CONFLICT DO UPDATE`. No-op on empty input.
+    pub async fn mark_federation_tenants_pushed_batch(
         &self,
         peer_node_id: &[u8; 32],
-        tenant_id: &TenantId,
+        tenant_ids: &[TenantId],
     ) -> anyhow::Result<()> {
-        upsert_push_state(&self.conn, peer_node_id, tenant_id, PushMark::Tenant).await
+        batch_upsert_push_state(&self.conn, peer_node_id, tenant_ids, BatchMark::Tenant).await
     }
 
-    pub async fn mark_federation_removal_pushed(
+    pub async fn mark_federation_removals_pushed_batch(
         &self,
         peer_node_id: &[u8; 32],
-        tenant_id: &TenantId,
+        tenant_ids: &[TenantId],
     ) -> anyhow::Result<()> {
-        upsert_push_state(&self.conn, peer_node_id, tenant_id, PushMark::Removal).await
+        batch_upsert_push_state(&self.conn, peer_node_id, tenant_ids, BatchMark::Removal).await
     }
 
-    pub async fn mark_federation_entry_pushed(
+    pub async fn mark_federation_entries_pushed_batch(
         &self,
         peer_node_id: &[u8; 32],
-        tenant_id: &TenantId,
-        sequence: u64,
+        items: &[(TenantId, u64)],
     ) -> anyhow::Result<()> {
-        upsert_push_state(
-            &self.conn,
-            peer_node_id,
-            tenant_id,
-            PushMark::Entry(sequence),
-        )
-        .await
+        if items.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<federation_push_state::ActiveModel> = items
+            .iter()
+            .map(|(tid, seq)| federation_push_state::ActiveModel {
+                peer_node_id: ActiveValue::Set(peer_node_id.to_vec()),
+                tenant_id: ActiveValue::Set(tenant_id_bytes(tid)),
+                tenant_pushed: ActiveValue::Set(false),
+                removal_pushed: ActiveValue::Set(false),
+                last_sent_sequence: ActiveValue::Set(seq.cast_signed()),
+            })
+            .collect();
+        federation_push_state::Entity::insert_many(rows)
+            .on_conflict(
+                OnConflict::columns([
+                    federation_push_state::Column::PeerNodeId,
+                    federation_push_state::Column::TenantId,
+                ])
+                .update_column(federation_push_state::Column::LastSentSequence)
+                .to_owned(),
+            )
+            .exec(&self.conn)
+            .await?;
+        Ok(())
     }
 
     /// Tenants federated from peers, used at hub boot to populate the
@@ -165,42 +184,43 @@ impl Db {
     }
 }
 
-enum PushMark {
+enum BatchMark {
     Tenant,
     Removal,
-    Entry(u64),
 }
 
-async fn upsert_push_state(
+async fn batch_upsert_push_state(
     conn: &sea_orm::DatabaseConnection,
     peer_node_id: &[u8; 32],
-    tenant_id: &TenantId,
-    mark: PushMark,
+    tenant_ids: &[TenantId],
+    mark: BatchMark,
 ) -> anyhow::Result<()> {
-    let column = match mark {
-        PushMark::Tenant => federation_push_state::Column::TenantPushed,
-        PushMark::Removal => federation_push_state::Column::RemovalPushed,
-        PushMark::Entry(_) => federation_push_state::Column::LastSentSequence,
+    if tenant_ids.is_empty() {
+        return Ok(());
+    }
+    let (tenant_flag, removal_flag, column) = match mark {
+        BatchMark::Tenant => (true, false, federation_push_state::Column::TenantPushed),
+        BatchMark::Removal => (false, true, federation_push_state::Column::RemovalPushed),
     };
-    let on_conflict = OnConflict::columns([
-        federation_push_state::Column::PeerNodeId,
-        federation_push_state::Column::TenantId,
-    ])
-    .update_column(column)
-    .to_owned();
-
-    let row = federation_push_state::ActiveModel {
-        peer_node_id: ActiveValue::Set(peer_node_id.to_vec()),
-        tenant_id: ActiveValue::Set(tenant_id_bytes(tenant_id)),
-        tenant_pushed: ActiveValue::Set(matches!(mark, PushMark::Tenant)),
-        removal_pushed: ActiveValue::Set(matches!(mark, PushMark::Removal)),
-        last_sent_sequence: ActiveValue::Set(match mark {
-            PushMark::Entry(seq) => seq.cast_signed(),
-            _ => 0,
-        }),
-    };
-    federation_push_state::Entity::insert(row)
-        .on_conflict(on_conflict)
+    let rows: Vec<federation_push_state::ActiveModel> = tenant_ids
+        .iter()
+        .map(|tid| federation_push_state::ActiveModel {
+            peer_node_id: ActiveValue::Set(peer_node_id.to_vec()),
+            tenant_id: ActiveValue::Set(tenant_id_bytes(tid)),
+            tenant_pushed: ActiveValue::Set(tenant_flag),
+            removal_pushed: ActiveValue::Set(removal_flag),
+            last_sent_sequence: ActiveValue::Set(0),
+        })
+        .collect();
+    federation_push_state::Entity::insert_many(rows)
+        .on_conflict(
+            OnConflict::columns([
+                federation_push_state::Column::PeerNodeId,
+                federation_push_state::Column::TenantId,
+            ])
+            .update_column(column)
+            .to_owned(),
+        )
         .exec(conn)
         .await?;
     Ok(())
