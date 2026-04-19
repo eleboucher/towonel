@@ -48,10 +48,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_any_edge: bool,
 
-    /// Bind a minimal HTTP server on this port with `GET /healthz` and
-    /// `GET /metrics`. Useful for k8s liveness/readiness probes.
-    #[arg(long)]
-    health_port: Option<u16>,
+    /// Port for the built-in HTTP server exposing `GET /healthz` and
+    /// `GET /metrics`. Used by k8s liveness/readiness probes.
+    #[arg(long, default_value_t = 9090)]
+    health_port: u16,
 }
 
 #[allow(clippy::large_futures)]
@@ -146,9 +146,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let allow_any = cli.allow_any_edge;
     let trusted_edges = ctx.trusted_edges.clone();
 
-    let health_handle = cli
-        .health_port
-        .map(|port| tokio::spawn(serve_http(port, metrics.clone())));
+    let health_handle = tokio::spawn(serve_http(cli.health_port, metrics.clone()));
 
     tokio::select! {
         res = tunnel::run(&endpoint, service_map, trusted_edges, allow_any, metrics.clone()) => {
@@ -160,9 +158,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     }
 
     heartbeat.abort();
-    if let Some(h) = health_handle {
-        h.abort();
-    }
+    health_handle.abort();
     endpoint.close().await;
     info!("towonel-agent stopped");
     Ok(())
