@@ -429,20 +429,46 @@ pub fn write_key_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 /// permissions, and return them. Shared by every 32-byte seed use in the
 /// codebase: iroh node key, iroh agent key, ML-DSA tenant seed.
 fn load_or_generate_key_bytes(path: &Path) -> anyhow::Result<[u8; 32]> {
-    if path.exists() {
-        std::fs::read(path)?
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("key file {} must be exactly 32 bytes", path.display()))
-    } else {
-        let mut bytes = [0u8; 32];
-        // OS RNG failure is unrecoverable at this layer.
-        #[allow(clippy::expect_used)]
-        {
-            getrandom::fill(&mut bytes).expect("OS RNG failed");
-        }
-        write_key_file(path, &bytes)?;
-        Ok(bytes)
+    // Race two replicas on a shared volume at boot: one process sees the file
+    // missing and starts generating; before it writes, the other also sees it
+    // missing. Without atomic create-or-fail we'd end up with divergent keys.
+    // Try create-new first, fall back to read on AlreadyExists.
+    let mut bytes = [0u8; 32];
+    #[allow(clippy::expect_used)]
+    {
+        getrandom::fill(&mut bytes).expect("OS RNG failed");
     }
+    match write_key_file_exclusive(path, &bytes) {
+        Ok(()) => Ok(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => std::fs::read(path)?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("key file {} must be exactly 32 bytes", path.display())),
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to write key at {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+/// Write key bytes atomically: fail with `AlreadyExists` if the file exists,
+/// so a second racing creator falls back to reading the winner's output.
+fn write_key_file_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(bytes)?;
+    Ok(())
 }
 
 /// Load an iroh `SecretKey` from a file, or generate and save one.

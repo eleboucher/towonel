@@ -32,9 +32,17 @@ pub fn wildcard_lookup_ascii_lower<'m, V>(
         return Some(v);
     }
     if let Some(dot_pos) = lower.find('.') {
-        let wildcard = format!("*.{}", &lower[dot_pos + 1..]);
-        if let Some(v) = get(&wildcard) {
-            return Some(v);
+        let suffix = &lower[dot_pos + 1..];
+        let mut buf = [0u8; 257];
+        if suffix.len() + 2 <= buf.len() {
+            buf[0] = b'*';
+            buf[1] = b'.';
+            buf[2..2 + suffix.len()].copy_from_slice(suffix.as_bytes());
+            if let Ok(wildcard) = std::str::from_utf8(&buf[..2 + suffix.len()])
+                && let Some(v) = get(wildcard)
+            {
+                return Some(v);
+            }
         }
     }
     None

@@ -75,7 +75,9 @@ impl TestHub {
             metrics: super::metrics::HubMetrics::new(),
             peer_statuses: super::peer_status::new_peer_status_map(&[]),
             tasks: tokio_util::task::TaskTracker::new(),
-            invite_hash_key: towonel_common::invite::InviteHashKey::generate(),
+            invite_hash_key: std::sync::Arc::new(towonel_common::invite::InviteHashKey::generate()),
+            heartbeat_nonces: super::federation::new_nonce_cache(),
+            allow_loopback_peers: true,
         });
 
         let app = router_unlimited(state.clone());
