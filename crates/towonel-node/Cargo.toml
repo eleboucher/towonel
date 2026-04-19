@@ -48,7 +48,6 @@ arc-swap = { workspace = true }
 moka = { workspace = true }
 zeroize = { workspace = true }
 backon = { workspace = true }
-sha2 = { workspace = true }
 papaya = { workspace = true }
 smallvec = { workspace = true }
 tokio-util = { workspace = true }
