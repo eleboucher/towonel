@@ -557,8 +557,6 @@ mod tests {
         assert!(!bob_agents.contains(&agent1.id()));
     }
 
-    // --- Security tests ---
-
     #[test]
     fn two_tenants_same_hostname_second_rejected() {
         let kp1 = TenantKeypair::generate();
@@ -724,6 +722,57 @@ mod tests {
             table.lookup("deep.app.example.eu").is_none(),
             "wildcards are single-level"
         );
+    }
+
+    #[test]
+    fn lookup_with_tls_matches_lookup_plus_tls_mode() {
+        use crate::tls_policy::TlsMode;
+
+        let kp = TenantKeypair::generate();
+        let agent = AgentKeypair::generate();
+        let policy = policy_for(&kp, &["app.example.eu", "*.bob.example.eu"]);
+        let entries = vec![
+            sign_entry(
+                &kp,
+                1,
+                ConfigOp::UpsertHostname {
+                    hostname: "app.example.eu".into(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                2,
+                ConfigOp::UpsertHostname {
+                    hostname: "*.bob.example.eu".into(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                3,
+                ConfigOp::UpsertAgent {
+                    agent_id: agent.id(),
+                },
+            ),
+            sign_entry(
+                &kp,
+                4,
+                ConfigOp::SetHostnameTls {
+                    hostname: "*.bob.example.eu".into(),
+                    mode: TlsMode::Terminate,
+                },
+            ),
+        ];
+        let table = RouteTable::from_entries(&entries, &policy);
+
+        let (agents, tls) = table.lookup_with_tls("APP.example.eu").unwrap();
+        assert_eq!(agents, table.lookup("app.example.eu").unwrap());
+        assert_eq!(tls, TlsMode::Passthrough);
+
+        let (wagents, wtls) = table.lookup_with_tls("foo.bob.example.eu").unwrap();
+        assert_eq!(wagents, table.lookup("foo.bob.example.eu").unwrap());
+        assert_eq!(wtls, TlsMode::Terminate);
+
+        assert!(table.lookup_with_tls("missing.example.eu").is_none());
     }
 
     #[test]
