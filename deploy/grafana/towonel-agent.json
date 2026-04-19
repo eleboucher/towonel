@@ -1,0 +1,451 @@
+{
+  "title": "towonel-agent",
+  "uid": "towonel-agent",
+  "tags": ["towonel", "towonel-agent"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {"from": "now-6h", "to": "now"},
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 0
+      },
+      {
+        "name": "instance",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {
+          "query": "label_values(towonel_agent_streams_active, instance)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      }
+    ]
+  },
+  "annotations": {"list": []},
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Overview",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "collapsed": false
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Active streams",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 1},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(towonel_agent_streams_active{instance=~\"$instance\"})",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Streams / s",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 1},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {"mode": "fixed", "fixedColor": "green"}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_agent_streams_accepted_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "accepted"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Stream error ratio",
+      "description": "Share of accepted streams that fail (5m).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 1},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 0.01},
+              {"color": "red", "value": 0.05}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m])) / clamp_min(sum(rate(towonel_agent_streams_accepted_total{instance=~\"$instance\"}[5m])), 1)",
+          "legendFormat": "err ratio"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Heartbeat success ratio",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 0.95},
+              {"color": "green", "value": 0.99}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_agent_heartbeats_total{instance=~\"$instance\",outcome=\"ok\"}[5m])) / clamp_min(sum(rate(towonel_agent_heartbeats_total{instance=~\"$instance\"}[5m])), 1)",
+          "legendFormat": "ok"
+        }
+      ]
+    },
+
+    {
+      "id": 10,
+      "type": "row",
+      "title": "Connections & streams",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 5},
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Edge connections (accepted / rejected)",
+      "description": "iroh connections. Rejected = remote not in trusted-edge allowlist.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cps",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/rejected$/"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance) (rate(towonel_agent_edge_connections_accepted_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} accepted"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (instance) (rate(towonel_agent_edge_connections_rejected_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} rejected"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Active streams",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "towonel_agent_streams_active{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "Stream outcomes",
+      "description": "Accepted vs completed vs errored — divergence = in-flight backlog or failures.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 14},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "errors"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_agent_streams_accepted_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "accepted"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(towonel_agent_streams_completed_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "completed"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "errors"
+        }
+      ]
+    },
+
+    {
+      "id": 20,
+      "type": "row",
+      "title": "Errors",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 22},
+      "collapsed": false
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Stream errors by reason",
+      "description": "Reasons: handshake_timeout, handshake_error, no_service, origin_connect, forward_error.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 23},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never", "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Errors by reason (per instance)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 23},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance, reason) (rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} {{reason}}"
+        }
+      ]
+    },
+
+    {
+      "id": 30,
+      "type": "row",
+      "title": "Traffic",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 31},
+      "collapsed": false
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Throughput by direction",
+      "description": "origin_to_edge rendered as negative-Y. Asymmetry is normal — response bodies usually dominate.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/origin_to_edge$/"},
+            "properties": [{"id": "custom.transform", "value": "negative-Y"}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance, direction) (rate(towonel_agent_bytes_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} {{direction}}"
+        }
+      ]
+    },
+
+    {
+      "id": 40,
+      "type": "row",
+      "title": "Heartbeats & Build",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 40},
+      "collapsed": false
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Heartbeats by outcome",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 41},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/error$/"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (outcome) (rate(towonel_agent_heartbeats_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "table",
+      "title": "Agent build info",
+      "description": "One row per (instance, version). Spot stragglers after a rollout.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 41},
+      "fieldConfig": {
+        "defaults": {"custom": {"align": "auto"}},
+        "overrides": []
+      },
+      "options": {"showHeader": true},
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {"Time": true, "Value": true, "__name__": true, "job": true},
+            "renameByName": {"instance": "instance", "version": "version"}
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "towonel_agent_info{instance=~\"$instance\"}",
+          "legendFormat": "__auto",
+          "instant": true,
+          "format": "table"
+        }
+      ]
+    }
+  ]
+}
