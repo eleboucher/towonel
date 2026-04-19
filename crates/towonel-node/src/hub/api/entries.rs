@@ -72,9 +72,13 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         ));
     }
 
-    if let ConfigOp::UpsertHostname { hostname } | ConfigOp::DeleteHostname { hostname } =
-        &payload.op
-    {
+    let hostname_for_check = match &payload.op {
+        ConfigOp::UpsertHostname { hostname }
+        | ConfigOp::DeleteHostname { hostname }
+        | ConfigOp::SetHostnameTls { hostname, .. } => Some(hostname),
+        ConfigOp::UpsertAgent { .. } | ConfigOp::RevokeAgent { .. } => None,
+    };
+    if let Some(hostname) = hostname_for_check {
         if let Err(e) = towonel_common::hostname::validate_hostname(hostname) {
             state.metrics.record_reject(reject_reason::INVALID_HOSTNAME);
             return invalid_request(format!("invalid hostname `{hostname}`: {e}"));
