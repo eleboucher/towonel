@@ -128,6 +128,11 @@ pub async fn push_tenant(
     if req.hostnames.is_empty() {
         return invalid_request("at least one hostname required");
     }
+    for h in &req.hostnames {
+        if let Err(e) = towonel_common::hostname::validate_hostname(h) {
+            return invalid_request(format!("hostname {h:?}: {e}"));
+        }
+    }
 
     let federated = FederatedTenant {
         tenant_id,
@@ -135,6 +140,20 @@ pub async fn push_tenant(
         hostnames: req.hostnames.clone(),
         registered_at_ms: req.registered_at_ms,
     };
+
+    {
+        let policy = state.policy.read().await;
+        for h in &federated.hostnames {
+            let lower = h.to_lowercase();
+            for (other_id, patterns) in policy.iter_patterns() {
+                if *other_id != federated.tenant_id && patterns.contains(&lower) {
+                    return invalid_request(format!(
+                        "hostname {h:?} is already claimed by a different tenant"
+                    ));
+                }
+            }
+        }
+    }
 
     if let Err(e) = state.db.insert_federated_tenant(&federated, &peer).await {
         warn!(error = %e, "federation: failed to insert tenant");
@@ -272,6 +291,7 @@ pub async fn run_peer(
     );
 
     let mut interval = tokio::time::interval(Duration::from_secs(15));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         interval.tick().await;
         if let Err(e) = push_round(&client, &peer.url, &peer_node_id, &secret_key, &state).await {
@@ -393,13 +413,19 @@ pub async fn push_round(
     secret_key: &iroh::SecretKey,
     state: &AppState,
 ) -> anyhow::Result<()> {
+    let (push_state, active_tenants, pending_removals, entries_with_seq) = tokio::try_join!(
+        state.db.load_federation_push_state(peer_node_id),
+        state.db.list_active_tenants(),
+        state.db.list_tenant_removals(),
+        state.db.list_entries_with_sequence(),
+    )?;
     let super::db::FederationPushState {
         tenants: sent_tenants,
         removals: sent_removals,
         entry_seq: sent_seq,
-    } = state.db.load_federation_push_state(peer_node_id).await?;
+    } = push_state;
 
-    for tenant in state.db.list_active_tenants().await? {
+    for tenant in active_tenants {
         if sent_tenants.contains(&tenant.tenant_id) {
             continue;
         }
@@ -428,7 +454,7 @@ pub async fn push_round(
             .await?;
     }
 
-    for tid in state.db.list_tenant_removals().await? {
+    for tid in pending_removals {
         if sent_removals.contains(&tid) {
             continue;
         }
@@ -456,7 +482,7 @@ pub async fn push_round(
     }
 
     let policy = state.policy.read().await;
-    for (entry, sequence) in state.db.list_entries_with_sequence().await? {
+    for (entry, sequence) in entries_with_seq {
         let last_sent = sent_seq.get(&entry.tenant_id).copied().unwrap_or(0);
         if sequence <= last_sent {
             continue;
