@@ -14,6 +14,13 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_BUCKET: sccache
+  SCCACHE_ENDPOINT: https://s3.erwanleboucher.dev
+  SCCACHE_REGION: auto
+  SCCACHE_S3_USE_SSL: "true"
+  AWS_ACCESS_KEY_ID: ${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+  AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
 
 jobs:
   fmt:
@@ -34,6 +41,9 @@ jobs:
         with:
           toolchain: "1.95.0"
           components: clippy
+      - uses: https://github.com/taiki-e/install-action@v2
+        with:
+          tool: sccache
       # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
       - uses: https://github.com/Swatinem/rust-cache@469cb0e24707e1f169c4501c23d77da83a83fce8
         with:
@@ -49,7 +59,7 @@ jobs:
           toolchain: "1.95.0"
       - uses: https://github.com/taiki-e/install-action@v2
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest,sccache
       # v2.9.1 — pinned by commit SHA because forgejo-runner rejects annotated tags as ambiguous refs.
       - uses: https://github.com/Swatinem/rust-cache@469cb0e24707e1f169c4501c23d77da83a83fce8
         with:
