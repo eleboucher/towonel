@@ -78,8 +78,8 @@ pub fn load_or_generate_operator_key(path: &Path) -> anyhow::Result<zeroize::Zer
 /// Operational identity information that the hub exposes via `/v1/health`
 /// and `/v1/edges`. Constructed once at startup in `main`.
 pub struct HubIdentity {
-    pub node_id: String,
-    pub edge_node_id: Option<String>,
+    pub node_id: iroh::EndpointId,
+    pub edge_node_id: Option<iroh::EndpointId>,
     pub edge_addresses: Vec<String>,
     pub software_version: &'static str,
 }
@@ -87,6 +87,7 @@ pub struct HubIdentity {
 /// Everything the hub needs to start, grouped to keep the constructor lean.
 pub struct HubParams {
     pub listen_addr: String,
+    pub health_listen_addr: String,
     pub database: crate::config::DatabaseConfig,
     pub route_tx: broadcast::Sender<RouteTable>,
     pub static_policy: OwnershipPolicy,
@@ -140,6 +141,7 @@ impl Hub {
     }
 
     /// Run the hub. Opens the `SQLite` database and starts the HTTP management API.
+    #[allow(clippy::too_many_lines)]
     pub async fn run(&self) -> anyhow::Result<()> {
         let db_url = self.p.database.connection_url()?;
         info!(
@@ -214,11 +216,11 @@ impl Hub {
         let state = Arc::new(api::AppState {
             db,
             route_tx: self.p.route_tx.clone(),
-            policy: Arc::new(RwLock::new(policy)),
+            policy: arc_swap::ArcSwap::from_pointee(policy),
             http_client: build_http_client()?,
             identity: HubIdentity {
-                node_id: self.p.identity.node_id.clone(),
-                edge_node_id: self.p.identity.edge_node_id.clone(),
+                node_id: self.p.identity.node_id,
+                edge_node_id: self.p.identity.edge_node_id,
                 edge_addresses: self.p.identity.edge_addresses.clone(),
                 software_version: self.p.identity.software_version,
             },
@@ -243,12 +245,20 @@ impl Hub {
 
         spawn_background_loops(&state, &self.p.peers, &self.p.secret_key);
 
-        let app = api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let api_app = api::router(Arc::clone(&state))
+            .into_make_service_with_connect_info::<std::net::SocketAddr>();
+        let health_app = api::health_router(Arc::clone(&state));
 
-        let listener = tokio::net::TcpListener::bind(&self.p.listen_addr).await?;
+        let api_listener = tokio::net::TcpListener::bind(&self.p.listen_addr).await?;
         info!(listen = %self.p.listen_addr, "hub API listening");
 
-        axum::serve(listener, app).await?;
+        let health_listener = tokio::net::TcpListener::bind(&self.p.health_listen_addr).await?;
+        info!(listen = %self.p.health_listen_addr, "hub health/metrics listening");
+
+        tokio::select! {
+            res = axum::serve(api_listener, api_app) => res?,
+            res = axum::serve(health_listener, health_app) => res?,
+        }
         Ok(())
     }
 }
@@ -319,7 +329,7 @@ async fn refresh_metrics_loop(state: Arc<api::AppState>) {
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
-        let tenants = state.policy.read().await.iter_patterns().count();
+        let tenants = state.policy.load().iter_patterns().count();
         state
             .metrics
             .tenants_total

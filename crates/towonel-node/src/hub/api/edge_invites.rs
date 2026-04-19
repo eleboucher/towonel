@@ -141,7 +141,7 @@ pub(super) struct RedeemEdgeInviteRequest {
 #[derive(Debug, Serialize)]
 pub(super) struct RedeemEdgeInviteResponse {
     status: &'static str,
-    hub_node_id: String,
+    hub_node_id: iroh::EndpointId,
     name: String,
 }
 
@@ -212,7 +212,7 @@ pub(super) async fn redeem_edge_invite(
 
     json_ok(RedeemEdgeInviteResponse {
         status: "ok",
-        hub_node_id: state.identity.node_id.clone(),
+        hub_node_id: state.identity.node_id,
         name: invite.name,
     })
 }

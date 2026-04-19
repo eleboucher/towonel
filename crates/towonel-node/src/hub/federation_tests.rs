@@ -10,7 +10,7 @@ use towonel_common::identity::TenantKeypair;
 use towonel_common::time::now_ms;
 
 use super::federation::{RemovalPush, TenantPush, push_round};
-use super::test_helpers::{FAKE_NODE_ID, OutboundConfig, TestHub, create_invite};
+use super::test_helpers::{OutboundConfig, TestHub, create_invite, fake_node_id_hex};
 
 const FEDERATION_AUTH_DOMAIN: &str = "towonel/federation/v1";
 
@@ -78,8 +78,8 @@ async fn post_signed_cbor(
 
 fn tenant_push_body(tenant: &TenantKeypair, hostname: &str) -> Value {
     serde_json::to_value(TenantPush {
-        tenant_id: tenant.id().to_string(),
-        pq_public_key: tenant.public_key().to_string(),
+        tenant_id: tenant.id(),
+        pq_public_key: tenant.public_key().clone(),
         hostnames: vec![hostname.to_string()],
         registered_at_ms: 0,
     })
@@ -88,7 +88,7 @@ fn tenant_push_body(tenant: &TenantKeypair, hostname: &str) -> Value {
 
 fn removal_push_body(tenant: &TenantKeypair) -> Value {
     serde_json::to_value(RemovalPush {
-        tenant_id: tenant.id().to_string(),
+        tenant_id: tenant.id(),
         removed_at_ms: 0,
     })
     .expect("serialize")
@@ -123,7 +123,10 @@ async fn health_exposes_node_id_for_peer_bootstrap() {
         .json()
         .await
         .expect("decode");
-    assert_eq!(resp["node_id"].as_str().expect("node_id"), FAKE_NODE_ID);
+    assert_eq!(
+        resp["node_id"].as_str().expect("node_id"),
+        fake_node_id_hex()
+    );
     assert_eq!(resp["status"], "ok");
 }
 
@@ -253,7 +256,7 @@ async fn push_tenant_inserts_into_db_and_policy() {
     assert_eq!(fed[0].hostnames, vec!["app.alice.test".to_string()]);
 
     let (is_known, hostname_allowed) = {
-        let policy = hub.state.policy.read().await;
+        let policy = hub.state.policy.load();
         (
             policy.is_known_tenant(&tenant.id()),
             policy.is_hostname_allowed(&tenant.id(), "app.alice.test"),
@@ -305,7 +308,7 @@ async fn push_removal_evicts_from_policy_and_persists() {
     )
     .await;
     assert_eq!(s, 200);
-    assert!(hub.state.policy.read().await.is_known_tenant(&tenant.id()));
+    assert!(hub.state.policy.load().is_known_tenant(&tenant.id()));
 
     let auth = signed_auth_header_at(&peer, now_ms());
     let (s, _) = post_signed_json(
@@ -317,7 +320,7 @@ async fn push_removal_evicts_from_policy_and_persists() {
     .await;
     assert_eq!(s, 200);
 
-    assert!(!hub.state.policy.read().await.is_known_tenant(&tenant.id()));
+    assert!(!hub.state.policy.load().is_known_tenant(&tenant.id()));
     let removals = hub.state.db.list_tenant_removals().await.expect("list");
     assert!(removals.contains(&tenant.id()));
 }
@@ -458,7 +461,7 @@ async fn create_invite_sync_push_survives_unreachable_peer() {
     let token = create_invite(&hub_a, &client, "alice", &["app.alice.test"]).await;
     let tenant_id = towonel_common::identity::TenantKeypair::from_seed(token.tenant_seed).id();
     // Invite creation must succeed locally even though the peer push fails.
-    assert!(hub_a.state.policy.read().await.is_known_tenant(&tenant_id));
+    assert!(hub_a.state.policy.load().is_known_tenant(&tenant_id));
 }
 
 #[tokio::test]

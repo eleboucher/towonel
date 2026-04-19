@@ -42,12 +42,12 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         }
     };
 
-    // Hold the read guard only long enough to snapshot the tenant-specific
-    // data we need. Dropping it before the DB insert avoids contending with
-    // concurrent `policy.write()` (e.g. from invite redemption) across an
-    // `.await`, which would serialize unrelated writers behind I/O.
+    // Snapshot the policy once; ArcSwap makes this a pointer-bump. Any
+    // concurrent register/remove races like last-writer-wins, which is
+    // fine since the tenant allowlist check and signature verify are both
+    // against the same snapshot.
     let payload: ConfigPayload = {
-        let policy = state.policy.read().await;
+        let policy = state.policy.load();
 
         let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
             state
@@ -151,13 +151,13 @@ pub(super) async fn health(State(state): State<Arc<AppState>>) -> Response {
     #[derive(Serialize)]
     struct HealthResponse<'a> {
         status: &'a str,
-        node_id: &'a str,
+        node_id: iroh::EndpointId,
         version: &'a str,
         protocol_version: u16,
     }
     json_ok(HealthResponse {
         status: "ok",
-        node_id: &state.identity.node_id,
+        node_id: state.identity.node_id,
         version: state.identity.software_version,
         protocol_version: PROTOCOL_VERSION,
     })
@@ -166,7 +166,7 @@ pub(super) async fn health(State(state): State<Arc<AppState>>) -> Response {
 pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
     #[derive(Serialize)]
     struct EdgeEntry<'a> {
-        node_id: &'a str,
+        node_id: iroh::EndpointId,
         healthy: bool,
         addresses: &'a [String],
     }
@@ -178,7 +178,6 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
     let edges = state
         .identity
         .edge_node_id
-        .as_deref()
         .map_or_else(Vec::new, |node_id| {
             vec![EdgeEntry {
                 node_id,
@@ -211,7 +210,7 @@ pub(super) async fn delete_tenant(
         return internal_error();
     }
 
-    state.policy.write().await.remove(&tenant_id);
+    state.policy_update(|p| p.remove(&tenant_id));
 
     if let Err(e) = rebuild_and_broadcast_routes(&state).await {
         warn!(error = %e, "failed to rebuild routes after tenant removal");

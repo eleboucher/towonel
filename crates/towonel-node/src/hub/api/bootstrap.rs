@@ -28,8 +28,8 @@ pub(super) struct BootstrapResponse {
     status: &'static str,
     tenant_id: String,
     hostnames: Vec<String>,
-    hub_node_id: String,
-    edge_node_id: Option<String>,
+    hub_node_id: iroh::EndpointId,
+    edge_node_id: Option<iroh::EndpointId>,
     edge_addresses: Vec<String>,
 }
 
@@ -80,8 +80,8 @@ pub(super) async fn post_bootstrap(
         status: "ok",
         tenant_id: invite.tenant_id.to_string(),
         hostnames: invite.hostnames,
-        hub_node_id: state.identity.node_id.clone(),
-        edge_node_id: state.identity.edge_node_id.clone(),
+        hub_node_id: state.identity.node_id,
+        edge_node_id: state.identity.edge_node_id,
         edge_addresses: state.identity.edge_addresses.clone(),
     })
 }
