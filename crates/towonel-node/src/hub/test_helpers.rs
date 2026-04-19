@@ -61,7 +61,7 @@ impl TestHub {
                 edge_node_id: Some(FAKE_NODE_ID.to_string()),
                 software_version: "0.0.0-test",
             },
-            operator_api_key: OPERATOR_KEY.to_string(),
+            operator_api_key: zeroize::Zeroizing::new(OPERATOR_KEY.to_string()),
             public_url: "https://hub.test.example".to_string(),
             invite_lock: tokio::sync::Mutex::new(()),
             federation: FederationState {
