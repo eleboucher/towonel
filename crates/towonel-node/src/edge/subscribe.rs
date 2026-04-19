@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, anyhow};
+use backon::{ExponentialBuilder, Retryable};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use eventsource_stream::Eventsource;
@@ -9,9 +11,6 @@ use towonel_common::auth::sign_auth_header;
 use towonel_common::routing::RouteTable;
 
 use super::router::Router;
-
-const RECONNECT_INITIAL_SECS: u64 = 1;
-const RECONNECT_MAX_SECS: u64 = 60;
 
 /// Runs forever, applying `RouteTable` snapshots from a remote hub to
 /// `router`. On disconnect the task rotates through `hub_urls` before
@@ -40,38 +39,61 @@ pub async fn run(
         .build()
         .context("building reqwest client")?;
 
-    let mut backoff = RECONNECT_INITIAL_SECS;
-    let mut idx = 0usize; // index into `urls`, rotated on each attempt
+    // Rotates on each failure so the next retry attempts a different hub in
+    // the federation list. `AtomicUsize` keeps the future `Send` (a `Cell`
+    // would not) and backon's `FnMut` closure can mutate it via `Relaxed`
+    // ordering — there is no cross-thread happens-before relationship to
+    // preserve here.
+    let idx = AtomicUsize::new(0);
+    let policy = || {
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(60))
+            .with_max_times(usize::MAX)
+            .with_jitter()
+    };
 
+    // Outer loop resets the backon schedule on every clean hub close so a
+    // short flap doesn't accumulate delay.
     loop {
-        let url = &urls[idx];
-        match connect_and_stream(&client, url, &secret_key, &router).await {
-            Ok(()) => {
-                tracing::info!(%url, "hub closed route subscription; reconnecting");
-                backoff = RECONNECT_INITIAL_SECS;
+        let res = (|| async {
+            let url = &urls[idx.load(Ordering::Relaxed)];
+            connect_and_stream(&client, url, &secret_key, &router).await
+        })
+        .retry(policy())
+        .notify(|err, dur| {
+            let current_idx = idx.load(Ordering::Relaxed);
+            let next_idx = (current_idx + 1) % urls.len();
+            let backoff_ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX);
+            if urls.len() > 1 {
+                tracing::warn!(
+                    error = %err,
+                    current_hub = %urls[current_idx],
+                    next_hub = %urls[next_idx],
+                    backoff_ms,
+                    "route subscription failed; rotating hub and backing off",
+                );
+            } else {
+                tracing::warn!(
+                    error = %err,
+                    backoff_ms,
+                    "route subscription failed; backing off",
+                );
             }
-            Err(e) => {
-                let next_idx = (idx + 1) % urls.len();
-                if urls.len() > 1 {
-                    tracing::warn!(
-                        error = %e,
-                        current_hub = %url,
-                        next_hub = %urls[next_idx],
-                        "route subscription failed; rotating hub and backing off {}s",
-                        backoff,
-                    );
-                } else {
-                    tracing::warn!(
-                        error = %e,
-                        "route subscription failed; backing off {}s",
-                        backoff
-                    );
-                }
-                idx = next_idx;
-            }
+            idx.store(next_idx, Ordering::Relaxed);
+        })
+        .await;
+
+        if let Err(e) = res {
+            // max_times=usize::MAX, so the Err branch is practically
+            // unreachable; fall through to reconnect anyway.
+            tracing::warn!(error = %e, "route subscription gave up; reconnecting");
+        } else {
+            tracing::info!(
+                hub = %urls[idx.load(Ordering::Relaxed)],
+                "hub closed route subscription; reconnecting",
+            );
         }
-        tokio::time::sleep(Duration::from_secs(backoff)).await;
-        backoff = (backoff * 2).min(RECONNECT_MAX_SECS);
     }
 }
 
