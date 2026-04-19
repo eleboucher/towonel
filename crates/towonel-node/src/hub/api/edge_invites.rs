@@ -13,8 +13,8 @@ use towonel_common::time::now_ms;
 
 use super::db::{EdgeInviteRow, InviteStatus};
 use super::{
-    AppState, conflict, constant_time_eq, gone, internal_error, invalid_request, json_ok,
-    not_found, parse_invite_id, unauthorized,
+    AppState, conflict, constant_time_eq, internal_error, invalid_request, json_ok, not_found,
+    parse_invite_id, unauthorized,
 };
 
 #[derive(Debug, Deserialize)]
@@ -162,30 +162,34 @@ pub(super) async fn redeem_edge_invite(
 
     let invite = match state.db.get_edge_invite(&invite_id).await {
         Ok(Some(row)) => row,
-        Ok(None) => return not_found("edge invite does not exist"),
+        Ok(None) => {
+            // Unified unauthorized: unknown / revoked / expired / wrong secret
+            // all return 401 so callers can't probe invite state without the
+            // secret. Server-side logs preserve the real reason.
+            warn!(invite_id = %req.invite_id, "edge invite redemption: not found");
+            return unauthorized("edge invite redemption failed");
+        }
         Err(e) => {
             warn!(error = %e, "failed to fetch edge invite");
             return internal_error();
         }
     };
 
-    match invite.status {
-        InviteStatus::Pending => {}
-        InviteStatus::Redeemed => {
-            return conflict("invite_already_redeemed", "edge invite already redeemed");
-        }
-        InviteStatus::Revoked => return conflict("invite_revoked", "edge invite has been revoked"),
-    }
-
-    if now_ms() > invite.expires_at_ms {
-        return gone("edge invite has expired");
-    }
-
-    if !constant_time_eq(
+    let secret_ok = constant_time_eq(
         &hash_invite_secret(&state.invite_hash_key, &invite_secret),
         &invite.secret_hash,
-    ) {
-        return unauthorized("invite_secret does not match");
+    );
+    let status_ok = matches!(invite.status, InviteStatus::Pending);
+    let not_expired = now_ms() <= invite.expires_at_ms;
+    if !(secret_ok && status_ok && not_expired) {
+        warn!(
+            invite_id = %req.invite_id,
+            secret_ok,
+            status = ?invite.status,
+            expired = !not_expired,
+            "edge invite redemption rejected"
+        );
+        return unauthorized("edge invite redemption failed");
     }
 
     match state
