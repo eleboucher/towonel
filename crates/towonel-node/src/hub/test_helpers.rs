@@ -5,17 +5,25 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::broadcast;
 use towonel_common::identity::TenantKeypair;
 use towonel_common::invite::InviteToken;
 use towonel_common::ownership::OwnershipPolicy;
 
-use super::api::{AppState, FederationState, OutboundFederation, router_unlimited};
+use super::api::{AppState, FederationState, OutboundFederation, health_router, router_unlimited};
 use super::db::temp_db;
 
 pub(super) const OPERATOR_KEY: &str = "test-operator-api-key";
-pub(super) const FAKE_NODE_ID: &str =
-    "0000000000000000000000000000000000000000000000000000000000000001";
+
+/// Deterministic Ed25519 public key derived from a fixed seed. Used across
+/// hub tests that need a syntactically valid `node_id` / `edge_node_id`.
+fn fake_endpoint_id() -> iroh::EndpointId {
+    iroh::SecretKey::from([1u8; 32]).public()
+}
+
+pub(super) fn fake_node_id_hex() -> String {
+    fake_endpoint_id().to_string()
+}
 
 pub(super) struct TestHub {
     pub base_url: String,
@@ -38,7 +46,7 @@ impl TestHub {
     pub(super) async fn start_with(outbound: OutboundConfig) -> Self {
         let db = temp_db().await;
         let (route_tx, _route_rx) = broadcast::channel(16);
-        let policy = Arc::new(RwLock::new(OwnershipPolicy::new()));
+        let policy = arc_swap::ArcSwap::from_pointee(OwnershipPolicy::new());
 
         let OutboundConfig {
             peer_urls,
@@ -56,9 +64,9 @@ impl TestHub {
             policy,
             http_client: reqwest::Client::new(),
             identity: super::HubIdentity {
-                node_id: FAKE_NODE_ID.to_string(),
+                node_id: fake_endpoint_id(),
                 edge_addresses: vec!["127.0.0.1:4443".to_string()],
-                edge_node_id: Some(FAKE_NODE_ID.to_string()),
+                edge_node_id: Some(fake_endpoint_id()),
                 software_version: "0.0.0-test",
             },
             operator_api_key: zeroize::Zeroizing::new(OPERATOR_KEY.to_string()),
@@ -80,7 +88,7 @@ impl TestHub {
             allow_loopback_peers: true,
         });
 
-        let app = router_unlimited(state.clone());
+        let app = router_unlimited(state.clone()).merge(health_router(state.clone()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind ephemeral port");

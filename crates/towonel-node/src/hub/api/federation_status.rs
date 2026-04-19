@@ -14,6 +14,11 @@ struct FederationStatusResponse {
 }
 
 pub(super) async fn get_status(State(state): State<Arc<AppState>>) -> Response {
-    let peers = state.peer_statuses.read().await.clone();
+    let peers: HashMap<String, PeerStatus> = state
+        .peer_statuses
+        .pin()
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect();
     json_ok(FederationStatusResponse { peers })
 }

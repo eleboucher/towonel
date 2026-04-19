@@ -7,13 +7,18 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use sha2::{Digest, Sha256};
 
-/// Lowercase hex of `SHA-256(body)`, the body-binding segment of the signed
-/// message. GET handlers pass `&[]`.
+/// Lowercase hex of `blake3(body)`.
+///
+/// Used as the body-binding segment of the signed message so a captured
+/// header can't be replayed with a different payload within the freshness
+/// window. GET handlers pass `&[]`.
+///
+/// Wire-format note: previously SHA-256. Hub and agent/edge must roll
+/// together — this is not backward-compatible.
 #[must_use]
 pub fn body_hash_hex(body: &[u8]) -> String {
-    hex::encode(Sha256::digest(body))
+    hex::encode(blake3::hash(body).as_bytes())
 }
 
 /// Canonical message covered by the signature:

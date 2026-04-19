@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tokio::sync::RwLock;
 
 /// Cap on how much of a peer error is retained. Keeps operator endpoints
 /// bounded in memory even if the underlying reqwest error stringifies long.
@@ -34,15 +32,40 @@ impl PeerStatus {
 }
 
 /// Per-peer federation push status, keyed by configured peer URL.
-pub type PeerStatusMap = Arc<RwLock<HashMap<String, PeerStatus>>>;
+/// Lock-free reads via `papaya`; writers do get/mutate/insert.
+pub type PeerStatusMap = Arc<papaya::HashMap<Arc<str>, PeerStatus>>;
 
 #[must_use]
 pub fn new_peer_status_map(peer_urls: &[String]) -> PeerStatusMap {
-    let mut map = HashMap::with_capacity(peer_urls.len());
-    for url in peer_urls {
-        map.insert(url.clone(), PeerStatus::default());
+    let map = papaya::HashMap::with_capacity(peer_urls.len());
+    {
+        let pinned = map.pin();
+        for url in peer_urls {
+            pinned.insert(Arc::<str>::from(url.as_str()), PeerStatus::default());
+        }
     }
-    Arc::new(RwLock::new(map))
+    Arc::new(map)
+}
+
+/// Mutate the `PeerStatus` for `peer_url` (or insert a default first). The
+/// closure runs against a cloned status that is then written back with
+/// `insert`. Concurrent mutations race like last-writer-wins, which is
+/// acceptable for observability counters.
+pub fn mutate_peer_status(
+    map: &PeerStatusMap,
+    peer_url: &str,
+    mutate: impl FnOnce(&mut PeerStatus),
+) {
+    let pinned = map.pin();
+    let mut status = pinned.get(peer_url).cloned().unwrap_or_default();
+    mutate(&mut status);
+    // Hit the common case where the key already exists as Arc<str> without
+    // allocating a new one; fall back to an owned Arc<str> on first write.
+    if let Some(existing_key) = pinned.get_key_value(peer_url).map(|(k, _)| Arc::clone(k)) {
+        pinned.insert(existing_key, status);
+    } else {
+        pinned.insert(Arc::<str>::from(peer_url), status);
+    }
 }
 
 #[cfg(test)]

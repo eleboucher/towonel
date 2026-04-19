@@ -45,15 +45,15 @@ pub fn new_nonce_cache() -> NonceCache {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenantPush {
-    pub tenant_id: String,     // 64-hex
-    pub pq_public_key: String, // base64url 1952B
+    pub tenant_id: TenantId,
+    pub pq_public_key: PqPublicKey,
     pub hostnames: Vec<String>,
     pub registered_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemovalPush {
-    pub tenant_id: String, // 64-hex
+    pub tenant_id: TenantId,
     pub removed_at_ms: u64,
 }
 
@@ -113,15 +113,7 @@ pub async fn push_tenant(
         Err(msg) => return unauthorized(msg),
     };
 
-    let tenant_id: TenantId = match req.tenant_id.parse() {
-        Ok(t) => t,
-        Err(e) => return invalid_request(format!("tenant_id: {e}")),
-    };
-    let pq_public_key: PqPublicKey = match req.pq_public_key.parse() {
-        Ok(p) => p,
-        Err(e) => return invalid_request(format!("pq_public_key: {e}")),
-    };
-    if TenantId::derive(&pq_public_key) != tenant_id {
+    if TenantId::derive(&req.pq_public_key) != req.tenant_id {
         return invalid_request("tenant_id does not equal sha256(pq_public_key)");
     }
     if req.hostnames.is_empty() {
@@ -134,14 +126,14 @@ pub async fn push_tenant(
     }
 
     let federated = FederatedTenant {
-        tenant_id,
-        pq_public_key,
-        hostnames: req.hostnames.clone(),
+        tenant_id: req.tenant_id,
+        pq_public_key: req.pq_public_key,
+        hostnames: req.hostnames,
         registered_at_ms: req.registered_at_ms,
     };
 
     {
-        let policy = state.policy.read().await;
+        let policy = state.policy.load();
         for h in &federated.hostnames {
             let lower = h.to_lowercase();
             for (other_id, patterns) in policy.iter_patterns() {
@@ -159,8 +151,7 @@ pub async fn push_tenant(
         return internal_error();
     }
 
-    {
-        let mut policy = state.policy.write().await;
+    state.policy_update(|policy| {
         if !policy.is_known_tenant(&federated.tenant_id) {
             policy.register_tenant(
                 &federated.tenant_id,
@@ -168,7 +159,7 @@ pub async fn push_tenant(
                 federated.hostnames.clone(),
             );
         }
-    }
+    });
 
     info!(
         peer = %hex::encode(peer),
@@ -189,20 +180,16 @@ pub async fn push_removal(
         Err(msg) => return unauthorized(msg),
     };
 
-    let tenant_id: TenantId = match req.tenant_id.parse() {
-        Ok(t) => t,
-        Err(e) => return invalid_request(format!("tenant_id: {e}")),
-    };
-
-    if let Err(e) = state.db.remove_tenant(&tenant_id, req.removed_at_ms).await {
+    if let Err(e) = state
+        .db
+        .remove_tenant(&req.tenant_id, req.removed_at_ms)
+        .await
+    {
         warn!(error = %e, "federation: failed to record removal");
         return internal_error();
     }
-    {
-        let mut policy = state.policy.write().await;
-        policy.remove(&tenant_id);
-    }
-    info!(peer = %hex::encode(peer), tenant = %tenant_id, "federation: removed tenant");
+    state.policy_update(|p| p.remove(&req.tenant_id));
+    info!(peer = %hex::encode(peer), tenant = %req.tenant_id, "federation: removed tenant");
     rebuild_and_broadcast(&state).await;
     ok()
 }
@@ -224,18 +211,19 @@ pub async fn push_entry(
         Err(e) => return invalid_request(format!("invalid CBOR body: {e}")),
     };
 
-    let policy = state.policy.read().await;
-    let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
-        return invalid_request("entry references an unknown tenant; push tenant first");
+    let payload = {
+        let policy = state.policy.load();
+        let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
+            return invalid_request("entry references an unknown tenant; push tenant first");
+        };
+        match entry.verify(pq_pubkey) {
+            Ok(p) if p.version != 1 => {
+                return invalid_request(format!("unsupported payload version {}", p.version));
+            }
+            Ok(p) => p,
+            Err(e) => return invalid_request(format!("signature: {e}")),
+        }
     };
-    let payload = match entry.verify(pq_pubkey) {
-        Ok(p) => p,
-        Err(e) => return invalid_request(format!("signature: {e}")),
-    };
-    if payload.version != 1 {
-        return invalid_request(format!("unsupported payload version {}", payload.version));
-    }
-    drop(policy);
 
     let sequence = payload.sequence;
     if let Err(e) = state.db.insert(&entry, sequence).await {
@@ -256,7 +244,7 @@ pub async fn push_entry(
 }
 
 async fn rebuild_and_broadcast(state: &Arc<super::api::AppState>) {
-    let policy_snapshot = state.policy.read().await.clone();
+    let policy_snapshot = state.policy.load_full();
     match state.db.get_all_entries().await {
         Ok(entries) => {
             let table = RouteTable::from_entries(&entries, &policy_snapshot);
@@ -371,40 +359,40 @@ async fn fetch_node_id(client: &reqwest::Client, health_url: &str) -> anyhow::Re
 }
 
 /// What kind of push succeeded. Used to bump the right per-peer counter.
+#[derive(Clone, Copy)]
 enum PushKind {
     Tenant,
     Removal,
     Entry,
 }
 
-#[allow(clippy::significant_drop_tightening)]
-async fn record_push_ok(state: &AppState, peer_url: &str, kind: PushKind) {
+fn record_push_ok(state: &AppState, peer_url: &str, kind: PushKind) {
     let now = now_ms();
     state.metrics.record_peer_push_success(peer_url, now);
-    let mut map = state.peer_statuses.write().await;
-    let entry = map.entry(peer_url.to_string()).or_default();
-    entry.last_push_ok_ms = Some(now);
-    entry.last_err_message = None;
-    match kind {
-        PushKind::Tenant => entry.tenants_pushed += 1,
-        PushKind::Removal => entry.removals_pushed += 1,
-        PushKind::Entry => entry.entries_pushed += 1,
-    }
+    super::peer_status::mutate_peer_status(&state.peer_statuses, peer_url, |entry| {
+        entry.last_push_ok_ms = Some(now);
+        entry.last_err_message = None;
+        match kind {
+            PushKind::Tenant => entry.tenants_pushed += 1,
+            PushKind::Removal => entry.removals_pushed += 1,
+            PushKind::Entry => entry.entries_pushed += 1,
+        }
+    });
 }
 
-#[allow(clippy::significant_drop_tightening)]
-async fn record_push_err(state: &AppState, peer_url: &str, err: &anyhow::Error) {
+fn record_push_err(state: &AppState, peer_url: &str, err: &anyhow::Error) {
     state.metrics.record_peer_push_failure(peer_url);
-    let mut map = state.peer_statuses.write().await;
-    let entry = map.entry(peer_url.to_string()).or_default();
-    entry.last_push_err_ms = Some(now_ms());
-    entry.set_err_message(&err.to_string());
+    let err_msg = err.to_string();
+    super::peer_status::mutate_peer_status(&state.peer_statuses, peer_url, |entry| {
+        entry.last_push_err_ms = Some(now_ms());
+        entry.set_err_message(&err_msg);
+    });
 }
 
 // Held read-guard covers the entire entries loop to avoid repeated lock/clone.
 // `pub` (not `pub(crate)`) so federation_tests can drive it without the
 // redundant_pub_crate lint firing on this privately-rooted module.
-#[allow(clippy::significant_drop_tightening)]
+#[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
 pub async fn push_round(
     client: &reqwest::Client,
     peer_url: &str,
@@ -424,13 +412,23 @@ pub async fn push_round(
         entry_seq: sent_seq,
     } = push_state;
 
+    // Push loops accumulate successfully-pushed items and flush them to
+    // the DB in one batch UPSERT per category at the end. If a later item
+    // in the loop fails, the already-pushed items in the batch are still
+    // persisted (via the early flush in the error branch) so the next
+    // push round doesn't redundantly re-send them. The peer endpoints are
+    // idempotent anyway, so a rare double-send on crash between HTTP and
+    // DB write is safe.
+
+    let mut pushed_tenants: Vec<TenantId> = Vec::new();
     for tenant in active_tenants {
         if sent_tenants.contains(&tenant.tenant_id) {
             continue;
         }
+        let tid = tenant.tenant_id;
         let body = TenantPush {
-            tenant_id: tenant.tenant_id.to_string(),
-            pq_public_key: tenant.pq_public_key.to_string(),
+            tenant_id: tenant.tenant_id,
+            pq_public_key: tenant.pq_public_key,
             hostnames: tenant.hostnames,
             registered_at_ms: 0, // not tracked locally; peer doesn't care
         };
@@ -443,22 +441,28 @@ pub async fn push_round(
         )
         .await
         {
-            record_push_err(state, peer_url, &e).await;
+            record_push_err(state, peer_url, &e);
+            state
+                .db
+                .mark_federation_tenants_pushed_batch(peer_node_id, &pushed_tenants)
+                .await?;
             return Err(e);
         }
-        record_push_ok(state, peer_url, PushKind::Tenant).await;
-        state
-            .db
-            .mark_federation_tenant_pushed(peer_node_id, &tenant.tenant_id)
-            .await?;
+        record_push_ok(state, peer_url, PushKind::Tenant);
+        pushed_tenants.push(tid);
     }
+    state
+        .db
+        .mark_federation_tenants_pushed_batch(peer_node_id, &pushed_tenants)
+        .await?;
 
+    let mut pushed_removals: Vec<TenantId> = Vec::new();
     for tid in pending_removals {
         if sent_removals.contains(&tid) {
             continue;
         }
         let body = RemovalPush {
-            tenant_id: tid.to_string(),
+            tenant_id: tid,
             removed_at_ms: 0,
         };
         if let Err(e) = post_signed(
@@ -470,17 +474,23 @@ pub async fn push_round(
         )
         .await
         {
-            record_push_err(state, peer_url, &e).await;
+            record_push_err(state, peer_url, &e);
+            state
+                .db
+                .mark_federation_removals_pushed_batch(peer_node_id, &pushed_removals)
+                .await?;
             return Err(e);
         }
-        record_push_ok(state, peer_url, PushKind::Removal).await;
-        state
-            .db
-            .mark_federation_removal_pushed(peer_node_id, &tid)
-            .await?;
+        record_push_ok(state, peer_url, PushKind::Removal);
+        pushed_removals.push(tid);
     }
+    state
+        .db
+        .mark_federation_removals_pushed_batch(peer_node_id, &pushed_removals)
+        .await?;
 
-    let policy = state.policy.read().await;
+    let mut pushed_entries: Vec<(TenantId, u64)> = Vec::new();
+    let policy = state.policy.load();
     for (entry, sequence) in entries_with_seq {
         let last_sent = sent_seq.get(&entry.tenant_id).copied().unwrap_or(0);
         if sequence <= last_sent {
@@ -491,20 +501,27 @@ pub async fn push_round(
         if policy.pq_public_key(&entry.tenant_id).is_none() {
             continue;
         }
+        let tid = entry.tenant_id;
         let mut body = Vec::new();
         ciborium::into_writer(&entry, &mut body)?;
         if let Err(e) =
             post_signed_cbor(client, peer_url, "/v1/federation/entries", secret_key, body).await
         {
-            record_push_err(state, peer_url, &e).await;
+            record_push_err(state, peer_url, &e);
+            state
+                .db
+                .mark_federation_entries_pushed_batch(peer_node_id, &pushed_entries)
+                .await?;
             return Err(e);
         }
-        record_push_ok(state, peer_url, PushKind::Entry).await;
-        state
-            .db
-            .mark_federation_entry_pushed(peer_node_id, &entry.tenant_id, sequence)
-            .await?;
+        record_push_ok(state, peer_url, PushKind::Entry);
+        pushed_entries.push((tid, sequence));
     }
+    state
+        .db
+        .mark_federation_entries_pushed_batch(peer_node_id, &pushed_entries)
+        .await?;
+
     Ok(())
 }
 
@@ -567,16 +584,16 @@ pub async fn push_tenant_sync(state: &AppState, body: &TenantPush) {
         );
         match tokio::time::timeout(SYNC_PUSH_TIMEOUT, push).await {
             Ok(Ok(())) => {
-                record_push_ok(state, peer_url, PushKind::Tenant).await;
+                record_push_ok(state, peer_url, PushKind::Tenant);
                 info!(peer = %peer_url, tenant = %body.tenant_id, "federation: sync-pushed tenant");
             }
             Ok(Err(e)) => {
-                record_push_err(state, peer_url, &e).await;
+                record_push_err(state, peer_url, &e);
                 warn!(peer = %peer_url, error = %e, "federation: sync tenant push failed");
             }
             Err(_) => {
                 let err = anyhow::anyhow!("sync tenant push timed out");
-                record_push_err(state, peer_url, &err).await;
+                record_push_err(state, peer_url, &err);
                 warn!(peer = %peer_url, "federation: sync tenant push timed out");
             }
         }

@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let identity = HubIdentity {
-                node_id: node_id.to_string(),
+                node_id,
                 edge_node_id: Some(edge_node_id),
                 edge_addresses: public_addresses,
                 software_version: SOFTWARE_VERSION,
@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         (true, false) => {
             let (route_tx, _) = broadcast::channel::<RouteTable>(64);
             let identity = HubIdentity {
-                node_id: node_id.to_string(),
+                node_id,
                 edge_node_id: None,
                 edge_addresses: Vec::new(),
                 software_version: SOFTWARE_VERSION,
@@ -207,6 +207,7 @@ fn build_hub_params(
     let peers = config.hub.peers.clone();
     Ok(hub::HubParams {
         listen_addr: config.hub.listen_addr.clone(),
+        health_listen_addr: config.hub.health_listen_addr.clone(),
         database: config.hub.database.clone(),
         route_tx,
         static_policy: policy,
@@ -268,10 +269,15 @@ async fn build_edge(
     secret_key: iroh::SecretKey,
     tenants: &[config::TenantEntry],
     edge_config: &config::EdgeConfig,
-) -> anyhow::Result<(Arc<edge::router::Router>, edge::Edge, String, Vec<String>)> {
+) -> anyhow::Result<(
+    Arc<edge::router::Router>,
+    edge::Edge,
+    iroh::EndpointId,
+    Vec<String>,
+)> {
     let ep = Endpoint::builder(N0).secret_key(secret_key).bind().await?;
 
-    let edge_node_id = ep.id().to_string();
+    let edge_node_id = ep.id();
     let edge_addresses: Vec<String> = ep
         .bound_sockets()
         .iter()

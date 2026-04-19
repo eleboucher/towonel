@@ -115,5 +115,5 @@ struct RedeemRequest {
 struct RedeemResponse {
     status: String,
     name: String,
-    hub_node_id: String,
+    hub_node_id: iroh::EndpointId,
 }

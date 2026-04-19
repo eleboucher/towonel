@@ -150,11 +150,13 @@ async fn create_invite_hostname_conflict_rejected() {
 
     // Pre-seed the policy with a tenant that already owns the hostname.
     let existing = TenantKeypair::generate();
-    hub.state.policy.write().await.register_tenant(
-        &existing.id(),
-        existing.public_key().clone(),
-        ["shared.test".to_string()],
-    );
+    hub.state.policy_update(|p| {
+        p.register_tenant(
+            &existing.id(),
+            existing.public_key().clone(),
+            ["shared.test".to_string()],
+        );
+    });
 
     let (status, body) = post_json(
         &client,
@@ -354,7 +356,7 @@ async fn delete_tenant_drops_from_policy_and_records_removal() {
     // v2: creating the invite registers the tenant immediately.
     let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
     let tenant = tenant_from_token(&token);
-    assert!(hub.state.policy.read().await.is_known_tenant(&tenant.id()));
+    assert!(hub.state.policy.load().is_known_tenant(&tenant.id()));
 
     // Remove.
     let (status, body) = delete_json(
@@ -367,7 +369,7 @@ async fn delete_tenant_drops_from_policy_and_records_removal() {
     assert_eq!(body["status"], "removed");
 
     // In-memory policy evicted.
-    assert!(!hub.state.policy.read().await.is_known_tenant(&tenant.id()));
+    assert!(!hub.state.policy.load().is_known_tenant(&tenant.id()));
 
     // Persistent removal recorded (so a hub restart stays consistent).
     let removals = hub.state.db.list_tenant_removals().await.unwrap();
@@ -681,9 +683,6 @@ async fn prune_stale_liveness_drops_agent_from_route_table() {
 
 #[tokio::test]
 async fn heartbeat_bumps_liveness_for_known_tenant() {
-    use ed25519_dalek::Signer;
-    use sha2::Digest;
-
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
 
@@ -694,14 +693,11 @@ async fn heartbeat_bumps_liveness_for_known_tenant() {
     // Serialize the body first; the signature must cover it (v2 body-binding).
     let body_bytes = encode_heartbeat(tenant.id(), agent.id());
 
-    let ts_ms = towonel_common::time::now_ms();
-    let node_id_hex = hex::encode(agent.signing_key().verifying_key().as_bytes());
-    let body_hex = hex::encode(sha2::Sha256::digest(&body_bytes));
-    let message = format!("towonel/agent-heartbeat/v1/{node_id_hex}/{ts_ms}/{body_hex}");
-    let sig = agent.signing_key().sign(message.as_bytes());
-    let auth = format!(
-        "Signature {node_id_hex}.{ts_ms}.{}",
-        B64.encode(sig.to_bytes())
+    let auth = towonel_common::auth::sign_auth_header(
+        agent.signing_key(),
+        "towonel/agent-heartbeat/v1",
+        towonel_common::time::now_ms(),
+        &body_bytes,
     );
 
     let resp = client

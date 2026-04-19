@@ -71,7 +71,7 @@ pub(super) async fn post_invite(
 
     let candidates_lower: Vec<String> = req.hostnames.iter().map(|h| h.to_lowercase()).collect();
     {
-        let policy = state.policy.read().await;
+        let policy = state.policy.load();
         for (h_lower, h_orig) in candidates_lower.iter().zip(req.hostnames.iter()) {
             for (tenant, patterns) in policy.iter_patterns() {
                 if patterns.contains(h_lower) {
@@ -123,14 +123,13 @@ pub(super) async fn post_invite(
         return internal_error();
     }
 
-    {
-        let mut policy = state.policy.write().await;
+    state.policy_update(|policy| {
         policy.register_tenant(
             &tenant_id,
             pq_public_key.clone(),
             req.hostnames.iter().cloned(),
         );
-    }
+    });
 
     maybe_sync_push(&state, &tenant_id, &pq_public_key, &req.hostnames).await;
 
@@ -205,7 +204,7 @@ pub(super) async fn delete_invite(
                 warn!(error = %e, tenant = %tid, "failed to persist tenant removal on invite revoke");
                 return internal_error();
             }
-            state.policy.write().await.remove(&tid);
+            state.policy_update(|p| p.remove(&tid));
             json_ok(serde_json::json!({"status": "revoked"}))
         }
         Ok(false) => not_found("invite is already revoked or does not exist"),
@@ -229,8 +228,8 @@ async fn maybe_sync_push(
         return;
     }
     let body = TenantPush {
-        tenant_id: tenant_id.to_string(),
-        pq_public_key: pq_public_key.to_string(),
+        tenant_id: *tenant_id,
+        pq_public_key: pq_public_key.clone(),
         hostnames: hostnames.to_vec(),
         registered_at_ms: now_ms(),
     };
