@@ -23,6 +23,7 @@ use tracing::{info, warn};
 use crate::hub_client::{
     check_response, fetch_latest_sequence, is_sequence_conflict, submit_entry,
 };
+use crate::metrics::{self, AgentMetrics};
 
 /// Env var that carries the `tt_inv_2_...` token. Presence of this var is
 /// how we detect "run in stateless mode".
@@ -251,14 +252,18 @@ async fn fetch_existing_hostnames(ctx: &BootstrapContext) -> anyhow::Result<Hash
 /// Spawn the heartbeat task. Returns the `JoinHandle` so the caller can
 /// abort on shutdown (not strictly necessary -- the hub reaps stale
 /// heartbeats -- but keeps shutdown logs clean).
-pub fn spawn_heartbeat(ctx: Arc<BootstrapContext>) -> JoinHandle<()> {
+pub fn spawn_heartbeat(ctx: Arc<BootstrapContext>, metrics: Arc<AgentMetrics>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tick.tick().await; // first tick is immediate -- send one right away
         loop {
-            if let Err(e) = send_heartbeat(&ctx).await {
-                warn!(error = %e, "heartbeat failed; continuing");
+            match send_heartbeat(&ctx).await {
+                Ok(()) => metrics.record_heartbeat(metrics::heartbeat_outcome::OK),
+                Err(e) => {
+                    metrics.record_heartbeat(metrics::heartbeat_outcome::ERROR);
+                    warn!(error = %e, "heartbeat failed; continuing");
+                }
             }
             tick.tick().await;
         }

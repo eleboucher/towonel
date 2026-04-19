@@ -1,5 +1,6 @@
 mod config;
 mod hub_client;
+mod metrics;
 mod publish_tls;
 mod stateless;
 mod tunnel;
@@ -10,11 +11,17 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::Router;
+use axum::extract::State;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
 use iroh::{Endpoint, endpoint::presets::N0};
+use prometheus_client::encoding::text::encode;
 use towonel_common::protocol::ALPN_TUNNEL;
 use tracing::{error, info, warn};
+
+use crate::metrics::AgentMetrics;
 
 #[derive(Parser)]
 #[command(
@@ -41,8 +48,8 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     allow_any_edge: bool,
 
-    /// Bind a minimal HTTP server on this port with `GET /healthz`.
-    /// Useful for k8s liveness/readiness probes.
+    /// Bind a minimal HTTP server on this port with `GET /healthz` and
+    /// `GET /metrics`. Useful for k8s liveness/readiness probes.
     #[arg(long)]
     health_port: Option<u16>,
 }
@@ -70,6 +77,9 @@ async fn main() -> anyhow::Result<()> {
 
 #[allow(clippy::large_futures)]
 async fn run_agent(cli: Cli) -> anyhow::Result<()> {
+    let metrics = Arc::new(AgentMetrics::new());
+    metrics.set_info(env!("CARGO_PKG_VERSION"));
+
     let token = stateless::token_from_env()?;
     let ctx = Arc::new(stateless::bootstrap(&token).await?);
 
@@ -122,7 +132,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
 
     stateless::register(&ctx).await?;
     stateless::publish_hostnames(&ctx).await?;
-    let heartbeat = stateless::spawn_heartbeat(ctx.clone());
+    let heartbeat = stateless::spawn_heartbeat(ctx.clone(), metrics.clone());
 
     if !agent_config.services.is_empty() {
         #[allow(clippy::large_futures)]
@@ -138,10 +148,10 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
 
     let health_handle = cli
         .health_port
-        .map(|port| tokio::spawn(serve_healthz(port)));
+        .map(|port| tokio::spawn(serve_http(port, metrics.clone())));
 
     tokio::select! {
-        res = tunnel::run(&endpoint, service_map, trusted_edges, allow_any) => {
+        res = tunnel::run(&endpoint, service_map, trusted_edges, allow_any, metrics.clone()) => {
             if let Err(e) = res {
                 error!("tunnel error: {e}");
             }
@@ -158,21 +168,43 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Minimal HTTP server for health probes.
-async fn serve_healthz(port: u16) {
-    let app = Router::new().route("/healthz", get(|| async { "ok" }));
+async fn serve_http(port: u16, metrics: Arc<AgentMetrics>) {
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/metrics", get(metrics_handler))
+        .with_state(metrics);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            error!(port, error = %e, "failed to bind healthz listener");
+            error!(port, error = %e, "failed to bind health listener");
             return;
         }
     };
-    info!(port, "healthz listening");
+    info!(port, "health + metrics listening");
     if let Err(e) = axum::serve(listener, app).await {
-        error!(error = %e, "healthz server error");
+        error!(error = %e, "health server error");
     }
+}
+
+async fn metrics_handler(State(metrics): State<Arc<AgentMetrics>>) -> Response {
+    let mut body = String::new();
+    if let Err(e) = encode(&mut body, metrics.registry()) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("metrics encoding failed: {e}"),
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 /// Look up the agent config path: explicit --config, else ./agent.toml, else None.
