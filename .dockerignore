@@ -1,8 +1,15 @@
 target/
 .git/
+.github/
 .forgejo/
+.vscode/
+.idea/
+.env
+.env.*
 *.key
+*.pem
 hub.db
 *.sqlite
 *.sqlite-journal
 dist/
+node_modules/
