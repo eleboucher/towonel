@@ -127,7 +127,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m])) / clamp_min(sum(rate(towonel_agent_streams_accepted_total{instance=~\"$instance\"}[5m])), 1)",
+          "expr": "(sum(rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m])) / sum(rate(towonel_agent_streams_accepted_total{instance=~\"$instance\"}[5m]))) or on() vector(0)",
           "legendFormat": "err ratio"
         }
       ]
@@ -165,7 +165,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_agent_heartbeats_total{instance=~\"$instance\",outcome=\"ok\"}[5m])) / clamp_min(sum(rate(towonel_agent_heartbeats_total{instance=~\"$instance\"}[5m])), 1)",
+          "expr": "(sum(rate(towonel_agent_heartbeats_total{instance=~\"$instance\",outcome=\"ok\"}[5m])) / sum(rate(towonel_agent_heartbeats_total{instance=~\"$instance\"}[5m]))) or on() vector(1)",
           "legendFormat": "ok"
         }
       ]
