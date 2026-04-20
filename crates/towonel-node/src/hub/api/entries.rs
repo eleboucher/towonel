@@ -13,8 +13,8 @@ use towonel_common::time::now_ms;
 use super::super::metrics::reject_reason;
 use super::{
     AppState, PROTOCOL_VERSION, cbor_response, hostname_not_owned, internal_error, invalid_request,
-    invalid_signature, json_ok, rebuild_and_broadcast_routes, sequence_conflict,
-    tenant_not_allowed, unsupported_version,
+    invalid_signature, json_ok, load_trusted_edges, rebuild_and_broadcast_routes,
+    sequence_conflict, tenant_not_allowed, unsupported_version,
 };
 
 #[derive(Serialize)]
@@ -175,16 +175,30 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
         edges: Vec<EdgeEntry<'a>>,
     }
 
-    let edges = state
-        .identity
-        .edge_node_id
-        .map_or_else(Vec::new, |node_id| {
-            vec![EdgeEntry {
+    let node_ids = match load_trusted_edges(&state).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(error = %e, "failed to list edges");
+            return internal_error();
+        }
+    };
+
+    let empty: &[String] = &[];
+    let edges = node_ids
+        .into_iter()
+        .map(|node_id| {
+            let addresses = if state.identity.edge_node_id == Some(node_id) {
+                state.identity.edge_addresses.as_slice()
+            } else {
+                empty
+            };
+            EdgeEntry {
                 node_id,
                 healthy: true,
-                addresses: &state.identity.edge_addresses,
-            }]
-        });
+                addresses,
+            }
+        })
+        .collect();
 
     json_ok(ListEdgesResponse { edges })
 }

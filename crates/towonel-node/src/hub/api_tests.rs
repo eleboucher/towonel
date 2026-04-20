@@ -542,6 +542,66 @@ async fn bootstrap_returns_tenant_info_idempotent() {
 }
 
 #[tokio::test]
+async fn bootstrap_sources_trusted_edges_from_edge_invites() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/edge-invites"),
+        json!({ "name": "edge-1" }),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200, "create edge invite: {body}");
+    let edge_node_id = body["edge_node_id"]
+        .as_str()
+        .expect("edge_node_id")
+        .to_string();
+    let edge_invite_id = body["invite_id"].as_str().expect("invite_id").to_string();
+
+    let token = create_invite(&hub, &client, "alice", &["a.test"]).await;
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/bootstrap"),
+        json!({
+            "invite_id": B64.encode(token.invite_id),
+            "invite_secret": B64.encode(token.invite_secret),
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "bootstrap: {body}");
+    let trusted = body["trusted_edges"]
+        .as_array()
+        .expect("trusted_edges array");
+    assert_eq!(trusted.len(), 1, "expected 1 trusted edge, got {trusted:?}");
+    assert_eq!(trusted[0].as_str().expect("hex"), edge_node_id);
+    assert_eq!(body["edge_node_id"].as_str().expect("hex"), edge_node_id);
+
+    let (status, body) = delete_json(
+        &client,
+        &hub.url(&format!("/v1/edge-invites/{edge_invite_id}")),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200, "revoke: {body}");
+
+    let (_, body) = post_json(
+        &client,
+        &hub.url("/v1/bootstrap"),
+        json!({
+            "invite_id": B64.encode(token.invite_id),
+            "invite_secret": B64.encode(token.invite_secret),
+        }),
+        None,
+    )
+    .await;
+    assert!(body["trusted_edges"].as_array().expect("array").is_empty());
+    assert!(body["edge_node_id"].is_null());
+}
+
+#[tokio::test]
 async fn bootstrap_rejects_wrong_secret() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();

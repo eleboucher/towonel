@@ -29,8 +29,8 @@ use crate::metrics::{self, AgentMetrics};
 /// how we detect "run in stateless mode".
 pub const INVITE_TOKEN_ENV: &str = "TOWONEL_INVITE_TOKEN";
 
-/// Env var override for trusted edges; when set, overrides the list returned
-/// by `/v1/bootstrap`. Primarily a local-testing escape hatch.
+/// Overrides the hub-returned allowlist. Escape hatch for local testing
+/// or pinning a specific edge during an incident.
 pub const TRUSTED_EDGES_ENV: &str = "TOWONEL_AGENT_TRUSTED_EDGES";
 
 /// Heartbeats every 20s; the hub considers an agent live for 90s.
@@ -102,10 +102,12 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
     }
 
     let mut trusted_edges = parse_trusted_edges_env();
-    if let Some(edge) = resp.edge_node_id
-        && trusted_edges.is_empty()
-    {
-        trusted_edges.insert(edge);
+    if trusted_edges.is_empty() {
+        if resp.trusted_edges.is_empty() {
+            trusted_edges.extend(resp.edge_node_id);
+        } else {
+            trusted_edges.extend(resp.trusted_edges.iter().copied());
+        }
     }
 
     info!(
@@ -325,6 +327,9 @@ struct BootstrapResponse {
     tenant_id: String,
     #[serde(default)]
     hostnames: Vec<String>,
+    /// Absent on older hubs; default keeps us compatible.
+    #[serde(default)]
+    trusted_edges: Vec<EndpointId>,
     edge_node_id: Option<EndpointId>,
 }
 
