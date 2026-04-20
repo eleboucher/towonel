@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
 use towonel_common::identity::{TenantId, TenantKeypair};
-use towonel_common::tunnel::write_hostname_header;
+use towonel_common::tunnel::{ClientAddrs, write_handshake};
 
 /// Fixed test-vector seed. Changing this is a breaking change to the
 /// fixtures — use `UPDATE_SNAPSHOTS=1` to regenerate.
@@ -112,7 +112,11 @@ fn signed_entry_cbor_fixture() {
 #[tokio::test]
 async fn tunnel_header_fixture() {
     let mut buf = Vec::new();
-    write_hostname_header(&mut buf, FIXED_HOSTNAME)
+    let addrs = ClientAddrs {
+        src: "203.0.113.7:54321".parse().unwrap(),
+        dst: "192.0.2.1:443".parse().unwrap(),
+    };
+    write_handshake(&mut buf, FIXED_HOSTNAME, addrs)
         .await
         .unwrap();
     assert_or_update("tunnel_header.bin", &buf);

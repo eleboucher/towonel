@@ -79,9 +79,6 @@ struct RedeemRequest {
 }
 
 #[derive(Deserialize)]
-#[allow(dead_code)]
 struct RedeemResponse {
-    status: String,
     name: String,
-    hub_node_id: iroh::EndpointId,
 }

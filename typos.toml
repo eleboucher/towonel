@@ -11,3 +11,14 @@ extend-exclude = [
 check-filename = true
 
 [default.extend-identifiers]
+
+# Binary fixtures — random bytes trip the English spell check. Use `[type]`
+# (not `files.extend-exclude`) so it applies even when lefthook passes the
+# files as explicit CLI args.
+[type.cbor]
+extend-glob = ["*.cbor"]
+check-file = false
+
+[type.bin]
+extend-glob = ["*.bin"]
+check-file = false

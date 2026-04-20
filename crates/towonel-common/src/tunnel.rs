@@ -1,5 +1,6 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
+use ppp::v2;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 /// Buffer size for `tokio::io::copy_buf` on agent↔edge bidirectional pipes.
@@ -46,81 +47,6 @@ where
     }
 }
 
-/// RFC 1035 maximum domain name length.
-const MAX_HOSTNAME_LEN: u16 = 253;
-
-const FAMILY_V4: u8 = 4;
-const FAMILY_V6: u8 = 6;
-
-/// Writes a hostname header as `[u16 BE length][hostname bytes]`.
-pub async fn write_hostname_header(
-    stream: &mut (impl AsyncWrite + Unpin),
-    hostname: &str,
-) -> std::io::Result<()> {
-    let len = encoded_hostname_len(hostname)?;
-    let mut buf = Vec::with_capacity(2 + hostname.len());
-    buf.extend_from_slice(&len.to_be_bytes());
-    buf.extend_from_slice(hostname.as_bytes());
-    stream.write_all(&buf).await
-}
-
-fn encoded_hostname_len(hostname: &str) -> std::io::Result<u16> {
-    let len: u16 = hostname
-        .len()
-        .try_into()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "hostname too long"))?;
-    if len > MAX_HOSTNAME_LEN {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("hostname length {len} exceeds maximum {MAX_HOSTNAME_LEN}"),
-        ));
-    }
-    Ok(len)
-}
-
-/// Writes the hostname header and the client-address frame as a single write
-/// so the peer receives the entire preamble in one STREAM frame and unblocks
-/// its readers with a single wakeup.
-pub async fn write_handshake(
-    stream: &mut (impl AsyncWrite + Unpin),
-    hostname: &str,
-    addrs: ClientAddrs,
-) -> std::io::Result<()> {
-    let len = encoded_hostname_len(hostname)?;
-    let mut buf = Vec::with_capacity(2 + hostname.len() + 37);
-    buf.extend_from_slice(&len.to_be_bytes());
-    buf.extend_from_slice(hostname.as_bytes());
-    encode_client_addrs_into(&mut buf, addrs)?;
-    stream.write_all(&buf).await
-}
-
-/// Reads a hostname header: `[u16 BE length]` then that many bytes of UTF-8.
-///
-/// Returns an error if the length exceeds the RFC 1035 maximum (253 bytes) or
-/// the bytes are not valid UTF-8.
-pub async fn read_hostname_header(
-    stream: &mut (impl AsyncRead + Unpin),
-) -> std::io::Result<String> {
-    let len = stream.read_u16().await?;
-
-    if len > MAX_HOSTNAME_LEN {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("hostname length {len} exceeds maximum {MAX_HOSTNAME_LEN}"),
-        ));
-    }
-
-    let mut buf = vec![0u8; len as usize];
-    stream.read_exact(&mut buf).await?;
-
-    String::from_utf8(buf).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("hostname is not valid UTF-8: {e}"),
-        )
-    })
-}
-
 /// Original client `SocketAddr` and the edge-facing destination `SocketAddr`.
 /// Both are forwarded to the agent so it can emit a PROXY v2 header to the
 /// origin.
@@ -130,72 +56,118 @@ pub struct ClientAddrs {
     pub dst: SocketAddr,
 }
 
-/// Writes the client-address frame.
-///
-/// Layout: `[u8 family (4|6)] [addr bytes] [u16 BE port]` twice, once for
-/// src and once for dst. Src and dst must share the same family; dual-stack
-/// v4-mapped-v6 addresses are normalized to v4 before writing.
-pub async fn write_client_addrs(
+/// Fixed PROXY v2 header length: 12-byte signature + 4-byte version/fam/len.
+const V2_PREAMBLE_LEN: usize = 16;
+
+/// Write the edge→agent preamble as a PROXY v2 header whose AUTHORITY TLV
+/// carries the SNI hostname. The agent reads this once and extracts both
+/// client addrs and hostname.
+pub async fn write_handshake(
     stream: &mut (impl AsyncWrite + Unpin),
+    hostname: &str,
     addrs: ClientAddrs,
 ) -> std::io::Result<()> {
-    let mut buf = Vec::with_capacity(37);
-    encode_client_addrs_into(&mut buf, addrs)?;
-    stream.write_all(&buf).await
+    let bytes = encode_proxy_v2_with_authority(hostname, addrs)?;
+    stream.write_all(&bytes).await
 }
 
-fn encode_client_addrs_into(buf: &mut Vec<u8>, addrs: ClientAddrs) -> std::io::Result<()> {
-    let src = unmap_v4(addrs.src);
-    let dst = unmap_v4(addrs.dst);
-    match (src.ip(), dst.ip()) {
-        (IpAddr::V4(s), IpAddr::V4(d)) => {
-            buf.push(FAMILY_V4);
-            buf.extend_from_slice(&s.octets());
-            buf.extend_from_slice(&src.port().to_be_bytes());
-            buf.extend_from_slice(&d.octets());
-            buf.extend_from_slice(&dst.port().to_be_bytes());
-        }
-        (IpAddr::V6(s), IpAddr::V6(d)) => {
-            buf.push(FAMILY_V6);
-            buf.extend_from_slice(&s.octets());
-            buf.extend_from_slice(&src.port().to_be_bytes());
-            buf.extend_from_slice(&d.octets());
-            buf.extend_from_slice(&dst.port().to_be_bytes());
-        }
-        _ => {
+fn encode_proxy_v2_with_authority(hostname: &str, addrs: ClientAddrs) -> std::io::Result<Vec<u8>> {
+    let (src, dst) = unmap_to_matching_family(addrs.src, addrs.dst).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "src and dst address families differ",
+        )
+    })?;
+    v2::Builder::with_addresses(
+        v2::Version::Two | v2::Command::Proxy,
+        v2::Protocol::Stream,
+        (src, dst),
+    )
+    .write_tlv(v2::Type::Authority, hostname.as_bytes())
+    .and_then(ppp::v2::Builder::build)
+    .map_err(std::io::Error::other)
+}
+
+/// Read the edge→agent PROXY v2 preamble and return (hostname, addrs).
+pub async fn read_handshake(
+    stream: &mut (impl AsyncRead + Unpin),
+) -> std::io::Result<(String, ClientAddrs)> {
+    let mut preamble = [0u8; V2_PREAMBLE_LEN];
+    stream.read_exact(&mut preamble).await?;
+    let body_len = u16::from_be_bytes([preamble[14], preamble[15]]) as usize;
+    let mut all = preamble.to_vec();
+    all.resize(V2_PREAMBLE_LEN + body_len, 0);
+    stream.read_exact(&mut all[V2_PREAMBLE_LEN..]).await?;
+
+    let header = v2::Header::try_from(all.as_slice()).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid PROXY v2 header: {e}"),
+        )
+    })?;
+
+    let addrs = match header.addresses {
+        v2::Addresses::IPv4(v4) => ClientAddrs {
+            src: SocketAddr::V4(SocketAddrV4::new(v4.source_address, v4.source_port)),
+            dst: SocketAddr::V4(SocketAddrV4::new(
+                v4.destination_address,
+                v4.destination_port,
+            )),
+        },
+        v2::Addresses::IPv6(v6) => ClientAddrs {
+            src: SocketAddr::V6(SocketAddrV6::new(v6.source_address, v6.source_port, 0, 0)),
+            dst: SocketAddr::V6(SocketAddrV6::new(
+                v6.destination_address,
+                v6.destination_port,
+                0,
+                0,
+            )),
+        },
+        other => {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "src and dst address families differ",
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported PROXY v2 address family: {other:?}"),
             ));
         }
+    };
+
+    let authority_code = u8::from(v2::Type::Authority);
+    for tlv in header.tlvs() {
+        let tlv = tlv.map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid PROXY v2 TLV: {e}"),
+            )
+        })?;
+        if tlv.kind == authority_code {
+            let hostname = std::str::from_utf8(&tlv.value)
+                .map_err(|e| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("hostname is not valid UTF-8: {e}"),
+                    )
+                })?
+                .to_string();
+            return Ok((hostname, addrs));
+        }
     }
-    Ok(())
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "PROXY v2 preamble missing AUTHORITY TLV (hostname)",
+    ))
 }
 
-pub async fn read_client_addrs(
-    stream: &mut (impl AsyncRead + Unpin),
-) -> std::io::Result<ClientAddrs> {
-    let family = stream.read_u8().await?;
-    match family {
-        FAMILY_V4 => {
-            let src = read_sock4(stream).await?;
-            let dst = read_sock4(stream).await?;
-            Ok(ClientAddrs { src, dst })
-        }
-        FAMILY_V6 => {
-            let src = read_sock6(stream).await?;
-            let dst = read_sock6(stream).await?;
-            Ok(ClientAddrs { src, dst })
-        }
-        other => Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("unknown address family: {other}"),
-        )),
+/// Dual-stack sockets surface IPv4 peers as `::ffff:a.b.c.d`. Unmap src and
+/// dst back to native v4 so `(src, dst)` share a family before encoding.
+fn unmap_to_matching_family(src: SocketAddr, dst: SocketAddr) -> Option<(SocketAddr, SocketAddr)> {
+    let src = unmap_v4(src);
+    let dst = unmap_v4(dst);
+    match (src.ip(), dst.ip()) {
+        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_)) => Some((src, dst)),
+        _ => None,
     }
 }
 
-/// Dual-stack sockets surface IPv4 peers as `::ffff:a.b.c.d`. Unmap those
-/// back to native v4 so the on-wire family matches the caller's intent.
 fn unmap_v4(addr: SocketAddr) -> SocketAddr {
     match addr {
         SocketAddr::V6(v6) => v6
@@ -206,65 +178,12 @@ fn unmap_v4(addr: SocketAddr) -> SocketAddr {
     }
 }
 
-async fn read_sock4(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<SocketAddr> {
-    let mut octets = [0u8; 4];
-    stream.read_exact(&mut octets).await?;
-    let port = stream.read_u16().await?;
-    Ok(SocketAddr::new(IpAddr::V4(Ipv4Addr::from(octets)), port))
-}
-
-async fn read_sock6(stream: &mut (impl AsyncRead + Unpin)) -> std::io::Result<SocketAddr> {
-    let mut octets = [0u8; 16];
-    stream.read_exact(&mut octets).await?;
-    let port = stream.read_u16().await?;
-    Ok(SocketAddr::new(IpAddr::V6(Ipv6Addr::from(octets)), port))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncWriteExt;
 
     #[tokio::test]
-    async fn roundtrip_hostname_header() {
-        let (mut client, mut server) = tokio::io::duplex(1024);
-
-        let hostname = "app.example.com";
-        write_hostname_header(&mut client, hostname).await.unwrap();
-        drop(client);
-
-        let result = read_hostname_header(&mut server).await.unwrap();
-        assert_eq!(result, hostname);
-    }
-
-    #[tokio::test]
-    async fn rejects_oversized_hostname() {
-        let (mut client, mut server) = tokio::io::duplex(1024);
-
-        client.write_all(&[0xFF, 0xFF]).await.unwrap();
-        drop(client);
-
-        let err = read_hostname_header(&mut server).await.unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(err.to_string().contains("exceeds maximum"));
-    }
-
-    #[tokio::test]
-    async fn roundtrip_client_addrs_v4() {
-        let (mut client, mut server) = tokio::io::duplex(1024);
-        let addrs = ClientAddrs {
-            src: "203.0.113.7:54321".parse().unwrap(),
-            dst: "192.0.2.1:443".parse().unwrap(),
-        };
-
-        write_client_addrs(&mut client, addrs).await.unwrap();
-        drop(client);
-
-        assert_eq!(read_client_addrs(&mut server).await.unwrap(), addrs);
-    }
-
-    #[tokio::test]
-    async fn roundtrip_handshake() {
+    async fn roundtrip_handshake_v4() {
         let (mut client, mut server) = tokio::io::duplex(1024);
         let hostname = "app.example.com";
         let addrs = ClientAddrs {
@@ -275,22 +194,26 @@ mod tests {
         write_handshake(&mut client, hostname, addrs).await.unwrap();
         drop(client);
 
-        assert_eq!(read_hostname_header(&mut server).await.unwrap(), hostname);
-        assert_eq!(read_client_addrs(&mut server).await.unwrap(), addrs);
+        let (got_hostname, got_addrs) = read_handshake(&mut server).await.unwrap();
+        assert_eq!(got_hostname, hostname);
+        assert_eq!(got_addrs, addrs);
     }
 
     #[tokio::test]
-    async fn roundtrip_client_addrs_v6() {
+    async fn roundtrip_handshake_v6() {
         let (mut client, mut server) = tokio::io::duplex(1024);
+        let hostname = "app.example.com";
         let addrs = ClientAddrs {
             src: "[2001:db8::1]:54321".parse().unwrap(),
             dst: "[2001:db8::2]:443".parse().unwrap(),
         };
 
-        write_client_addrs(&mut client, addrs).await.unwrap();
+        write_handshake(&mut client, hostname, addrs).await.unwrap();
         drop(client);
 
-        assert_eq!(read_client_addrs(&mut server).await.unwrap(), addrs);
+        let (got_hostname, got_addrs) = read_handshake(&mut server).await.unwrap();
+        assert_eq!(got_hostname, hostname);
+        assert_eq!(got_addrs, addrs);
     }
 
     #[tokio::test]
@@ -301,10 +224,10 @@ mod tests {
             dst: "192.0.2.1:443".parse().unwrap(),
         };
 
-        write_client_addrs(&mut client, addrs).await.unwrap();
+        write_handshake(&mut client, "a.b", addrs).await.unwrap();
         drop(client);
 
-        let got = read_client_addrs(&mut server).await.unwrap();
+        let (_, got) = read_handshake(&mut server).await.unwrap();
         assert_eq!(got.src, "203.0.113.7:54321".parse::<SocketAddr>().unwrap());
         assert_eq!(got.dst, "192.0.2.1:443".parse::<SocketAddr>().unwrap());
     }
@@ -316,7 +239,7 @@ mod tests {
             src: "203.0.113.7:54321".parse().unwrap(),
             dst: "[2001:db8::2]:443".parse().unwrap(),
         };
-        let err = write_client_addrs(&mut buf, addrs).await.unwrap_err();
+        let err = write_handshake(&mut buf, "a.b", addrs).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

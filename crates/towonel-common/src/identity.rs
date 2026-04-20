@@ -298,9 +298,6 @@ pub fn verify_pq_signature(
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AgentId(VerifyingKey);
 
-/// A node's public identity, aliased to iroh's `EndpointId`.
-pub type NodeId = iroh::EndpointId;
-
 impl AgentId {
     #[must_use]
     pub const fn from_key(key: VerifyingKey) -> Self {
@@ -472,12 +469,6 @@ fn write_key_file_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Load an iroh `SecretKey` from a file, or generate and save one.
 pub fn load_or_generate_secret_key(path: &Path) -> anyhow::Result<iroh::SecretKey> {
     load_or_generate_key_bytes(path).map(iroh::SecretKey::from)
-}
-
-/// Load an agent `SigningKey` from a file, or generate and save one. Used
-/// for iroh transport. Tenants use [`load_or_generate_tenant_keypair`].
-pub fn load_or_generate_signing_key(path: &Path) -> anyhow::Result<SigningKey> {
-    load_or_generate_key_bytes(path).map(|b| SigningKey::from_bytes(&b))
 }
 
 /// Load a tenant ML-DSA-65 keypair from its 32-byte seed file, or generate

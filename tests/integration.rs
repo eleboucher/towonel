@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use towonel_common::protocol::ALPN_TUNNEL;
-use towonel_common::tunnel::{read_hostname_header, write_hostname_header};
+use towonel_common::tunnel::{ClientAddrs, read_handshake, write_handshake};
 
 /// Start a TCP echo server on a random port. Returns the bound address.
 async fn start_echo_server() -> SocketAddr {
@@ -72,9 +72,9 @@ async fn tunnel_echo_roundtrip() {
             let conn = incoming.await.expect("agent accept connection");
             let (mut send, mut recv) = conn.accept_bi().await.expect("agent accept bi stream");
 
-            let hostname = read_hostname_header(&mut recv)
+            let (hostname, _addrs) = read_handshake(&mut recv)
                 .await
-                .expect("agent read hostname header");
+                .expect("agent read handshake");
             assert_eq!(hostname, "test.example.eu");
 
             // Connect to origin.
@@ -114,9 +114,13 @@ async fn tunnel_echo_roundtrip() {
 
     let (mut send, mut recv) = conn.open_bi().await.expect("edge open bi stream");
 
-    write_hostname_header(&mut send, "test.example.eu")
+    let fake_addrs = ClientAddrs {
+        src: "203.0.113.7:54321".parse().unwrap(),
+        dst: "192.0.2.1:443".parse().unwrap(),
+    };
+    write_handshake(&mut send, "test.example.eu", fake_addrs)
         .await
-        .expect("edge write hostname header");
+        .expect("edge write handshake");
 
     send.write_all(test_payload)
         .await

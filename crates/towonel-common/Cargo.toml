@@ -24,6 +24,8 @@ getrandom = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
 prometheus-client = { workspace = true }
+petname = { workspace = true }
+ppp = { workspace = true }
 
 [lints]
 workspace = true
