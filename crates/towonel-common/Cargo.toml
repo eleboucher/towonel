@@ -14,6 +14,7 @@ iroh = { workspace = true }
 ciborium = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 hex = { workspace = true }
@@ -22,9 +23,7 @@ anyhow = { workspace = true }
 getrandom = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }
+prometheus-client = { workspace = true }
 
 [lints]
 workspace = true

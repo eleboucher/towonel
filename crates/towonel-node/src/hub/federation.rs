@@ -6,6 +6,7 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
+use backon::{ExponentialBuilder, Retryable};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use towonel_common::auth::sign_auth_header;
@@ -310,36 +311,45 @@ async fn bootstrap_peer(
         trusted_peers.write().await.insert(id);
     }
     let url = format!("{}/v1/health", peer_url.trim_end_matches('/'));
-    let mut backoff = Duration::from_secs(1);
-    loop {
-        match fetch_node_id(client, &url).await {
-            Ok(node_id) => {
-                if let Some(expected) = pinned
-                    && node_id != expected
-                {
-                    warn!(
-                        peer = %peer_url,
-                        expected = %hex::encode(expected),
-                        got = %hex::encode(node_id),
-                        "federation: peer /v1/health returned a different node_id than pinned; \
-                         trusting pinned and retrying"
-                    );
-                    tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_mins(1));
-                    continue;
-                }
-                if pinned.is_none() {
-                    trusted_peers.write().await.insert(node_id);
-                }
-                return node_id;
-            }
-            Err(e) => {
-                warn!(peer = %peer_url, error = %e, "federation: bootstrap failed; retrying");
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_mins(1));
-            }
+
+    let policy = ExponentialBuilder::default()
+        .with_min_delay(Duration::from_secs(1))
+        .with_max_delay(Duration::from_mins(1))
+        .with_max_times(usize::MAX);
+
+    // `max_times = usize::MAX` makes `retry` effectively infinite, so the
+    // `Err` branch is unreachable. `.expect` keeps that contract loud if a
+    // future edit shortens the retry budget.
+    #[allow(clippy::expect_used)]
+    let node_id = (|| async {
+        let id = fetch_node_id(client, &url).await?;
+        if let Some(expected) = pinned
+            && id != expected
+        {
+            anyhow::bail!(
+                "peer /v1/health returned {} but pinned was {}",
+                hex::encode(id),
+                hex::encode(expected),
+            );
         }
+        Ok::<_, anyhow::Error>(id)
+    })
+    .retry(policy)
+    .notify(|err, dur| {
+        warn!(
+            peer = %peer_url,
+            error = %err,
+            backoff_ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX),
+            "federation: bootstrap failed; retrying",
+        );
+    })
+    .await
+    .expect("retry with max_times = usize::MAX is effectively infinite");
+
+    if pinned.is_none() {
+        trusted_peers.write().await.insert(node_id);
     }
+    node_id
 }
 
 async fn fetch_node_id(client: &reqwest::Client, health_url: &str) -> anyhow::Result<[u8; 32]> {

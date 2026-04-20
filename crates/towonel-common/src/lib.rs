@@ -1,8 +1,10 @@
 pub mod auth;
 pub mod config_entry;
 pub mod hostname;
+pub mod hub_error;
 pub mod identity;
 pub mod invite;
+pub mod metrics;
 pub mod ownership;
 pub mod protocol;
 pub mod random_name;

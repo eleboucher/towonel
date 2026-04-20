@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, anyhow};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
+use towonel_common::hub_error;
 use towonel_common::identity::write_key_file;
 
 pub(crate) use towonel_common::CBOR_CONTENT_TYPE;
@@ -20,14 +21,16 @@ const HUB_URL_ENV: &str = "TOWONEL_HUB_URL";
 pub(crate) async fn check_response(resp: reqwest::Response) -> anyhow::Result<Vec<u8>> {
     let status = resp.status();
     let body = resp.bytes().await?.to_vec();
-    if !status.is_success() {
-        let err: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
-        return Err(anyhow!(
-            "hub returned {status}: {}",
-            serde_json::to_string_pretty(&err)?
-        ));
+    if status.is_success() {
+        return Ok(body);
     }
-    Ok(body)
+    Err(hub_error::parse(status.as_u16(), &body).map_or_else(
+        || {
+            let preview = String::from_utf8_lossy(&body);
+            anyhow!("hub returned {status}: {preview}")
+        },
+        Into::into,
+    ))
 }
 
 #[derive(Parser)]
