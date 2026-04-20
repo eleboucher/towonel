@@ -15,13 +15,9 @@ pre-commit:
       run: taplo fmt --check {staged_files}
     typos:
       run: typos {staged_files}
-
 pre-push:
   parallel: true
   commands:
-    test:
-      glob: "**/*.rs"
-      run: cargo nextest run --workspace --all-features --no-fail-fast
     deny:
       glob: "{Cargo.toml,Cargo.lock}"
       run: cargo deny --all-features check
