@@ -9,13 +9,13 @@ services:
       - "9090:9090"
     environment:
       RUST_LOG: info
-      TOWONEL_IDENTITY__KEY_PATH: /var/lib/towonel/node.key
-      TOWONEL_HUB__DB_PATH: /var/lib/towonel/hub.db
-      TOWONEL_HUB__LISTEN_ADDR: 0.0.0.0:8443
-      # TOWONEL_HUB__PUBLIC_URL: https://hub.example.eu:8443
-      # TOWONEL_HUB__DNS_WEBHOOK_URL: https://dns-sidecar.internal/update
-      TOWONEL_EDGE__LISTEN_ADDR: 0.0.0.0:443
-      TOWONEL_EDGE__HEALTH_LISTEN_ADDR: 0.0.0.0:9090
+      TOWONEL_IDENTITY_KEY_PATH: /var/lib/towonel/node.key
+      TOWONEL_HUB_DB_DSN: /var/lib/towonel/hub.db
+      TOWONEL_HUB_LISTEN_ADDR: 0.0.0.0:8443
+      # TOWONEL_HUB_PUBLIC_URL: https://hub.example.eu:8443
+      # TOWONEL_HUB_DNS_WEBHOOK_URL: https://dns-sidecar.internal/update
+      TOWONEL_EDGE_LISTEN_ADDR: 0.0.0.0:443
+      TOWONEL_EDGE_HEALTH_LISTEN_ADDR: 0.0.0.0:9090
     volumes:
       - node-data:/var/lib/towonel
     restart: unless-stopped

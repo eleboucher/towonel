@@ -150,39 +150,39 @@ No PVC, no `StatefulSet`, no init container.
 
 ## Configuration
 
-All settings come from `TOWONEL_*` environment variables (double
-underscore separates config sections). Lists may be passed as CSV or
-JSON; structured lists (peers, tenants, services) require JSON.
+All settings come from `TOWONEL_*` environment variables (flat names,
+single underscore). Lists may be passed as CSV or JSON; structured
+lists (peers, tenants, services) require JSON.
 
 ### Hub
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TOWONEL_IDENTITY__KEY_PATH` | `node.key` | Node identity key |
-| `TOWONEL_HUB__ENABLED` | `true` | Enable the hub API |
+| `TOWONEL_IDENTITY_KEY_PATH` | `node.key` | Node identity key |
+| `TOWONEL_HUB_ENABLED` | `true` | Enable the hub API |
 | `TOWONEL_INVITE_HASH_KEY` | | Key for hashing invite secrets (must be set for security) |
-| `TOWONEL_HUB__LISTEN_ADDR` | `0.0.0.0:8443` | Hub API bind address |
-| `TOWONEL_HUB__PUBLIC_URL` | derived | URL embedded in invite tokens |
-| `TOWONEL_HUB__OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file |
-| `TOWONEL_HUB__DATABASE__DRIVER` | `sqlite` | `sqlite` or `postgres` |
-| `TOWONEL_HUB__DATABASE__DSN` | `hub.db` | Connection string |
-| `TOWONEL_HUB__DATABASE__MAX_OPEN_CONNS` | `4` / `25` | Pool size |
-| `TOWONEL_HUB__DNS_WEBHOOK_URL` | | Webhook for hostname changes |
-| `TOWONEL_HUB__PEERS` | | Federation peers (JSON array of `{url, node_id}`) |
+| `TOWONEL_HUB_LISTEN_ADDR` | `0.0.0.0:8443` | Hub API bind address |
+| `TOWONEL_HUB_PUBLIC_URL` | derived | URL embedded in invite tokens |
+| `TOWONEL_HUB_OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file |
+| `TOWONEL_HUB_DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
+| `TOWONEL_HUB_DB_DSN` | `hub.db` | Connection string |
+| `TOWONEL_HUB_DB_MAX_OPEN_CONNS` | `4` / `25` | Pool size |
+| `TOWONEL_HUB_DNS_WEBHOOK_URL` | | Webhook for hostname changes |
+| `TOWONEL_HUB_PEERS` | | Federation peers (JSON array of `{url, node_id}`) |
 
 ### Edge
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TOWONEL_EDGE__ENABLED` | `true` | Enable the edge listener |
-| `TOWONEL_EDGE__LISTEN_ADDR` | `0.0.0.0:443` | TLS bind address |
-| `TOWONEL_EDGE__HEALTH_LISTEN_ADDR` | `0.0.0.0:9090` | Health + metrics |
-| `TOWONEL_EDGE__HUB_URLS` | | Remote hubs (edge-only mode) |
-| `TOWONEL_EDGE__PUBLIC_ADDRESSES` | | Addresses advertised to agents |
-| `TOWONEL_EDGE__TLS__ACME_EMAIL` | | Enables Let's Encrypt issuance |
-| `TOWONEL_EDGE__TLS__CERT_DIR` | `/data/certs` | Cert cache directory |
-| `TOWONEL_EDGE__TLS__ACME_STAGING` | `false` | Use Let's Encrypt staging |
-| `TOWONEL_EDGE__TLS__HTTP_LISTEN_ADDR` | `0.0.0.0:80` | HTTP-01 responder |
+| `TOWONEL_EDGE_ENABLED` | `true` | Enable the edge listener |
+| `TOWONEL_EDGE_LISTEN_ADDR` | `0.0.0.0:443` | TLS bind address |
+| `TOWONEL_EDGE_HEALTH_LISTEN_ADDR` | `0.0.0.0:9090` | Health + metrics |
+| `TOWONEL_EDGE_HUB_URLS` | | Remote hubs (edge-only mode) |
+| `TOWONEL_EDGE_PUBLIC_ADDRESSES` | | Addresses advertised to agents |
+| `TOWONEL_EDGE_TLS_ACME_EMAIL` | | Enables Let's Encrypt issuance |
+| `TOWONEL_EDGE_TLS_CERT_DIR` | `/data/certs` | Cert cache directory |
+| `TOWONEL_EDGE_TLS_ACME_STAGING` | `false` | Use Let's Encrypt staging |
+| `TOWONEL_EDGE_TLS_HTTP_LISTEN_ADDR` | `0.0.0.0:80` | HTTP-01 responder |
 
 ### Agent
 
@@ -277,7 +277,7 @@ Peers are pinned by iroh `node_id` to close an MITM window at first
 contact:
 
 ```bash
-TOWONEL_HUB__PEERS='[
+TOWONEL_HUB_PEERS='[
   {"url":"https://hub-b.example.eu:8443","node_id":"deadbeef..."},
   {"url":"https://hub-c.example.eu:8443","node_id":"cafebabe..."}
 ]'
@@ -288,7 +288,7 @@ Inbound pushes are signed with the hub's iroh node key and replay-protected.
 
 ## DNS webhook
 
-The hub POSTs to `TOWONEL_HUB__DNS_WEBHOOK_URL` whenever the active
+The hub POSTs to `TOWONEL_HUB_DNS_WEBHOOK_URL` whenever the active
 hostname set changes:
 
 ```json
