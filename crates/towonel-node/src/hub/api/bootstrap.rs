@@ -13,8 +13,8 @@ use towonel_common::time::now_ms;
 
 use super::db::InviteStatus;
 use super::{
-    AppState, constant_time_eq, gone, internal_error, invalid_request, json_ok, not_found,
-    parse_invite_id, unauthorized,
+    AppState, constant_time_eq, gone, internal_error, invalid_request, json_ok, load_trusted_edges,
+    not_found, parse_invite_id, unauthorized,
 };
 
 #[derive(Debug, Deserialize)]
@@ -29,6 +29,8 @@ pub(super) struct BootstrapResponse {
     tenant_id: String,
     hostnames: Vec<String>,
     hub_node_id: iroh::EndpointId,
+    trusted_edges: Vec<iroh::EndpointId>,
+    /// Mirror of `trusted_edges.first()`; kept so pre-multi-edge agents still work.
     edge_node_id: Option<iroh::EndpointId>,
     edge_addresses: Vec<String>,
 }
@@ -76,12 +78,22 @@ pub(super) async fn post_bootstrap(
         return gone("invite has expired");
     }
 
+    let trusted_edges = match load_trusted_edges(&state).await {
+        Ok(edges) => edges,
+        Err(e) => {
+            warn!(error = %e, "failed to list trusted edges for bootstrap");
+            return internal_error();
+        }
+    };
+    let edge_node_id = trusted_edges.first().copied();
+
     json_ok(BootstrapResponse {
         status: "ok",
         tenant_id: invite.tenant_id.to_string(),
         hostnames: invite.hostnames,
         hub_node_id: state.identity.node_id,
-        edge_node_id: state.identity.edge_node_id,
+        trusted_edges,
+        edge_node_id,
         edge_addresses: state.identity.edge_addresses.clone(),
     })
 }

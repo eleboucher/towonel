@@ -473,3 +473,16 @@ pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     a.ct_eq(b).into()
 }
+
+pub(super) async fn load_trusted_edges(state: &AppState) -> anyhow::Result<Vec<iroh::EndpointId>> {
+    state
+        .db
+        .list_trusted_edge_ids()
+        .await?
+        .iter()
+        .map(|bytes| {
+            iroh::EndpointId::from_bytes(bytes)
+                .map_err(|e| anyhow::anyhow!("corrupt edge_node_id in edge_invites: {e}"))
+        })
+        .collect()
+}

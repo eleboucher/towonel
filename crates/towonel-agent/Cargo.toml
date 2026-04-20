@@ -1,6 +1,7 @@
 [package]
 name = "towonel-agent"
 version.workspace = true
+edition = "2024"
 publish = false
 
 [[bin]]

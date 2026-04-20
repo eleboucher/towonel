@@ -221,6 +221,18 @@ impl Db {
         };
         Ok(invite.status == InviteStatus::Pending.as_str())
     }
+
+    /// Oldest-first so the first element is stable across scans.
+    pub async fn list_trusted_edge_ids(&self) -> anyhow::Result<Vec<[u8; 32]>> {
+        let rows = edge_invites::Entity::find()
+            .filter(edge_invites::Column::Status.ne(InviteStatus::Revoked.as_str()))
+            .order_by_asc(edge_invites::Column::CreatedAtMs)
+            .all(&self.conn)
+            .await?;
+        rows.into_iter()
+            .map(|m| bytes_to_array::<32>(m.edge_node_id, "edge_node_id"))
+            .collect()
+    }
 }
 
 async fn insert_hostnames(
