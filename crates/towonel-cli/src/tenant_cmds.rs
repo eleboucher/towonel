@@ -48,11 +48,13 @@ pub async fn cmd_keypair_init(key_path: &std::path::Path, kind: &str) -> anyhow:
             println!("  Tenant ID:      {}", kp.id());
             println!("  PQ public key:  {}", kp.public_key());
             println!();
-            println!("Paste the two lines above into your operator's node.toml as:");
+            println!("Add this tenant to the operator's TOWONEL_TENANTS JSON:");
             println!();
-            println!("  [[tenants]]");
-            println!("  id = \"{}\"", kp.id());
-            println!("  pq_public_key = \"{}\"", kp.public_key());
+            println!(
+                "  {{\"name\":\"<alias>\",\"id\":\"{}\",\"pq_public_key\":\"{}\",\"hostnames\":[]}}",
+                kp.id(),
+                kp.public_key(),
+            );
         }
         "agent" => {
             let key = super::generate_and_save_agent_key(key_path)?;
@@ -130,7 +132,7 @@ pub async fn cmd_tenant_leave(
             },
         )
         .await?;
-        println!("✓ DeleteHostname {h} (seq {seq})");
+        println!("- DeleteHostname {h} (seq {seq})");
     }
     for a in authorized_agents {
         seq += 1;
@@ -143,7 +145,7 @@ pub async fn cmd_tenant_leave(
             },
         )
         .await?;
-        println!("✓ RevokeAgent {a} (seq {seq})");
+        println!("- RevokeAgent {a} (seq {seq})");
     }
 
     println!();

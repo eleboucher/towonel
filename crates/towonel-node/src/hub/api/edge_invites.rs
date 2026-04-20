@@ -133,8 +133,8 @@ pub(super) async fn delete_edge_invite(
 pub(super) struct RedeemEdgeInviteRequest {
     invite_id: String,
     invite_secret: String,
-    /// Hex-encoded iroh `EndpointId` (32-byte Ed25519 pubkey) that this edge
-    /// will use to authenticate subsequent requests.
+    /// Hex-encoded iroh `EndpointId` (32 bytes) that this edge will use to
+    /// authenticate subsequent requests.
     edge_node_id: String,
 }
 

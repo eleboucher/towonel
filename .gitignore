@@ -1,6 +1,6 @@
 /target
 
-# Ed25519 key material — never commit
+# Key material — never commit
 *.key
 /agent.key
 /tenant.key

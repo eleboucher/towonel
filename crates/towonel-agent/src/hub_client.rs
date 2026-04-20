@@ -1,6 +1,5 @@
-//! Minimal hub RPC helpers shared by `stateless::{register, heartbeat}` and
-//! `publish_tls`. Not a full SDK -- just POST-signed-entry + CBOR response
-//! checking.
+//! Minimal hub RPC helpers — POST signed entry, parse CBOR response, typed
+//! error envelope. Not a full SDK.
 
 use anyhow::{Context, anyhow};
 use towonel_common::CBOR_CONTENT_TYPE;
@@ -25,9 +24,7 @@ pub async fn check_response(resp: reqwest::Response) -> anyhow::Result<Vec<u8>> 
     ))
 }
 
-/// Sign `payload` with `kp` and POST it to `/v1/entries` as CBOR. Returns
-/// the parsed status or the error returned by the hub. Used by agent boot
-/// (`UpsertAgent`) and by TLS policy publish.
+/// Sign `payload` with `kp` and POST it to `/v1/entries` as CBOR.
 pub async fn submit_entry(
     client: &reqwest::Client,
     hub_url: &str,

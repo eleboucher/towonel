@@ -145,8 +145,8 @@ mod tests {
     use super::*;
     use iroh::SecretKey;
 
-    /// Derive a valid hex-encoded EndpointId from a seed byte.
-    /// Different seeds produce different valid Ed25519 public keys.
+    /// Derive a valid hex-encoded `EndpointId` from a seed byte.
+    /// Different seeds produce different valid endpoint ids.
     fn agent_hex_from_seed(seed: u8) -> String {
         let mut key_bytes = [0u8; 32];
         key_bytes[0] = seed;

@@ -18,7 +18,7 @@ const EDGE_SUB_MAX_CLOCK_SKEW_MS: u64 = 60_000;
 const EDGE_SUB_AUTH_DOMAIN: &str = "towonel/edge-sub/v1";
 
 /// Parse the `Authorization: Signature <node_id>.<ts>.<sig>` header, check
-/// the timestamp window, verify the Ed25519 signature against `node_id`, and
+/// the timestamp window, verify the signature against `node_id`, and
 /// confirm the node is registered in the `edges` table.
 async fn authenticate_edge_subscriber(
     state: &AppState,

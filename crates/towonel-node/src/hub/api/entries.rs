@@ -28,7 +28,7 @@ struct PostEntryResponse {
 /// Validation pipeline per protocol section 4.3:
 /// 1. parse CBOR body
 /// 2. tenant allowlist check (cheap -- fail before crypto)
-/// 3. Ed25519 signature verification
+/// 3. ML-DSA-65 signature verification
 /// 4. inner/outer `tenant_id` match
 /// 5. payload version check
 /// 6. hostname ownership check (for hostname ops only)

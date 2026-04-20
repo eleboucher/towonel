@@ -3,11 +3,11 @@ mod edge;
 mod hub;
 mod init;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context;
 use clap::{Parser, Subcommand};
+
+use anyhow::Context;
 use iroh::endpoint::{Endpoint, presets::N0};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
@@ -24,13 +24,9 @@ const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[derive(Parser)]
 #[command(
     name = "towonel-node",
-    about = "towonel node -- runs edge and/or hub on a VPS"
+    about = "towonel node -- runs edge and/or hub on a VPS. Configured via TOWONEL_* env vars -- see `NodeConfig::load`."
 )]
 struct Cli {
-    /// Path to the node config file (ignored for subcommands).
-    #[arg(short, long, default_value = "node.toml")]
-    config: PathBuf,
-
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -38,17 +34,12 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Bootstrap an edge node by redeeming an edge-invite token from the hub.
-    /// Generates a node key, registers with the hub, and writes a starter
-    /// `node.toml` for edge-only mode with the hub's URL for route
-    /// subscription.
+    /// Generates a node key, registers with the hub, and prints the
+    /// `TOWONEL_*` env vars needed to run the edge.
     Init {
         /// The edge-invite token from the operator (`tt_edge_1_...`).
         #[arg(long)]
         edge_invite: String,
-        /// Where to write the generated node.toml.
-        /// Defaults to `/etc/towonel/node.toml`.
-        #[arg(long)]
-        config_out: Option<PathBuf>,
     },
 }
 
@@ -72,15 +63,11 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    if let Some(Command::Init {
-        edge_invite,
-        config_out,
-    }) = cli.command
-    {
-        return init::run(&edge_invite, config_out.as_deref()).await;
+    if let Some(Command::Init { edge_invite }) = cli.command {
+        return init::run(&edge_invite).await;
     }
 
-    let config = config::NodeConfig::load(&cli.config)?;
+    let config = config::NodeConfig::load()?;
 
     let secret_key =
         towonel_common::identity::load_or_generate_secret_key(&config.identity.key_path)

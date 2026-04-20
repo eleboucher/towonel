@@ -42,9 +42,8 @@ where
     f
 }
 
-/// RAII handle that increments `gauge` on construction and decrements on
-/// drop. Works for both normal client disconnect and task cancellation,
-/// since `Drop` runs whenever the enclosing future is dropped.
+/// RAII: increments on `inc`, decrements on drop. Survives task
+/// cancellation since `Drop` runs when the enclosing future is dropped.
 pub struct GaugeGuard {
     gauge: Gauge,
 }

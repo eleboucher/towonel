@@ -29,8 +29,10 @@ pub fn canonical_message(domain: &str, node_id_hex: &str, ts_ms: u64, body: &[u8
     format!("{domain}/{node_id_hex}/{ts_ms}/{body_hex}")
 }
 
-/// Abstracts the two signing-key types used across the workspace:
+/// Abstracts the two signing-key types used for transport auth.
+///
 /// [`ed25519_dalek::SigningKey`] (agent) and [`iroh::SecretKey`] (edge, hub).
+/// Tenant config signing uses ML-DSA-65 instead — see `config_entry`.
 pub trait AuthSigner {
     fn public_key_bytes(&self) -> [u8; 32];
     fn sign_bytes(&self, msg: &[u8]) -> [u8; 64];

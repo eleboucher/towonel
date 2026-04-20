@@ -18,12 +18,9 @@ pub use fips204::ml_dsa_65::{PK_LEN as PQ_PUB_KEY_LEN, SIG_LEN as PQ_SIGNATURE_L
 /// Seed length for ML-DSA-65 deterministic key derivation (FIPS 204 §3.6).
 pub const PQ_SEED_LEN: usize = 32;
 
-/// A tenant's public identity.
-///
-/// Under the hood it's just 32 bytes, defined as `SHA-256(pq_public_key)`.
-/// The hex-encoded form is the canonical string representation (same shape
-/// as it was in v0.1.x when the id was an Ed25519 pubkey — every existing
-/// log/CLI/DB reference keeps working).
+/// A tenant's public identity: 32 bytes, defined as `SHA-256(pq_public_key)`.
+/// The hex-encoded form is the canonical string representation across logs,
+/// CLI output, and DB columns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TenantId([u8; 32]);
 
@@ -59,7 +56,7 @@ pub enum IdParseError {
     #[error("invalid hex: {0}")]
     Hex(#[from] hex::FromHexError),
     /// Only produced by `AgentId::from_str` — `TenantId` is a plain hash.
-    #[error("invalid Ed25519 public key: {0}")]
+    #[error("invalid agent key: {0}")]
     Key(#[from] ed25519_dalek::SignatureError),
 }
 
@@ -296,12 +293,12 @@ pub fn verify_pq_signature(
         .is_ok_and(|pk| pk.verify(message, signature, b""))
 }
 
-/// An agent's public identity. Wraps an Ed25519 public key, because the
-/// agent identifies itself to iroh's (classical) transport layer.
+/// An agent's public identity — the 32-byte iroh handshake key it presents
+/// on inbound connections from edges.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AgentId(VerifyingKey);
 
-/// Re-export iroh's `EndpointId` directly — it's already an Ed25519 public key.
+/// A node's public identity, aliased to iroh's `EndpointId`.
 pub type NodeId = iroh::EndpointId;
 
 impl AgentId {
@@ -367,7 +364,8 @@ impl<'de> Deserialize<'de> for AgentId {
     }
 }
 
-/// An agent's Ed25519 signing keypair (for iroh handshakes, not config signing).
+/// An agent's iroh-handshake signing keypair. Not used for signing config
+/// entries — that's [`TenantKeypair`] (ML-DSA-65).
 pub struct AgentKeypair(SigningKey);
 
 impl AgentKeypair {
@@ -476,8 +474,8 @@ pub fn load_or_generate_secret_key(path: &Path) -> anyhow::Result<iroh::SecretKe
     load_or_generate_key_bytes(path).map(iroh::SecretKey::from)
 }
 
-/// Load an Ed25519 `SigningKey` from a file, or generate and save one.
-/// Used by agents (iroh transport). Tenants use [`load_or_generate_tenant_keypair`].
+/// Load an agent `SigningKey` from a file, or generate and save one. Used
+/// for iroh transport. Tenants use [`load_or_generate_tenant_keypair`].
 pub fn load_or_generate_signing_key(path: &Path) -> anyhow::Result<SigningKey> {
     load_or_generate_key_bytes(path).map(|b| SigningKey::from_bytes(&b))
 }
