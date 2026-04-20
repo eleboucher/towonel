@@ -6,7 +6,7 @@ mod stateless;
 mod tunnel;
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -26,15 +26,9 @@ use crate::metrics::AgentMetrics;
 #[derive(Parser)]
 #[command(
     name = "towonel-agent",
-    about = "towonel agent -- runs in your network, tunnels traffic from edges"
+    about = "towonel agent -- runs in your network, tunnels traffic from edges. Services come from TOWONEL_AGENT_SERVICES; identity from TOWONEL_INVITE_TOKEN."
 )]
 struct Cli {
-    /// Path to the agent config file. Defaults to `./agent.toml`. The
-    /// config only carries service routing (hostname → origin); identity
-    /// lives in `TOWONEL_INVITE_TOKEN`.
-    #[arg(short, long)]
-    config: Option<PathBuf>,
-
     /// Write the iroh `EndpointId` (hex) to this path once the endpoint is bound.
     #[arg(long)]
     node_id_out: Option<PathBuf>,
@@ -83,13 +77,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let token = stateless::token_from_env()?;
     let ctx = Arc::new(stateless::bootstrap(&token).await?);
 
-    let agent_config = match resolve_config_path(cli.config.as_deref()) {
-        Some(path) => {
-            info!(path = %path.display(), "loading agent config");
-            config::AgentConfig::load(&path)?
-        }
-        None => config::AgentConfig::load(std::path::Path::new(""))?,
-    };
+    let agent_config = config::AgentConfig::load()?;
 
     let service_map = Arc::new(tunnel::ServiceMap::from_config(&agent_config.services).await?);
     service_map.spawn_dns_refresher();
@@ -201,15 +189,6 @@ async fn metrics_handler(State(metrics): State<Arc<AgentMetrics>>) -> Response {
         body,
     )
         .into_response()
-}
-
-/// Look up the agent config path: explicit --config, else ./agent.toml, else None.
-fn resolve_config_path(explicit: Option<&Path>) -> Option<PathBuf> {
-    if let Some(p) = explicit {
-        return Some(p.to_path_buf());
-    }
-    let cwd = PathBuf::from("agent.toml");
-    if cwd.exists() { Some(cwd) } else { None }
 }
 
 /// Write `data` to `path` atomically: write to a PID-tagged temp file, then

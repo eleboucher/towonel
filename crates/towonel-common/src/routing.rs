@@ -38,7 +38,7 @@ impl RouteTable {
     /// Same as [`Self::from_entries`] but intersects each tenant's agent set
     /// with `live_agents` before materialization. Agents missing from
     /// `live_agents` are treated as unreachable and their routes suppressed.
-    /// Pass `None` to disable liveness filtering (legacy behavior).
+    /// Pass `None` to disable liveness filtering.
     #[must_use]
     pub fn from_entries_with_liveness(
         entries: &[SignedConfigEntry],

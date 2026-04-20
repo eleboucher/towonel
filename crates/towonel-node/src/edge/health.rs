@@ -12,16 +12,13 @@ use prometheus_client::registry::Registry;
 use serde::Serialize;
 use towonel_common::metrics::{register_counter, register_gauge};
 
-/// Edge observability surface. Counters are wrapped in cheap `Arc`s by
-/// prometheus-client, so cloning `EdgeMetrics` around tasks is free.
+/// Edge observability surface. Cheap to clone: inner metrics hold `Arc`s.
 #[derive(Clone)]
 pub struct EdgeMetrics {
     pub active_connections: Gauge,
     pub total_connections: Counter,
     pub total_bytes_in: Counter,
     pub total_bytes_out: Counter,
-    /// The Registry owns the names/help strings and borrows the counters
-    /// above. We only touch it from the `/metrics` handler.
     registry: Arc<Registry>,
 }
 

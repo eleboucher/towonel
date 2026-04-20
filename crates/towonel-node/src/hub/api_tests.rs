@@ -358,7 +358,6 @@ async fn delete_tenant_drops_from_policy_and_records_removal() {
     let tenant = tenant_from_token(&token);
     assert!(hub.state.policy.load().is_known_tenant(&tenant.id()));
 
-    // Remove.
     let (status, body) = delete_json(
         &client,
         &hub.url(&format!("/v1/tenants/{}", tenant.id())),

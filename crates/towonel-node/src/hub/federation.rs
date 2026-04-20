@@ -256,9 +256,8 @@ async fn rebuild_and_broadcast(state: &Arc<super::api::AppState>) {
 }
 
 /// Run forever pushing this hub's state to one peer. When `peer.node_id` is
-/// pinned in config, the hub trusts that id from the start and refuses any
-/// mismatching `/v1/health` response. Otherwise it discovers the id on first
-/// contact — already warned at config load.
+/// pinned, the hub trusts that id from the start and refuses any mismatching
+/// `/v1/health` response. Otherwise it discovers the id on first contact.
 pub async fn run_peer(
     peer: crate::config::FederationPeer,
     secret_key: iroh::SecretKey,
@@ -298,9 +297,9 @@ fn parse_pinned_node_id(hex_id: Option<&str>, peer_url: &str) -> anyhow::Result<
 }
 
 /// Resolve the peer's iroh `node_id`. When `pinned` is set, a `/v1/health`
-/// mismatch is a hard error: we keep backing off rather than trust a stray
-/// response, which would defeat the pin. When `pinned` is `None`, we accept
-/// the first response (legacy behaviour, already warned at config load).
+/// mismatch keeps retrying rather than trusting a stray response (which
+/// would defeat the pin). When `pinned` is `None`, we accept the first
+/// response.
 async fn bootstrap_peer(
     client: &reqwest::Client,
     peer_url: &str,

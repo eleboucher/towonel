@@ -1,4 +1,6 @@
+use std::env;
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde::Deserialize;
 
@@ -27,26 +29,16 @@ impl DbDriver {
     }
 }
 
-/// Database section of the hub config.
-///
-/// Maps to the `[hub.database]` TOML table and the `TOWONEL_HUB__DATABASE__*`
-/// env vars. The `dsn` is required when `driver = "postgres"`; for `SQLite`
-/// it defaults to a local `hub.db` file.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DatabaseConfig {
-    #[serde(default = "default_driver")]
     pub driver: DbDriver,
     /// Postgres connection string (required when driver is `postgres`).
     /// Ignored for `SQLite` unless you want to override the default path
     /// (in which case pass a path or `sqlite://...` URL).
-    #[serde(default)]
     pub dsn: Option<String>,
     /// Max open connections. Defaults: 4 for sqlite, 25 for postgres.
-    #[serde(default)]
     pub max_open_conns: Option<u32>,
     /// Max idle connections. Defaults: 4 for sqlite, 10 for postgres.
-    #[serde(default)]
     pub max_idle_conns: Option<u32>,
 }
 
@@ -85,16 +77,12 @@ impl DatabaseConfig {
 impl Default for DatabaseConfig {
     fn default() -> Self {
         Self {
-            driver: default_driver(),
+            driver: DbDriver::Sqlite,
             dsn: None,
             max_open_conns: None,
             max_idle_conns: None,
         }
     }
-}
-
-const fn default_driver() -> DbDriver {
-    DbDriver::Sqlite
 }
 
 /// Best-effort password redaction for Postgres URLs. Used for log lines
@@ -112,65 +100,42 @@ pub fn redact_db_url(url: &str) -> String {
     parsed.to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct NodeConfig {
     pub identity: IdentityConfig,
-    #[serde(default)]
     pub hub: HubConfig,
-    #[serde(default)]
     pub edge: EdgeConfig,
-    #[serde(default)]
     pub tenants: Vec<TenantEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct IdentityConfig {
-    /// Path to the node's Ed25519 private key file.
     pub key_path: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct HubConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default)]
     pub database: DatabaseConfig,
-    #[serde(default = "default_hub_listen")]
     pub listen_addr: String,
     /// Bind address for the hub's private health + Prometheus `/metrics`
     /// listener. Kept off the public API port so `/metrics` never leaves the
     /// internal network and the `requests_total` counter isn't polluted by
     /// scrape traffic.
-    #[serde(default = "default_hub_health_listen")]
     pub health_listen_addr: String,
     /// Path to a file containing the operator API key. If missing, a fresh
     /// random key is generated on first boot. The key protects the invite
     /// management endpoints (create, list, revoke). Never commit this file.
-    #[serde(default = "default_operator_key_path")]
     pub operator_api_key_path: PathBuf,
     /// Public URL of the hub, used as the `hub_url` embedded in invite
     /// tokens. Defaults to `https://<listen_addr>`. Operators running
     /// behind a reverse proxy should set this to the externally reachable
     /// URL so tenants can resolve it.
-    #[serde(default)]
     pub public_url: Option<String>,
-    /// Federation peers (option A — bidirectional HTTPS replication). Each
-    /// entry is `{ url, node_id }`; `node_id` is the peer's 64-hex iroh id
-    /// and is strongly recommended — pinning it closes an MITM window at
-    /// first contact. If omitted, the hub discovers it via `GET /v1/health`
-    /// and emits a warn at startup.
-    ///
-    /// TOML:
-    /// ```toml
-    /// peers = [
-    ///   { url = "https://hub-b.example.eu:8443", node_id = "deadbeef..." },
-    /// ]
-    /// ```
-    /// Env (JSON): `TOWONEL_HUB__PEERS='[{"url":"https://hub-b...","node_id":"..."}]'`.
-    #[serde(default)]
+    /// Federation peers. Pinning `node_id` closes an MITM window at first
+    /// contact; unpinned bootstrap is gated behind
+    /// `TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=1`.
     pub peers: Vec<FederationPeer>,
-    #[serde(default)]
     pub federation: FederationConfig,
     /// Optional webhook URL for DNS automation. When set, the hub POSTs a
     /// JSON payload to this URL whenever the set of active hostnames changes
@@ -178,12 +143,9 @@ pub struct HubConfig {
     /// sidecar that calls their DNS provider's API (Cloudflare, Route53, etc).
     ///
     /// Payload: `{ "added": ["app.example.eu"], "removed": ["old.example.eu"] }`
-    #[serde(default)]
     pub dns_webhook_url: Option<String>,
 }
 
-/// A federation peer. `node_id` is optional but strongly recommended —
-/// see [`HubConfig::peers`] for the MITM race it closes.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FederationPeer {
@@ -197,11 +159,9 @@ pub struct FederationPeer {
 /// Operator-selected operations that push state to peers before returning
 /// the HTTP response, rather than relying on the 15 s async reconciliation
 /// loop. Closes the consistency window for the named ops.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Default)]
 pub struct FederationConfig {
     /// Known values: `"invite_redeem"`. Unknown values fail at load time.
-    #[serde(default)]
     pub synchronous_operations: Vec<String>,
 }
 
@@ -226,59 +186,39 @@ impl FederationConfig {
 
 const SYNC_OP_INVITE_REDEEM: &str = "invite_redeem";
 
-/// Edge-mode settings.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct EdgeConfig {
-    #[serde(default = "default_true")]
     pub enabled: bool,
-    #[serde(default = "default_edge_listen")]
     pub listen_addr: String,
-    #[serde(default = "default_health_listen")]
     pub health_listen_addr: String,
-    #[serde(default)]
     pub hub_urls: Vec<String>,
-    #[serde(default)]
     pub public_addresses: Vec<String>,
-    #[serde(default)]
     pub tls: Option<TlsConfig>,
     /// Number of TCP accept workers sharing `listen_addr` via `SO_REUSEPORT`
-    /// on Unix. Defaults to 1 (single accept loop — existing behaviour). Set
-    /// higher (e.g. `num_cpus`) to scale accept across cores under bursty
-    /// load. Ignored on non-Unix platforms.
-    #[serde(default = "default_listen_workers")]
+    /// on Unix. Raise (e.g. `num_cpus`) to scale accept across cores under
+    /// bursty load. Ignored on non-Unix platforms.
     pub listen_workers: usize,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct TlsConfig {
     /// Directory for PEM cert/key pairs. ACME writes here automatically;
     /// operators can also drop user-provided certs here (named `{hostname}.crt`
     /// + `{hostname}.key`).
-    #[serde(default = "default_cert_dir")]
-    pub cert_dir: std::path::PathBuf,
+    pub cert_dir: PathBuf,
     /// ACME email for Let's Encrypt account registration. Required for
     /// on-demand issuance; missing email disables ACME (certs must be
     /// user-provided).
     pub acme_email: Option<String>,
     /// Use Let's Encrypt staging (for testing, avoids rate limits).
-    #[serde(default)]
     pub acme_staging: bool,
     /// Bind address for the HTTP-01 challenge server (default ":80").
-    #[serde(default = "default_http_listen")]
     pub http_listen_addr: String,
-}
-
-fn default_cert_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from("/data/certs")
-}
-
-fn default_http_listen() -> String {
-    "0.0.0.0:80".to_string()
 }
 
 /// Operator-configured tenant allowlist entry.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TenantEntry {
     /// Hex-encoded tenant id (SHA-256 of the tenant's ML-DSA-65 public key).
     /// Required for hub mode, optional in edge-only mode where the edge
@@ -305,42 +245,14 @@ pub struct TenantEntry {
     pub direct_addresses: Vec<String>,
 }
 
-const fn default_true() -> bool {
-    true
-}
-
-fn default_hub_listen() -> String {
-    "0.0.0.0:8443".to_string()
-}
-
-fn default_edge_listen() -> String {
-    "0.0.0.0:443".to_string()
-}
-
-fn default_health_listen() -> String {
-    "0.0.0.0:9090".to_string()
-}
-
-fn default_hub_health_listen() -> String {
-    "0.0.0.0:9091".to_string()
-}
-
-const fn default_listen_workers() -> usize {
-    1
-}
-
-fn default_operator_key_path() -> PathBuf {
-    PathBuf::from("operator.key")
-}
-
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
             enabled: true,
             database: DatabaseConfig::default(),
-            listen_addr: default_hub_listen(),
-            health_listen_addr: default_hub_health_listen(),
-            operator_api_key_path: default_operator_key_path(),
+            listen_addr: "0.0.0.0:8443".to_string(),
+            health_listen_addr: "0.0.0.0:9091".to_string(),
+            operator_api_key_path: PathBuf::from("operator.key"),
             public_url: None,
             peers: Vec::new(),
             federation: FederationConfig::default(),
@@ -353,33 +265,244 @@ impl Default for EdgeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            listen_addr: default_edge_listen(),
-            health_listen_addr: default_health_listen(),
+            listen_addr: "0.0.0.0:443".to_string(),
+            health_listen_addr: "0.0.0.0:9090".to_string(),
             hub_urls: Vec::new(),
             public_addresses: Vec::new(),
             tls: None,
-            listen_workers: default_listen_workers(),
+            listen_workers: 1,
         }
     }
 }
 
-type StringListSetter = fn(&mut NodeConfig, Vec<String>);
+fn require_https(url: &str, context: &str) -> anyhow::Result<()> {
+    if !url.starts_with("https://") {
+        anyhow::bail!("{context} must use https://: got {url:?}");
+    }
+    Ok(())
+}
 
-/// String-list env vars that figment can't natively parse because the
-/// prefixed-env provider treats every value as a scalar. Each entry names
-/// both the env var and where to assign the result on [`NodeConfig`].
-const STRING_LIST_ENVS: &[(&str, StringListSetter)] = &[
-    ("TOWONEL_EDGE__PUBLIC_ADDRESSES", |c, v| {
-        c.edge.public_addresses = v;
-    }),
-    ("TOWONEL_EDGE__HUB_URLS", |c, v| c.edge.hub_urls = v),
-];
+impl NodeConfig {
+    /// Load from `TOWONEL_*` env vars. Section separator is `__`;
+    /// underscores in field names are preserved. `TOWONEL_IDENTITY__KEY_PATH`
+    /// is required. Lists accept CSV or JSON; structured lists
+    /// (`TOWONEL_HUB__PEERS`, `TOWONEL_TENANTS`) are JSON only. See the
+    /// README for the full catalog of knobs.
+    pub fn load() -> anyhow::Result<Self> {
+        let key_path = env_required("TOWONEL_IDENTITY__KEY_PATH")?;
 
-/// Parse a list-valued env var. Accepts JSON (`["a","b"]`) for backwards
-/// compat and CSV (`a,b,c`) for Kubernetes-friendly YAML. Empty strings and
-/// whitespace around commas are ignored.
-fn parse_list_env(value: &str) -> anyhow::Result<Vec<String>> {
-    let trimmed = value.trim();
+        let mut c = Self {
+            identity: IdentityConfig {
+                key_path: PathBuf::from(key_path),
+            },
+            hub: HubConfig::default(),
+            edge: EdgeConfig::default(),
+            tenants: Vec::new(),
+        };
+
+        apply_hub_env(&mut c.hub)?;
+        apply_edge_env(&mut c.edge)?;
+
+        if let Some(v) = env_json::<Vec<FederationPeer>>("TOWONEL_HUB__PEERS")? {
+            c.hub.peers = v;
+        }
+        if let Some(v) = env_json::<Vec<TenantEntry>>("TOWONEL_TENANTS")? {
+            c.tenants = v;
+        }
+
+        validate(&c)?;
+        Ok(c)
+    }
+}
+
+fn apply_hub_env(h: &mut HubConfig) -> anyhow::Result<()> {
+    if let Some(v) = env_bool("TOWONEL_HUB__ENABLED")? {
+        h.enabled = v;
+    }
+    if let Ok(v) = env::var("TOWONEL_HUB__LISTEN_ADDR") {
+        h.listen_addr = v;
+    }
+    if let Ok(v) = env::var("TOWONEL_HUB__HEALTH_LISTEN_ADDR") {
+        h.health_listen_addr = v;
+    }
+    if let Ok(v) = env::var("TOWONEL_HUB__OPERATOR_API_KEY_PATH") {
+        h.operator_api_key_path = PathBuf::from(v);
+    }
+    if let Ok(v) = env::var("TOWONEL_HUB__PUBLIC_URL") {
+        h.public_url = Some(v);
+    }
+    if let Ok(v) = env::var("TOWONEL_HUB__DNS_WEBHOOK_URL") {
+        h.dns_webhook_url = Some(v);
+    }
+
+    if let Ok(v) = env::var("TOWONEL_HUB__DATABASE__DRIVER") {
+        h.database.driver = match v.as_str() {
+            "sqlite" => DbDriver::Sqlite,
+            "postgres" => DbDriver::Postgres,
+            other => {
+                anyhow::bail!(
+                    "TOWONEL_HUB__DATABASE__DRIVER: unknown driver {other:?} (expected sqlite|postgres)"
+                );
+            }
+        };
+    }
+    if let Ok(v) = env::var("TOWONEL_HUB__DATABASE__DSN") {
+        h.database.dsn = Some(v);
+    }
+    if let Some(v) = env_parse::<u32>("TOWONEL_HUB__DATABASE__MAX_OPEN_CONNS")? {
+        h.database.max_open_conns = Some(v);
+    }
+    if let Some(v) = env_parse::<u32>("TOWONEL_HUB__DATABASE__MAX_IDLE_CONNS")? {
+        h.database.max_idle_conns = Some(v);
+    }
+
+    if let Some(v) = env_list("TOWONEL_HUB__FEDERATION__SYNCHRONOUS_OPERATIONS")? {
+        h.federation.synchronous_operations = v;
+    }
+    Ok(())
+}
+
+fn apply_edge_env(e: &mut EdgeConfig) -> anyhow::Result<()> {
+    if let Some(v) = env_bool("TOWONEL_EDGE__ENABLED")? {
+        e.enabled = v;
+    }
+    if let Ok(v) = env::var("TOWONEL_EDGE__LISTEN_ADDR") {
+        e.listen_addr = v;
+    }
+    if let Ok(v) = env::var("TOWONEL_EDGE__HEALTH_LISTEN_ADDR") {
+        e.health_listen_addr = v;
+    }
+    if let Some(v) = env_list("TOWONEL_EDGE__HUB_URLS")? {
+        e.hub_urls = v;
+    }
+    if let Some(v) = env_list("TOWONEL_EDGE__PUBLIC_ADDRESSES")? {
+        e.public_addresses = v;
+    }
+    if let Some(v) = env_parse::<usize>("TOWONEL_EDGE__LISTEN_WORKERS")? {
+        e.listen_workers = v;
+    }
+    apply_tls_env(&mut e.tls)?;
+    Ok(())
+}
+
+fn apply_tls_env(tls: &mut Option<TlsConfig>) -> anyhow::Result<()> {
+    let cert_dir = env::var("TOWONEL_EDGE__TLS__CERT_DIR").ok();
+    let acme_email = env::var("TOWONEL_EDGE__TLS__ACME_EMAIL").ok();
+    let acme_staging = env_bool("TOWONEL_EDGE__TLS__ACME_STAGING")?;
+    let http_listen_addr = env::var("TOWONEL_EDGE__TLS__HTTP_LISTEN_ADDR").ok();
+
+    if cert_dir.is_none()
+        && acme_email.is_none()
+        && acme_staging.is_none()
+        && http_listen_addr.is_none()
+    {
+        return Ok(());
+    }
+
+    let t = tls.get_or_insert_with(|| TlsConfig {
+        cert_dir: PathBuf::from("/data/certs"),
+        acme_email: None,
+        acme_staging: false,
+        http_listen_addr: "0.0.0.0:80".to_string(),
+    });
+    if let Some(v) = cert_dir {
+        t.cert_dir = PathBuf::from(v);
+    }
+    if let Some(v) = acme_email {
+        t.acme_email = Some(v);
+    }
+    if let Some(v) = acme_staging {
+        t.acme_staging = v;
+    }
+    if let Some(v) = http_listen_addr {
+        t.http_listen_addr = v;
+    }
+    Ok(())
+}
+
+fn validate(c: &NodeConfig) -> anyhow::Result<()> {
+    let allow_unpinned = env::var("TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    for peer in &c.hub.peers {
+        require_https(&peer.url, "federation peer URL")?;
+        match &peer.node_id {
+            Some(id) => {
+                if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    anyhow::bail!(
+                        "federation peer node_id must be 64 hex chars: got {id:?} for {}",
+                        peer.url
+                    );
+                }
+            }
+            None if allow_unpinned => {
+                tracing::warn!(
+                    peer = %peer.url,
+                    "federation peer has no pinned node_id and TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=1; bootstrap will trust the first /v1/health response (MITM-able)"
+                );
+            }
+            None => {
+                anyhow::bail!(
+                    "federation peer {} has no pinned node_id — set node_id to close the MITM window, or set TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=1 to override (not recommended)",
+                    peer.url
+                );
+            }
+        }
+    }
+    for url in &c.edge.hub_urls {
+        require_https(url, "hub_urls entry")?;
+    }
+    if let Some(url) = &c.hub.dns_webhook_url {
+        require_https(url, "dns_webhook_url")?;
+    }
+    c.hub.federation.validate()?;
+    Ok(())
+}
+
+fn env_required(key: &str) -> anyhow::Result<String> {
+    env::var(key).map_err(|_| anyhow::anyhow!("required env var {key} is not set"))
+}
+
+fn env_bool(key: &str) -> anyhow::Result<Option<bool>> {
+    env::var(key)
+        .ok()
+        .map(|v| parse_bool(&v).map_err(|e| anyhow::anyhow!("{key}: {e}")))
+        .transpose()
+}
+
+fn env_parse<T: FromStr>(key: &str) -> anyhow::Result<Option<T>>
+where
+    T::Err: std::fmt::Display,
+{
+    env::var(key)
+        .ok()
+        .map(|v| v.parse::<T>().map_err(|e| anyhow::anyhow!("{key}: {e}")))
+        .transpose()
+}
+
+fn env_list(key: &str) -> anyhow::Result<Option<Vec<String>>> {
+    env::var(key)
+        .ok()
+        .map(|v| parse_list(&v).map_err(|e| anyhow::anyhow!("{key}: {e}")))
+        .transpose()
+}
+
+fn env_json<T: serde::de::DeserializeOwned>(key: &str) -> anyhow::Result<Option<T>> {
+    env::var(key)
+        .ok()
+        .map(|v| serde_json::from_str(&v).map_err(|e| anyhow::anyhow!("{key}: {e}")))
+        .transpose()
+}
+
+fn parse_bool(raw: &str) -> anyhow::Result<bool> {
+    match raw.trim() {
+        "1" | "true" | "TRUE" | "True" => Ok(true),
+        "0" | "false" | "FALSE" | "False" => Ok(false),
+        other => anyhow::bail!("expected true/false/1/0, got {other:?}"),
+    }
+}
+
+fn parse_list(raw: &str) -> anyhow::Result<Vec<String>> {
+    let trimmed = raw.trim();
     if trimmed.starts_with('[') {
         return serde_json::from_str(trimmed).map_err(Into::into);
     }
@@ -391,201 +514,9 @@ fn parse_list_env(value: &str) -> anyhow::Result<Vec<String>> {
         .collect())
 }
 
-fn require_https(url: &str, context: &str) -> anyhow::Result<()> {
-    if !url.starts_with("https://") {
-        anyhow::bail!("{context} must use https://: got {url:?}");
-    }
-    Ok(())
-}
-
-impl NodeConfig {
-    /// Load config from TOML (optional — missing file is fine for env-only
-    /// deployments like Kubernetes), then layer `TOWONEL_*` env-var overrides
-    /// on top. Section/field separator is `__` so single-underscore field
-    /// names like `listen_addr` stay readable:
-    ///
-    /// ```text
-    /// TOWONEL_IDENTITY__KEY_PATH=/var/lib/towonel/node.key
-    /// TOWONEL_HUB__LISTEN_ADDR=0.0.0.0:8443
-    /// TOWONEL_HUB__DATABASE__DRIVER=postgres
-    /// TOWONEL_HUB__DATABASE__DSN=postgresql://...
-    /// # String lists: CSV (preferred in K8s) or JSON.
-    /// TOWONEL_EDGE__HUB_URLS=https://hub-a.example.eu:8443
-    /// # Complex structured lists: JSON only.
-    /// TOWONEL_HUB__PEERS='[{"url":"https://hub-b.example.eu:8443","node_id":"deadbeef..."}]'
-    /// TOWONEL_TENANTS='[{"name":"alice","hostnames":["app.alice.test"],...}]'
-    /// ```
-    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
-        use figment::Figment;
-        use figment::providers::{Env, Format, Toml};
-
-        let list_env_names: Vec<&str> = STRING_LIST_ENVS.iter().map(|(name, _)| *name).collect();
-        let figment_filter_keys: Vec<String> = list_env_names
-            .iter()
-            .chain(&["TOWONEL_TENANTS", "TOWONEL_HUB__PEERS"])
-            .map(|name| {
-                name.trim_start_matches("TOWONEL_")
-                    .to_lowercase()
-                    .replace("__", ".")
-            })
-            .collect();
-
-        let mut config: Self = Figment::new()
-            .merge(Toml::file(path))
-            .merge(
-                Env::prefixed("TOWONEL_")
-                    .split("__")
-                    .filter(move |key| !figment_filter_keys.contains(&key.to_string())),
-            )
-            .extract()
-            .map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?;
-
-        for (name, setter) in STRING_LIST_ENVS {
-            if let Ok(v) = std::env::var(name) {
-                setter(&mut config, parse_list_env(&v)?);
-            }
-        }
-        if let Ok(v) = std::env::var("TOWONEL_TENANTS") {
-            config.tenants = serde_json::from_str(&v)?;
-        }
-        if let Ok(v) = std::env::var("TOWONEL_HUB__PEERS") {
-            config.hub.peers = serde_json::from_str(&v)?;
-        }
-
-        let allow_unpinned = std::env::var("TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS")
-            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-        for peer in &config.hub.peers {
-            require_https(&peer.url, "federation peer URL")?;
-            match &peer.node_id {
-                Some(id) => {
-                    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        anyhow::bail!(
-                            "federation peer node_id must be 64 hex chars: got {id:?} for {}",
-                            peer.url
-                        );
-                    }
-                }
-                None if allow_unpinned => {
-                    tracing::warn!(
-                        peer = %peer.url,
-                        "federation peer has no pinned node_id and TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=1; bootstrap will trust the first /v1/health response (MITM-able)"
-                    );
-                }
-                None => {
-                    anyhow::bail!(
-                        "federation peer {} has no pinned node_id — set hub.peers[].node_id to close the MITM window, or set TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=1 to override (not recommended)",
-                        peer.url
-                    );
-                }
-            }
-        }
-        for url in &config.edge.hub_urls {
-            require_https(url, "hub_urls entry")?;
-        }
-        if let Some(url) = &config.hub.dns_webhook_url {
-            require_https(url, "dns_webhook_url")?;
-        }
-
-        config.hub.federation.validate()?;
-
-        Ok(config)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const IDENTITY: &str = r#"
-        [identity]
-        key_path = "node.key"
-    "#;
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn hub_urls_array_loads() {
-        let toml_str = format!(
-            r#"{IDENTITY}
-            [edge]
-            hub_urls = ["https://hub-a.example.eu:8443", "https://hub-b.example.eu:8443"]
-            "#
-        );
-        let config: NodeConfig =
-            toml::from_str(&toml_str).expect("valid hub_urls array should parse");
-        assert_eq!(
-            config.edge.hub_urls,
-            vec![
-                "https://hub-a.example.eu:8443".to_string(),
-                "https://hub-b.example.eu:8443".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn legacy_hub_url_scalar_is_rejected() {
-        let toml_str = format!(
-            r#"{IDENTITY}
-            [edge]
-            hub_url = "https://legacy.example.eu:8443"
-            "#
-        );
-        let err =
-            toml::from_str::<NodeConfig>(&toml_str).expect_err("scalar hub_url must be rejected");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("hub_url"),
-            "error should name the offending field, got: {msg}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn peers_table_loads_with_pinned_node_id() {
-        let toml_str = format!(
-            r#"{IDENTITY}
-            [hub]
-            peers = [
-              {{ url = "https://hub-b.example.eu:8443", node_id = "{}" }},
-            ]
-            "#,
-            "a".repeat(64)
-        );
-        let config: NodeConfig = toml::from_str(&toml_str).expect("valid peers table parses");
-        assert_eq!(config.hub.peers.len(), 1);
-        assert_eq!(config.hub.peers[0].url, "https://hub-b.example.eu:8443");
-        assert_eq!(
-            config.hub.peers[0].node_id.as_deref(),
-            Some(&*"a".repeat(64))
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn peers_table_accepts_omitted_node_id() {
-        let toml_str = format!(
-            r#"{IDENTITY}
-            [hub]
-            peers = [{{ url = "https://hub-b.example.eu:8443" }}]
-            "#
-        );
-        let config: NodeConfig = toml::from_str(&toml_str).expect("parses without node_id");
-        assert!(config.hub.peers[0].node_id.is_none());
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn legacy_peer_urls_is_rejected() {
-        let toml_str = format!(
-            r#"{IDENTITY}
-            [hub]
-            peer_urls = ["https://legacy.example.eu:8443"]
-            "#
-        );
-        let err = toml::from_str::<NodeConfig>(&toml_str)
-            .expect_err("legacy peer_urls field must be rejected");
-        assert!(err.to_string().contains("peer_urls"));
-    }
 
     #[test]
     fn federation_sync_invite_redeem_recognised() {
@@ -607,39 +538,31 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn parse_list_env_accepts_csv() {
-        let out =
-            parse_list_env("https://a.example.eu, https://b.example.eu , https://c.example.eu")
-                .expect("csv parses");
-        assert_eq!(
-            out,
-            vec![
-                "https://a.example.eu".to_string(),
-                "https://b.example.eu".to_string(),
-                "https://c.example.eu".to_string(),
-            ]
-        );
+    fn parse_list_accepts_csv() {
+        let got =
+            parse_list("https://a.example.eu, https://b.example.eu ,https://c.example.eu").unwrap();
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0], "https://a.example.eu");
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn parse_list_env_accepts_json() {
-        let out = parse_list_env(r#"["https://a.example.eu","https://b.example.eu"]"#)
-            .expect("json parses");
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0], "https://a.example.eu");
+    fn parse_list_accepts_json() {
+        let got = parse_list(r#"["https://a.example.eu","https://b.example.eu"]"#).unwrap();
+        assert_eq!(got.len(), 2);
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    fn parse_list_env_ignores_empty_csv_entries() {
-        let out = parse_list_env(",a,,b,").expect("csv parses");
-        assert_eq!(out, vec!["a".to_string(), "b".to_string()]);
+    fn parse_list_ignores_empty_csv_entries() {
+        let got = parse_list(",a,,b,").unwrap();
+        assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
     }
 
     #[test]
-    fn parse_list_env_empty_string_is_empty_list() {
-        assert!(parse_list_env("").unwrap_or_default().is_empty());
+    fn parse_bool_accepts_common_forms() {
+        assert!(parse_bool("true").unwrap());
+        assert!(parse_bool("1").unwrap());
+        assert!(!parse_bool("false").unwrap());
+        assert!(!parse_bool("0").unwrap());
+        assert!(parse_bool("nope").is_err());
     }
 }

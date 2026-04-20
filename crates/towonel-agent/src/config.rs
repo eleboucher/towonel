@@ -1,10 +1,8 @@
 use serde::Deserialize;
 use towonel_common::tls_policy::TlsMode;
 
-/// Agent-side routing config. In the stateless model the only thing the
-/// TOML file carries is the list of services this pod serves (hostname →
-/// origin mapping, optional TLS mode). Identity, hub URL, and trusted
-/// edges come from the invite token at boot time -- not from disk.
+/// Agent-side routing config: the list of services this agent serves.
+/// Identity, hub URL, and trusted edges come from the invite token.
 #[derive(Debug, Deserialize, Default)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -68,21 +66,16 @@ impl Default for ProxyProtocol {
 }
 
 impl AgentConfig {
-    /// Load config from TOML, then override `services` with the
-    /// `TOWONEL_AGENT_SERVICES` env var (JSON-encoded array). The env var
-    /// is the preferred shape in K8s where `ConfigMaps` would force a pod
-    /// restart on every edit.
-    pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
-        let mut config: Self = if path.exists() {
-            toml::from_str(&std::fs::read_to_string(path)?)?
-        } else {
-            Self::default()
-        };
-
-        if let Ok(v) = std::env::var("TOWONEL_AGENT_SERVICES") {
-            config.services = serde_json::from_str(&v)?;
-        }
-        Ok(config)
+    /// Load `services` from `TOWONEL_AGENT_SERVICES` (JSON-encoded array).
+    /// Empty when the env var is unset — the agent runs, it just won't
+    /// publish any TLS-termination hints.
+    pub fn load() -> anyhow::Result<Self> {
+        let services = std::env::var("TOWONEL_AGENT_SERVICES")
+            .ok()
+            .map(|v| serde_json::from_str::<Vec<ServiceConfig>>(&v))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(Self { services })
     }
 }
 

@@ -15,7 +15,7 @@ use super::db::temp_db;
 
 pub(super) const OPERATOR_KEY: &str = "test-operator-api-key";
 
-/// Deterministic Ed25519 public key derived from a fixed seed. Used across
+/// Deterministic iroh `EndpointId` derived from a fixed seed. Used across
 /// hub tests that need a syntactically valid `node_id` / `edge_node_id`.
 fn fake_endpoint_id() -> iroh::EndpointId {
     iroh::SecretKey::from([1u8; 32]).public()

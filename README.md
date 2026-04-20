@@ -150,10 +150,9 @@ No PVC, no `StatefulSet`, no init container.
 
 ## Configuration
 
-All settings are configurable through `TOWONEL_*` environment
-variables (double underscore separates config sections), or a TOML
-file. Lists may be passed as CSV or JSON; structured lists require
-JSON.
+All settings come from `TOWONEL_*` environment variables (double
+underscore separates config sections). Lists may be passed as CSV or
+JSON; structured lists (peers, tenants, services) require JSON.
 
 ### Hub
 
@@ -169,7 +168,7 @@ JSON.
 | `TOWONEL_HUB__DATABASE__DSN` | `hub.db` | Connection string |
 | `TOWONEL_HUB__DATABASE__MAX_OPEN_CONNS` | `4` / `25` | Pool size |
 | `TOWONEL_HUB__DNS_WEBHOOK_URL` | | Webhook for hostname changes |
-| `TOWONEL_HUB__PEER_URLS` | | Federation peers (CSV or JSON) |
+| `TOWONEL_HUB__PEERS` | | Federation peers (JSON array of `{url, node_id}`) |
 
 ### Edge
 
@@ -211,8 +210,8 @@ Service shape:
 | `TOWONEL_HUB_URL` | Default `--hub-url` |
 | `TOWONEL_OPERATOR_KEY` | Default `--api-key` for operator commands |
 
-Full examples live in [`examples/agent.toml`](examples/agent.toml)
-and [`examples/node.toml`](examples/node.toml).
+Full examples live in [`examples/agent.env.example`](examples/agent.env.example)
+and [`examples/node.env.example`](examples/node.env.example).
 
 ## TLS modes
 
@@ -264,7 +263,8 @@ towonel-cli edge-invite create --name charlie-fra1
 
 # on the new edge
 towonel-node init --edge-invite tt_edge_1_...
-towonel-node --config /etc/towonel/node.toml
+# init prints the TOWONEL_* env vars to export; then:
+towonel-node
 ```
 
 Edge invites are single-use and bind the edge's iroh `node_id` at
@@ -276,16 +276,15 @@ Hubs can replicate tenants and entries bidirectionally over HTTPS.
 Peers are pinned by iroh `node_id` to close an MITM window at first
 contact:
 
-```toml
-[hub]
-peers = [
-  { url = "https://hub-b.example.eu:8443", node_id = "deadbeef..." },
-  { url = "https://hub-c.example.eu:8443", node_id = "cafebabe..." },
-]
+```bash
+TOWONEL_HUB__PEERS='[
+  {"url":"https://hub-b.example.eu:8443","node_id":"deadbeef..."},
+  {"url":"https://hub-c.example.eu:8443","node_id":"cafebabe..."}
+]'
 ```
 
 Push state is persisted, so a restart does not replay everything.
-Inbound pushes are Ed25519-signed with replay protection.
+Inbound pushes are signed with the hub's iroh node key and replay-protected.
 
 ## DNS webhook
 
@@ -312,7 +311,7 @@ keep A records in sync with the edge IP.
   time. Revoked invites return the same `401` as a wrong secret.
 - Heartbeat signatures are body-bound; a captured header cannot be
   replayed with a different body.
-- Federation pushes use Ed25519 with a nonce cache.
+- Federation pushes are signed with the hub's iroh node key, with a nonce cache for replay protection.
 - Per-IP rate limiting on public endpoints.
 
 ## HTTP API
