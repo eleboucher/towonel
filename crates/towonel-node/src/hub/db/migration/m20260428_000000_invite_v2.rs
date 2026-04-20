@@ -31,7 +31,7 @@ async fn warn_if_destructive(manager: &SchemaManager<'_>) {
             existing_invites = count,
             "migration m20260428_invite_v2: dropping `invites` and \
              `invite_hostnames` -- existing rows will be lost. v1 tokens \
-             are invalid under v2; reissue with `towonel-cli invite create`.",
+             are invalid under v2; reissue with `towonel invite create`.",
         );
     } else {
         tracing::info!("migration m20260428_invite_v2: applying schema (no existing rows)");

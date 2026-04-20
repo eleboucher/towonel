@@ -5502,30 +5502,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "towonel-cli"
-version = "0.0.1"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "argon2",
- "base64",
- "ciborium",
- "clap",
- "ed25519-dalek 2.2.0",
- "getrandom 0.4.2",
- "humantime",
- "reqwest",
- "rpassword",
- "rustls",
- "serde",
- "serde_json",
- "tokio",
- "towonel-common",
- "tracing-subscriber",
- "zeroize",
-]
-
-[[package]]
 name = "towonel-common"
 version = "0.0.1"
 dependencies = [
@@ -5556,8 +5532,10 @@ dependencies = [
 name = "towonel-node"
 version = "0.0.1"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "arc-swap",
+ "argon2",
  "async-stream",
  "async-trait",
  "axum",
@@ -5571,6 +5549,7 @@ dependencies = [
  "fastrand",
  "getrandom 0.4.2",
  "hex",
+ "humantime",
  "instant-acme",
  "iroh",
  "moka",
@@ -5578,6 +5557,7 @@ dependencies = [
  "papaya",
  "prometheus-client",
  "reqwest",
+ "rpassword",
  "rustls",
  "rustls-pemfile",
  "sea-orm",

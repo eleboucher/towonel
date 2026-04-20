@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [[bin]]
-name = "towonel-node"
+name = "towonel"
 path = "src/main.rs"
 
 [dependencies]
@@ -19,6 +19,11 @@ ciborium = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
+# Admin subcommands depend on the following crates.
+humantime = "2"
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+rpassword = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

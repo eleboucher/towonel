@@ -1,6 +1,5 @@
 pub mod agent_liveness;
 pub mod edge_invites;
-pub mod edges;
 pub mod entries;
 pub mod federated_tenant_hostnames;
 pub mod federated_tenants;

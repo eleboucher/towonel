@@ -4,20 +4,14 @@ use serde::{Deserialize, Serialize};
 use towonel_common::identity::{PqPublicKey, TenantId};
 use towonel_common::invite::INVITE_ID_LEN;
 
-/// Status of an invite.
-///
-/// - `Pending`: created, not revoked. Tenant invites stay here indefinitely
-///   (v2 tenant invites are re-usable by N replicas, so there's no
-///   "consumed" transition). Edge invites flip to `Redeemed` after their
-///   one-shot redemption.
-/// - `Redeemed`: edge invite that has been redeemed once (edge `node_id`
-///   is now registered). Does not apply to tenant invites.
-/// - `Revoked`: operator retired the invite; not usable.
+/// Status of an invite. v2 invites carry the seed inside the token, so
+/// `Pending` is the live state for the whole credential's life and
+/// `Revoked` is the only sink. There is no "consumed" / "redeemed"
+/// transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InviteStatus {
     Pending,
-    Redeemed,
     Revoked,
 }
 
@@ -25,7 +19,6 @@ impl InviteStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
-            Self::Redeemed => "redeemed",
             Self::Revoked => "revoked",
         }
     }
@@ -33,7 +26,6 @@ impl InviteStatus {
     pub fn parse(s: &str) -> anyhow::Result<Self> {
         match s {
             "pending" => Ok(Self::Pending),
-            "redeemed" => Ok(Self::Redeemed),
             "revoked" => Ok(Self::Revoked),
             other => anyhow::bail!("unknown invite status: {other}"),
         }
@@ -91,11 +83,14 @@ pub struct FederatedTenant {
     pub registered_at_ms: u64,
 }
 
+/// `edge_node_id` is derived from the seed in the token and bound at
+/// creation time. Edge invites don't carry an expiry: revoke to cut
+/// access.
 pub struct PendingEdgeInvite<'a> {
     pub invite_id: [u8; INVITE_ID_LEN],
     pub name: &'a str,
     pub secret_hash: [u8; 32],
-    pub expires_at_ms: u64,
+    pub edge_node_id: [u8; 32],
     pub created_at_ms: u64,
 }
 
@@ -104,9 +99,7 @@ pub struct EdgeInviteRow {
     pub invite_id: [u8; INVITE_ID_LEN],
     pub name: String,
     pub secret_hash: [u8; 32],
-    pub expires_at_ms: u64,
     pub status: InviteStatus,
-    pub edge_node_id: Option<[u8; 32]>,
-    pub redeemed_at_ms: Option<u64>,
+    pub edge_node_id: [u8; 32],
     pub created_at_ms: u64,
 }

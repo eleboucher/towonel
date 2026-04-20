@@ -299,10 +299,6 @@ fn public_write_routes() -> Router<Arc<AppState>> {
         .route("/v1/tenants/{id}/entries", get(entries::get_tenant_entries))
         .route("/v1/bootstrap", post(bootstrap::post_bootstrap))
         .route("/v1/agent/heartbeat", post(agent_heartbeat::post_heartbeat))
-        .route(
-            "/v1/edge-invites/redeem",
-            post(edge_invites::redeem_edge_invite),
-        )
         .route("/v1/routes/subscribe", get(subscribe::routes_subscribe))
 }
 

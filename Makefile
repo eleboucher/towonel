@@ -3,7 +3,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 build:
-	cargo build --release -p towonel-agent -p towonel-node -p towonel-cli
+	cargo build --release -p towonel-agent -p towonel-node
 
 test:
 	cargo test --all-targets

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use towonel_common::invite::EdgeInviteToken;
 
 /// Which database driver the hub talks to. `sqlite` is the single-node
 /// default; `postgres` is for multi-node deployments.
@@ -100,8 +101,28 @@ pub struct NodeConfig {
 }
 
 #[derive(Debug)]
+pub enum IdentitySource {
+    KeyFile(PathBuf),
+    /// Seed extracted from `TOWONEL_EDGE_INVITE_TOKEN`. Wrapped in
+    /// [`zeroize::Zeroizing`] so the plaintext bytes are wiped when the
+    /// config is dropped.
+    EdgeInviteSeed(zeroize::Zeroizing<[u8; 32]>),
+}
+
+#[derive(Debug)]
 pub struct IdentityConfig {
-    pub key_path: PathBuf,
+    pub source: IdentitySource,
+}
+
+impl IdentityConfig {
+    pub fn load_secret_key(&self) -> anyhow::Result<iroh::SecretKey> {
+        match &self.source {
+            IdentitySource::KeyFile(path) => {
+                towonel_common::identity::load_or_generate_secret_key(path)
+            }
+            IdentitySource::EdgeInviteSeed(seed) => Ok(iroh::SecretKey::from_bytes(seed)),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -197,6 +218,7 @@ pub struct TenantEntry {
 #[serde(default)]
 struct RawEnv {
     identity_key_path: Option<PathBuf>,
+    edge_invite_token: Option<String>,
 
     hub_enabled: Option<bool>,
     hub_listen_addr: Option<String>,
@@ -241,11 +263,38 @@ impl NodeConfig {
 
     fn from_raw(r: RawEnv) -> anyhow::Result<Self> {
         let tls = build_tls(&r);
+
+        let edge_invite = r
+            .edge_invite_token
+            .as_deref()
+            .map(|raw| {
+                EdgeInviteToken::decode(raw.trim())
+                    .map_err(|e| anyhow::anyhow!("invalid TOWONEL_EDGE_INVITE_TOKEN: {e}"))
+            })
+            .transpose()?;
+
         let identity = IdentityConfig {
-            key_path: r
-                .identity_key_path
-                .ok_or_else(|| anyhow::anyhow!("TOWONEL_IDENTITY_KEY_PATH is required"))?,
+            source: match (&edge_invite, r.identity_key_path) {
+                (Some(token), _) => {
+                    IdentitySource::EdgeInviteSeed(zeroize::Zeroizing::new(token.node_seed))
+                }
+                (None, Some(path)) => IdentitySource::KeyFile(path),
+                (None, None) => {
+                    anyhow::bail!(
+                        "identity source missing: set TOWONEL_IDENTITY_KEY_PATH, \
+                         or provide a TOWONEL_EDGE_INVITE_TOKEN issued by the hub"
+                    );
+                }
+            },
         };
+
+        let mut edge_hub_urls = trim_entries(r.edge_hub_urls);
+        if let Some(token) = &edge_invite
+            && edge_hub_urls.is_empty()
+        {
+            edge_hub_urls.push(token.hub_url.trim_end_matches('/').to_string());
+        }
+
         let edge = EdgeConfig {
             enabled: r.edge_enabled.unwrap_or(true),
             listen_addr: r
@@ -254,7 +303,7 @@ impl NodeConfig {
             health_listen_addr: r
                 .edge_health_listen_addr
                 .unwrap_or_else(|| "0.0.0.0:9090".to_string()),
-            hub_urls: trim_entries(r.edge_hub_urls),
+            hub_urls: edge_hub_urls,
             public_addresses: trim_entries(r.edge_public_addresses),
             tls,
             listen_workers: r.edge_listen_workers.unwrap_or(1),

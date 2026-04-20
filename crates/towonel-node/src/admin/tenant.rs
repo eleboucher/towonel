@@ -4,7 +4,7 @@ use anyhow::{Context, anyhow};
 use towonel_common::config_entry::ConfigOp;
 use towonel_common::identity::{AgentId, load_tenant_keypair, write_key_file};
 
-use super::entry_cmds::{fetch_entries, submit_payload};
+use super::entry::{fetch_entries, submit_payload};
 use super::{check_response, resolve_hub_url, resolve_operator_key, resolve_tenant_key_path};
 
 const KEY_BACKUP_PREFIX: &str = "towonel-key-v1:";
@@ -227,9 +227,7 @@ pub fn cmd_tenant_export_key(
     println!("  {encoded}");
     println!();
     println!("Tenant ID: {}", keypair.id());
-    println!(
-        "Restore with: towonel-cli tenant import-key --backup '{encoded}' --key-path tenant.key"
-    );
+    println!("Restore with: towonel tenant import-key --backup '{encoded}' --key-path tenant.key");
     Ok(())
 }
 
