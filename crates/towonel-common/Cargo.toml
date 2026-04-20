@@ -1,7 +1,6 @@
 [package]
 name = "towonel-common"
 version.workspace = true
-edition = "2024"
 publish = false
 
 [dependencies]

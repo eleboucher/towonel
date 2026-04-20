@@ -1,7 +1,6 @@
 [package]
 name = "towonel"
 version.workspace = true
-edition = "2024"
 publish = false
 
 [workspace.package]
