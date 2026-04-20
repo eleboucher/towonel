@@ -13,9 +13,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::hostname::wildcard_lookup;
 use towonel_common::metrics::GaugeGuard;
-use towonel_common::tunnel::{
-    COPY_BUF_SIZE, ClientAddrs, forward_quic_to_writer, read_client_addrs, read_hostname_header,
-};
+use towonel_common::tunnel::{COPY_BUF_SIZE, ClientAddrs, forward_quic_to_writer, read_handshake};
 
 use crate::config::{ProxyProtocol, ServiceConfig};
 use crate::metrics::{self, AgentMetrics};
@@ -276,13 +274,9 @@ async fn handle_stream(
     let _active = GaugeGuard::inc(&metrics.streams_active);
 
     let handshake = async {
-        let hostname = read_hostname_header(&mut quic_recv)
+        read_handshake(&mut quic_recv)
             .await
-            .context("failed to read hostname header")?;
-        let client_addrs = read_client_addrs(&mut quic_recv)
-            .await
-            .context("failed to read client-addrs header")?;
-        Ok::<_, anyhow::Error>((hostname, client_addrs))
+            .context("failed to read PROXY v2 preamble")
     };
     let (hostname, client_addrs) =
         match tokio::time::timeout(STREAM_HANDSHAKE_TIMEOUT, handshake).await {

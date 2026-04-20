@@ -51,6 +51,7 @@ smallvec = { workspace = true }
 tokio-util = { workspace = true }
 normpath = { workspace = true }
 fastrand = { workspace = true }
+envy = { workspace = true }
 
 [dev-dependencies]
 

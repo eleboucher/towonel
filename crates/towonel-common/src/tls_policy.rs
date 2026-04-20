@@ -68,15 +68,6 @@ impl TlsPolicyTable {
     pub fn len(&self) -> usize {
         self.policies.len()
     }
-
-    #[must_use]
-    pub fn terminate_hostnames(&self) -> Vec<String> {
-        self.policies
-            .iter()
-            .filter(|(_, m)| matches!(m, TlsMode::Terminate))
-            .map(|(h, _)| h.clone())
-            .collect()
-    }
 }
 
 #[cfg(test)]
@@ -115,15 +106,5 @@ mod tests {
         let mut table = TlsPolicyTable::new();
         table.insert("APP.Example.COM", TlsMode::Passthrough);
         assert_eq!(table.lookup("app.example.com"), TlsMode::Passthrough);
-    }
-
-    #[test]
-    fn terminate_hostnames_lists_only_terminate_entries() {
-        let mut table = TlsPolicyTable::new();
-        table.insert("a.example.com", TlsMode::Passthrough);
-        table.insert("b.example.com", TlsMode::Terminate);
-        let hosts = table.terminate_hostnames();
-        assert_eq!(hosts.len(), 1);
-        assert_eq!(hosts[0], "b.example.com");
     }
 }

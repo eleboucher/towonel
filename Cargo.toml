@@ -136,3 +136,8 @@ smallvec = "1"
 tokio-util = { version = "0.7", features = ["rt"] }
 blake3 = "1"
 normpath = "1"
+petname = { version = "3", default-features = false, features = [
+  "default-rng",
+  "default-words",
+] }
+envy = "0.4"
