@@ -159,7 +159,6 @@ pub async fn cmd_invite_revoke(
 struct CreateEdgeInviteReq<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
-    expires_in_secs: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -167,7 +166,7 @@ struct CreateEdgeInviteResp {
     token: String,
     invite_id: String,
     name: String,
-    expires_at_ms: u64,
+    edge_node_id: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -181,23 +180,15 @@ struct EdgeInviteItem {
     invite_id: String,
     name: String,
     status: String,
-    expires_at_ms: u64,
 }
 
 pub async fn cmd_edge_invite_create(
     hub_url: Option<String>,
     api_key: Option<String>,
     name: Option<String>,
-    expires: String,
 ) -> anyhow::Result<()> {
     let hub_url = resolve_hub_url(hub_url)?;
     let api_key = resolve_operator_key(api_key)?;
-    let dur = humantime::parse_duration(&expires)
-        .with_context(|| format!("invalid duration `{expires}`"))?;
-    let expires_in_secs = dur.as_secs();
-    if expires_in_secs == 0 {
-        return Err(anyhow!("--expires must be > 0"));
-    }
 
     let url = format!("{}/v1/edge-invites", hub_url.trim_end_matches('/'));
     let resp = reqwest::Client::new()
@@ -206,7 +197,6 @@ pub async fn cmd_edge_invite_create(
         .header(reqwest::header::CONTENT_TYPE, JSON_CONTENT_TYPE)
         .json(&CreateEdgeInviteReq {
             name: name.as_deref(),
-            expires_in_secs,
         })
         .send()
         .await
@@ -216,12 +206,12 @@ pub async fn cmd_edge_invite_create(
     let parsed: CreateEdgeInviteResp = serde_json::from_slice(&body)?;
 
     println!("Created edge invite for \"{}\"", parsed.name);
-    println!("  Invite ID: {}", parsed.invite_id);
-    println!("  Expires:   {} (in {expires})", parsed.expires_at_ms);
+    println!("  Invite ID:    {}", parsed.invite_id);
+    println!("  Edge node ID: {}", parsed.edge_node_id);
     println!();
-    println!("Send this token to the VPS operator (one-time use):");
+    println!("Give this token to the VPS operator (re-usable; keep it secret):");
     println!();
-    println!("  {}", parsed.token);
+    println!("  TOWONEL_EDGE_INVITE_TOKEN={}", parsed.token);
     Ok(())
 }
 
@@ -247,14 +237,13 @@ pub async fn cmd_edge_invite_list(
         println!("No edge invites.");
         return Ok(());
     }
-    println!("{:<24} {:<20} {:<10} EXPIRES_AT_MS", "ID", "NAME", "STATUS");
+    println!("{:<24} {:<20} STATUS", "ID", "NAME");
     for inv in &parsed.invites {
         println!(
-            "{:<24} {:<20} {:<10} {}",
+            "{:<24} {:<20} {}",
             short(&inv.invite_id, 20),
             short(&inv.name, 18),
             inv.status,
-            inv.expires_at_ms
         );
     }
     Ok(())

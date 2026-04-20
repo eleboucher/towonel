@@ -36,7 +36,6 @@ members = [
   "crates/towonel-common",
   "crates/towonel-agent",
   "crates/towonel-node",
-  "crates/towonel-cli",
 ]
 
 [profile.release]

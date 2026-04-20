@@ -53,9 +53,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
                AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
                AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
     fi && \
-    cargo build --release -p towonel-node -p towonel-cli \
+    cargo build --release -p towonel-node \
     && mkdir -p /out \
-    && cp target/release/towonel-node target/release/towonel-cli /out/
+    && cp target/release/towonel /out/
 
 FROM debian:bookworm-slim AS runtime-prep
 RUN apt-get update \
@@ -64,12 +64,14 @@ RUN apt-get update \
     && groupadd -g 10001 nonroot \
     && useradd -u 10001 -g 10001 -M -s /sbin/nologin nonroot \
     && install -d -o 10001 -g 10001 /var/lib/towonel /etc/towonel /data/certs /home/nonroot
-COPY --from=builder /out/towonel-node /usr/local/bin/towonel-node
-COPY --from=builder /out/towonel-cli  /usr/local/bin/towonel-cli
-RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/towonel-node
+COPY --from=builder /out/towonel /usr/local/bin/towonel
+RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/towonel
 
-FROM gcr.io/distroless/cc-debian12
-LABEL org.opencontainers.image.title="towonel-node" \
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin \
+    && rm -rf /var/lib/apt/lists/*
+LABEL org.opencontainers.image.title="towonel" \
       org.opencontainers.image.source="https://git.erwanleboucher.dev/erwan/turbo-tunnel" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 COPY --from=runtime-prep /etc/passwd /etc/passwd
@@ -78,8 +80,10 @@ COPY --from=runtime-prep --chown=10001:10001 /var/lib/towonel /var/lib/towonel
 COPY --from=runtime-prep --chown=10001:10001 /etc/towonel     /etc/towonel
 COPY --from=runtime-prep --chown=10001:10001 /data/certs      /data/certs
 COPY --from=runtime-prep --chown=10001:10001 /home/nonroot    /home/nonroot
-COPY --from=runtime-prep /usr/local/bin/towonel-node /usr/local/bin/towonel-node
-COPY --from=runtime-prep /usr/local/bin/towonel-cli  /usr/local/bin/towonel-cli
+COPY --from=runtime-prep /usr/local/bin/towonel /usr/local/bin/towonel
+RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/towonel
 WORKDIR /home/nonroot
 USER 10001:10001
-ENTRYPOINT ["/usr/local/bin/towonel-node"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD curl --max-time 2 -fsS http://localhost:8443/v1/health || exit 1
+ENTRYPOINT ["/usr/local/bin/towonel"]

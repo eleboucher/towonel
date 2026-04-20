@@ -6,7 +6,7 @@ use sea_orm::{
 use towonel_common::identity::{PqPublicKey, TenantId};
 use towonel_common::invite::INVITE_ID_LEN;
 
-use super::entities::{edge_invites, edges, invite_hostnames, invites, tenant_removals};
+use super::entities::{edge_invites, invite_hostnames, invites, tenant_removals};
 use super::{
     Db, EdgeInviteRow, InviteRow, InviteStatus, PendingEdgeInvite, PendingInvite, RedeemedTenant,
     bytes_to_array, tenant_id_bytes,
@@ -174,25 +174,13 @@ impl Db {
             invite_id: ActiveValue::Set(invite.invite_id.to_vec()),
             name: ActiveValue::Set(invite.name.to_string()),
             secret_hash: ActiveValue::Set(invite.secret_hash.to_vec()),
-            expires_at_ms: ActiveValue::Set(invite.expires_at_ms.cast_signed()),
             status: ActiveValue::Set(InviteStatus::Pending.as_str().to_string()),
-            edge_node_id: ActiveValue::Set(None),
-            redeemed_at_ms: ActiveValue::Set(None),
+            edge_node_id: ActiveValue::Set(invite.edge_node_id.to_vec()),
             created_at_ms: ActiveValue::Set(invite.created_at_ms.cast_signed()),
         }
         .insert(&self.conn)
         .await?;
         Ok(())
-    }
-
-    pub async fn get_edge_invite(
-        &self,
-        invite_id: &[u8; INVITE_ID_LEN],
-    ) -> anyhow::Result<Option<EdgeInviteRow>> {
-        let model = edge_invites::Entity::find_by_id(invite_id.to_vec())
-            .one(&self.conn)
-            .await?;
-        model.map(model_to_edge_invite_row).transpose()
     }
 
     pub async fn list_edge_invites(&self) -> anyhow::Result<Vec<EdgeInviteRow>> {
@@ -203,59 +191,10 @@ impl Db {
         rows.into_iter().map(model_to_edge_invite_row).collect()
     }
 
-    /// Atomically flip a pending edge invite to `redeemed` and register the
-    /// edge's iroh `node_id`. Both rows land in the same transaction -- either
-    /// both succeed or neither. Returns false if the invite was not pending
-    /// (already redeemed, revoked, or missing).
-    pub async fn redeem_edge_invite(
-        &self,
-        invite_id: &[u8; INVITE_ID_LEN],
-        edge_node_id: &[u8; 32],
-        name: &str,
-        redeemed_at_ms: u64,
-    ) -> anyhow::Result<bool> {
-        let txn = self.conn.begin().await?;
-
-        let updated = edge_invites::Entity::update_many()
-            .col_expr(
-                edge_invites::Column::Status,
-                sea_orm::sea_query::Expr::value(InviteStatus::Redeemed.as_str()),
-            )
-            .col_expr(
-                edge_invites::Column::EdgeNodeId,
-                sea_orm::sea_query::Expr::value(edge_node_id.to_vec()),
-            )
-            .col_expr(
-                edge_invites::Column::RedeemedAtMs,
-                sea_orm::sea_query::Expr::value(redeemed_at_ms.cast_signed()),
-            )
-            .filter(edge_invites::Column::InviteId.eq(invite_id.to_vec()))
-            .filter(edge_invites::Column::Status.eq(InviteStatus::Pending.as_str()))
-            .exec(&txn)
-            .await?;
-        if updated.rows_affected != 1 {
-            txn.rollback().await?;
-            return Ok(false);
-        }
-
-        let edge = edges::ActiveModel {
-            edge_node_id: ActiveValue::Set(edge_node_id.to_vec()),
-            name: ActiveValue::Set(name.to_string()),
-            registered_at_ms: ActiveValue::Set(redeemed_at_ms.cast_signed()),
-        };
-        edges::Entity::insert(edge)
-            .on_conflict(
-                OnConflict::column(edges::Column::EdgeNodeId)
-                    .update_columns([edges::Column::Name, edges::Column::RegisteredAtMs])
-                    .to_owned(),
-            )
-            .exec(&txn)
-            .await?;
-
-        txn.commit().await?;
-        Ok(true)
-    }
-
+    /// Revoke a pending edge invite. The next call to
+    /// [`Self::edge_is_registered`] for that `node_id` returns false
+    /// because the invite row is now `revoked`. Returns false if the
+    /// invite was not pending (already revoked or missing).
     pub async fn revoke_edge_invite(
         &self,
         invite_id: &[u8; INVITE_ID_LEN],
@@ -273,10 +212,14 @@ impl Db {
     }
 
     pub async fn edge_is_registered(&self, edge_node_id: &[u8; 32]) -> anyhow::Result<bool> {
-        let model = edges::Entity::find_by_id(edge_node_id.to_vec())
+        let Some(invite) = edge_invites::Entity::find()
+            .filter(edge_invites::Column::EdgeNodeId.eq(edge_node_id.to_vec()))
             .one(&self.conn)
-            .await?;
-        Ok(model.is_some())
+            .await?
+        else {
+            return Ok(false);
+        };
+        Ok(invite.status == InviteStatus::Pending.as_str())
     }
 }
 
@@ -335,13 +278,8 @@ fn model_to_edge_invite_row(model: edge_invites::Model) -> anyhow::Result<EdgeIn
         invite_id: bytes_to_array(model.invite_id, "invite_id")?,
         name: model.name,
         secret_hash: bytes_to_array(model.secret_hash, "secret_hash")?,
-        expires_at_ms: model.expires_at_ms.cast_unsigned(),
         status: InviteStatus::parse(&model.status)?,
-        edge_node_id: model
-            .edge_node_id
-            .map(|b| bytes_to_array::<32>(b, "edge_node_id"))
-            .transpose()?,
-        redeemed_at_ms: model.redeemed_at_ms.map(i64::cast_unsigned),
+        edge_node_id: bytes_to_array::<32>(model.edge_node_id, "edge_node_id")?,
         created_at_ms: model.created_at_ms.cast_unsigned(),
     })
 }

@@ -19,7 +19,8 @@ const EDGE_SUB_AUTH_DOMAIN: &str = "towonel/edge-sub/v1";
 
 /// Parse the `Authorization: Signature <node_id>.<ts>.<sig>` header, check
 /// the timestamp window, verify the signature against `node_id`, and
-/// confirm the node is registered in the `edges` table.
+/// confirm the node is registered via a pending (not revoked)
+/// `edge_invites` row.
 async fn authenticate_edge_subscriber(
     state: &AppState,
     headers: &HeaderMap,

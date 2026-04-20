@@ -1,13 +1,13 @@
+mod admin;
 mod config;
 mod edge;
 mod hub;
-mod init;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand};
-
 use anyhow::Context;
+use clap::{Parser, Subcommand};
 use iroh::endpoint::{Endpoint, presets::N0};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
@@ -23,8 +23,13 @@ const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
 #[command(
-    name = "towonel-node",
-    about = "towonel node -- runs edge and/or hub on a VPS. Configured via TOWONEL_* env vars -- see `NodeConfig::load`."
+    name = "towonel",
+    version,
+    about = "turbo-tunnel: run an edge / hub node, or manage one from the CLI.\n\
+             \n\
+             With no subcommand (or `serve`), the binary runs the node -- edge \
+             and/or hub, configured via TOWONEL_* env vars. Other subcommands \
+             are operator-facing management tools that talk to a running hub."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -33,19 +38,230 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Bootstrap an edge node by redeeming an edge-invite token from the hub.
-    /// Generates a node key, registers with the hub, and prints the
-    /// `TOWONEL_*` env vars needed to run the edge.
-    Init {
-        /// The edge-invite token from the operator (`tt_edge_1_...`).
-        #[arg(long)]
-        edge_invite: String,
+    /// Run the node (hub and/or edge) -- same as invoking the binary with
+    /// no subcommand. Kept for scripts that want an explicit verb.
+    Serve,
+    /// Manage tenant keypairs.
+    Tenant {
+        #[command(subcommand)]
+        action: TenantAction,
+    },
+    /// Manage signed config entries on a hub.
+    Entry {
+        #[command(subcommand)]
+        action: EntryAction,
+    },
+    /// Manage agent keypairs (for static tenant allowlists -- stateless
+    /// agents derive their key from the invite seed and don't need this).
+    Agent {
+        #[command(subcommand)]
+        action: AgentAction,
+    },
+    /// Operator-only: manage tenant invite tokens.
+    Invite {
+        #[command(subcommand)]
+        action: InviteAction,
+    },
+    /// Operator-only: manage edge-node invite tokens (`tt_edge_2_...`).
+    /// The node boots by reading the token from `TOWONEL_EDGE_INVITE_TOKEN`.
+    EdgeInvite {
+        #[command(subcommand)]
+        action: EdgeInviteAction,
+    },
+    /// Operator-only: hub-level administrative operations.
+    Hub {
+        #[command(subcommand)]
+        action: HubAction,
     },
 }
 
-// main() is long because it branches over (hub, edge) mode combinations.
-// Splitting it would not improve readability.
-#[allow(clippy::too_many_lines)]
+#[derive(Subcommand)]
+enum HubAction {
+    /// Disaster-recovery resync: pull federation state (tenants, removals,
+    /// entries) from `--from-peer` into the local hub. Idempotent.
+    Resync {
+        /// Local hub URL. Defaults to `TOWONEL_HUB_URL`.
+        #[arg(long)]
+        hub_url: Option<String>,
+        /// Operator key for the LOCAL hub. Defaults to `$TOWONEL_OPERATOR_KEY`.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Peer hub URL to pull state from.
+        #[arg(long)]
+        from_peer: String,
+        /// Operator key for the PEER hub (needed to fetch its snapshot).
+        #[arg(long)]
+        peer_key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum TenantAction {
+    /// Generate a new ML-DSA-65 (post-quantum) tenant keypair and save to disk.
+    Init {
+        #[arg(long, default_value = "tenant.key")]
+        key_path: PathBuf,
+    },
+    /// Voluntarily leave: submit `DeleteHostname` + `RevokeAgent` entries and
+    /// print a confirmation. The operator may additionally drop the tenant
+    /// from their allowlist.
+    Leave {
+        /// Path to the tenant key file.
+        #[arg(long)]
+        key_path: Option<PathBuf>,
+        /// Hub URL. Defaults to `TOWONEL_HUB_URL`.
+        #[arg(long)]
+        hub_url: Option<String>,
+    },
+    /// Operator-only: evict a tenant from the hub's allowlist. Existing
+    /// signed entries stay in the DB (signatures remain valid) but the
+    /// route table stops surfacing them.
+    Remove {
+        #[arg(long)]
+        hub_url: Option<String>,
+        /// Operator API key. Defaults to $`TOWONEL_OPERATOR_KEY`.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Hex-encoded tenant public key (64 chars).
+        #[arg(long)]
+        tenant_id: String,
+    },
+    /// Export the tenant key as a passphrase-encrypted string. Print the
+    /// result to stdout -- copy it to a safe place (password manager, paper
+    /// backup). Uses AES-256-GCM + argon2id.
+    ExportKey {
+        /// Path to the tenant key file.
+        #[arg(long)]
+        key_path: Option<PathBuf>,
+        /// Passphrase for encryption. Prompted interactively if omitted.
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+    /// Import a tenant key from a previously exported encrypted string.
+    /// Decrypts the backup and writes the seed to disk.
+    ImportKey {
+        /// Where to write the recovered key file.
+        #[arg(long, default_value = "tenant.key")]
+        key_path: PathBuf,
+        /// The `towonel-key-v1:...` backup string (from export-key).
+        #[arg(long)]
+        backup: String,
+        /// Passphrase used during export.
+        #[arg(long)]
+        passphrase: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EntryAction {
+    /// Sign and submit a config entry to a hub.
+    Submit {
+        /// Defaults to `TOWONEL_HUB_URL`.
+        #[arg(long)]
+        hub_url: Option<String>,
+        /// Path to the tenant key file.
+        #[arg(long)]
+        key_path: Option<PathBuf>,
+        /// Operation: upsert-hostname, delete-hostname, upsert-agent, revoke-agent
+        #[arg(long)]
+        op: String,
+        #[arg(long)]
+        hostname: Option<String>,
+        /// Hex-encoded agent public key (for agent ops).
+        #[arg(long)]
+        agent_id: Option<String>,
+    },
+    /// List all config entries for the current tenant.
+    List {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        key_path: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AgentAction {
+    /// Generate a new agent keypair and save to disk.
+    Init {
+        #[arg(long, default_value = "agent.key")]
+        key_path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum InviteAction {
+    /// Create a new invite token. Operator-only.
+    Create {
+        #[arg(long)]
+        hub_url: Option<String>,
+        /// Operator API key. Defaults to $`TOWONEL_OPERATOR_KEY`.
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Human-readable tenant name. Random if omitted.
+        #[arg(long)]
+        name: Option<String>,
+        /// Comma-separated hostname patterns to pre-approve.
+        #[arg(long, value_delimiter = ',')]
+        hostnames: Vec<String>,
+        /// Token validity, e.g. "48h", "7d", "never". Defaults to `never`
+        /// so stateless K8s deployments don't need rotation on every
+        /// Secret cycle.
+        #[arg(long, default_value = "never")]
+        expires: String,
+    },
+    /// List invites on the hub. Operator-only.
+    List {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Revoke a pending invite. Operator-only.
+    Revoke {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// The `invite_id` as printed by `invite list` (base64url).
+        #[arg(long)]
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EdgeInviteAction {
+    /// Create a new edge-node invite token. Edge tokens never expire;
+    /// revoke with `edge-invite revoke` when the edge should lose access.
+    Create {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Human-readable edge name (e.g. "charlie-fra1"). Random if omitted.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// List edge-node invites on the hub.
+    List {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Revoke a pending edge invite.
+    Revoke {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        id: String,
+    },
+}
+
+// Large futures are an artifact of async state machine size; Box::pin adds overhead.
+#[allow(clippy::large_futures)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // The ring provider install only fails if another provider was already installed.
@@ -63,15 +279,100 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    if let Some(Command::Init { edge_invite }) = cli.command {
-        return init::run(&edge_invite).await;
+    match cli.command {
+        None | Some(Command::Serve) => run_node().await,
+        Some(Command::Tenant { action }) => match action {
+            TenantAction::Init { key_path } => {
+                admin::tenant::cmd_keypair_init(&key_path, "tenant").await
+            }
+            TenantAction::Leave { key_path, hub_url } => {
+                admin::tenant::cmd_tenant_leave(key_path, hub_url).await
+            }
+            TenantAction::Remove {
+                hub_url,
+                api_key,
+                tenant_id,
+            } => admin::tenant::cmd_tenant_remove(hub_url, api_key, tenant_id).await,
+            TenantAction::ExportKey {
+                key_path,
+                passphrase,
+            } => admin::tenant::cmd_tenant_export_key(key_path, passphrase),
+            TenantAction::ImportKey {
+                key_path,
+                backup,
+                passphrase,
+            } => admin::tenant::cmd_tenant_import_key(key_path, backup, passphrase),
+        },
+        Some(Command::Entry { action }) => match action {
+            EntryAction::Submit {
+                hub_url,
+                key_path,
+                op,
+                hostname,
+                agent_id,
+            } => admin::entry::cmd_entry_submit(hub_url, key_path, &op, hostname, agent_id).await,
+            EntryAction::List { hub_url, key_path } => {
+                admin::entry::cmd_entry_list(hub_url, key_path).await
+            }
+        },
+        Some(Command::Agent { action }) => match action {
+            AgentAction::Init { key_path } => {
+                admin::tenant::cmd_keypair_init(&key_path, "agent").await
+            }
+        },
+        Some(Command::Invite { action }) => match action {
+            InviteAction::Create {
+                hub_url,
+                api_key,
+                name,
+                hostnames,
+                expires,
+            } => admin::invite::cmd_invite_create(hub_url, api_key, name, hostnames, expires).await,
+            InviteAction::List { hub_url, api_key } => {
+                admin::invite::cmd_invite_list(hub_url, api_key).await
+            }
+            InviteAction::Revoke {
+                hub_url,
+                api_key,
+                id,
+            } => admin::invite::cmd_invite_revoke(hub_url, api_key, id).await,
+        },
+        Some(Command::EdgeInvite { action }) => match action {
+            EdgeInviteAction::Create {
+                hub_url,
+                api_key,
+                name,
+            } => admin::invite::cmd_edge_invite_create(hub_url, api_key, name).await,
+            EdgeInviteAction::List { hub_url, api_key } => {
+                admin::invite::cmd_edge_invite_list(hub_url, api_key).await
+            }
+            EdgeInviteAction::Revoke {
+                hub_url,
+                api_key,
+                id,
+            } => admin::invite::cmd_edge_invite_revoke(hub_url, api_key, id).await,
+        },
+        Some(Command::Hub { action }) => match action {
+            HubAction::Resync {
+                hub_url,
+                api_key,
+                from_peer,
+                peer_key,
+            } => admin::hub::cmd_hub_resync(hub_url, api_key, from_peer, peer_key).await,
+        },
     }
+}
 
+// run_node() is long because it branches over (hub, edge) mode combinations.
+// Splitting it would not improve readability.
+#[allow(clippy::too_many_lines)]
+async fn run_node() -> anyhow::Result<()> {
     let config = config::NodeConfig::load()?;
 
-    let secret_key =
-        towonel_common::identity::load_or_generate_secret_key(&config.identity.key_path)
-            .context("failed to load or generate node identity key")?;
+    let secret_key = config
+        .identity
+        .load_secret_key()
+        .context("failed to load node identity")?;
     let node_id = secret_key.public();
     info!(%node_id, "loaded node identity");
 
@@ -79,7 +380,7 @@ async fn main() -> anyhow::Result<()> {
         hub = config.hub.enabled,
         edge = config.edge.enabled,
         tenants = config.tenants.len(),
-        "towonel-node starting"
+        "towonel starting"
     );
 
     match (config.hub.enabled, config.edge.enabled) {
@@ -165,7 +466,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    info!("towonel-node stopped");
+    info!("towonel stopped");
     Ok(())
 }
 
