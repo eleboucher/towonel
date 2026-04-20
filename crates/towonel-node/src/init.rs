@@ -61,11 +61,11 @@ fn print_env(key_path: &std::path::Path, hub_url: &str) {
     let hub_url = hub_url.trim_end_matches('/');
     println!("Set these environment variables to run the edge:");
     println!();
-    println!("  TOWONEL_IDENTITY__KEY_PATH={}", key_path.display());
-    println!("  TOWONEL_HUB__ENABLED=false");
-    println!("  TOWONEL_EDGE__ENABLED=true");
-    println!("  TOWONEL_EDGE__LISTEN_ADDR=0.0.0.0:443");
-    println!("  TOWONEL_EDGE__HUB_URLS={hub_url}");
+    println!("  TOWONEL_IDENTITY_KEY_PATH={}", key_path.display());
+    println!("  TOWONEL_HUB_ENABLED=false");
+    println!("  TOWONEL_EDGE_ENABLED=true");
+    println!("  TOWONEL_EDGE_LISTEN_ADDR=0.0.0.0:443");
+    println!("  TOWONEL_EDGE_HUB_URLS={hub_url}");
     println!();
     println!("Start the edge:");
     println!("  towonel-node");
