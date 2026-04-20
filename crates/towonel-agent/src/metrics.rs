@@ -5,6 +5,9 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
+use towonel_common::metrics::{
+    register_counter, register_counter_family, register_gauge, register_gauge_family,
+};
 
 /// Values become label strings on exported metrics; keep them stable so
 /// dashboards and alerts keep matching.
@@ -62,75 +65,54 @@ pub struct AgentMetrics {
 
 impl AgentMetrics {
     pub fn new() -> Self {
-        let mut registry = Registry::default();
-
-        let edge_connections_accepted = Counter::default();
-        let edge_connections_rejected = Counter::default();
-        let streams_accepted = Counter::default();
-        let streams_completed = Counter::default();
-        let stream_errors: Family<ReasonLabel, Counter> = Family::default();
-        let streams_active = Gauge::default();
-        let bytes_total: Family<DirectionLabel, Counter> = Family::default();
-        let heartbeats: Family<OutcomeLabel, Counter> = Family::default();
-        let info: Family<InfoLabel, Gauge> = Family::default();
-
-        registry.register(
-            "towonel_agent_edge_connections_accepted",
-            "iroh connections accepted from trusted edges",
-            edge_connections_accepted.clone(),
-        );
-        registry.register(
-            "towonel_agent_edge_connections_rejected",
-            "iroh connections rejected because the remote is not a trusted edge",
-            edge_connections_rejected.clone(),
-        );
-        registry.register(
-            "towonel_agent_streams_accepted",
-            "Bi-directional streams opened by an edge",
-            streams_accepted.clone(),
-        );
-        registry.register(
-            "towonel_agent_streams_completed",
-            "Streams that finished forwarding without error",
-            streams_completed.clone(),
-        );
-        registry.register(
-            "towonel_agent_stream_errors",
-            "Stream failures by reason",
-            stream_errors.clone(),
-        );
-        registry.register(
-            "towonel_agent_streams_active",
-            "Streams currently being forwarded",
-            streams_active.clone(),
-        );
-        registry.register(
-            "towonel_agent_bytes",
-            "Bytes forwarded between edge and origin, by direction",
-            bytes_total.clone(),
-        );
-        registry.register(
-            "towonel_agent_heartbeats",
-            "Heartbeat POSTs to the hub, by outcome",
-            heartbeats.clone(),
-        );
-        registry.register(
-            "towonel_agent_info",
-            "Agent build info; value is always 1",
-            info.clone(),
-        );
-
+        let mut r = Registry::default();
         Self {
-            edge_connections_accepted,
-            edge_connections_rejected,
-            streams_accepted,
-            streams_completed,
-            stream_errors,
-            streams_active,
-            bytes_total,
-            heartbeats,
-            info,
-            registry: Arc::new(registry),
+            edge_connections_accepted: register_counter(
+                &mut r,
+                "towonel_agent_edge_connections_accepted",
+                "iroh connections accepted from trusted edges",
+            ),
+            edge_connections_rejected: register_counter(
+                &mut r,
+                "towonel_agent_edge_connections_rejected",
+                "iroh connections rejected because the remote is not a trusted edge",
+            ),
+            streams_accepted: register_counter(
+                &mut r,
+                "towonel_agent_streams_accepted",
+                "Bi-directional streams opened by an edge",
+            ),
+            streams_completed: register_counter(
+                &mut r,
+                "towonel_agent_streams_completed",
+                "Streams that finished forwarding without error",
+            ),
+            stream_errors: register_counter_family(
+                &mut r,
+                "towonel_agent_stream_errors",
+                "Stream failures by reason",
+            ),
+            streams_active: register_gauge(
+                &mut r,
+                "towonel_agent_streams_active",
+                "Streams currently being forwarded",
+            ),
+            bytes_total: register_counter_family(
+                &mut r,
+                "towonel_agent_bytes",
+                "Bytes forwarded between edge and origin, by direction",
+            ),
+            heartbeats: register_counter_family(
+                &mut r,
+                "towonel_agent_heartbeats",
+                "Heartbeat POSTs to the hub, by outcome",
+            ),
+            info: register_gauge_family(
+                &mut r,
+                "towonel_agent_info",
+                "Agent build info; value is always 1",
+            ),
+            registry: Arc::new(r),
         }
     }
 
@@ -177,29 +159,11 @@ impl Default for AgentMetrics {
     }
 }
 
-pub struct ActiveStreamGuard {
-    gauge: Gauge,
-}
-
-impl ActiveStreamGuard {
-    pub fn new(metrics: &AgentMetrics) -> Self {
-        metrics.streams_active.inc();
-        Self {
-            gauge: metrics.streams_active.clone(),
-        }
-    }
-}
-
-impl Drop for ActiveStreamGuard {
-    fn drop(&mut self) {
-        self.gauge.dec();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use prometheus_client::encoding::text::encode;
+    use towonel_common::metrics::GaugeGuard;
 
     #[test]
     fn registry_encodes_all_series() {
@@ -242,8 +206,8 @@ mod tests {
         let m = AgentMetrics::new();
         assert_eq!(m.streams_active.get(), 0);
         {
-            let _g1 = ActiveStreamGuard::new(&m);
-            let _g2 = ActiveStreamGuard::new(&m);
+            let _g1 = GaugeGuard::inc(&m.streams_active);
+            let _g2 = GaugeGuard::inc(&m.streams_active);
             assert_eq!(m.streams_active.get(), 2);
         }
         assert_eq!(m.streams_active.get(), 0);

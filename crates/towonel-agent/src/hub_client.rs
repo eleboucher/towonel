@@ -3,31 +3,11 @@
 //! checking.
 
 use anyhow::{Context, anyhow};
-use serde::Deserialize;
 use towonel_common::CBOR_CONTENT_TYPE;
 use towonel_common::config_entry::{ConfigPayload, SignedConfigEntry};
+use towonel_common::hub_error;
+pub use towonel_common::hub_error::HubApiError;
 use towonel_common::identity::TenantKeypair;
-
-/// Typed error returned by the hub under the standard error envelope.
-/// Downcast from an `anyhow::Error` via `err.downcast_ref::<HubApiError>()`.
-#[derive(Debug, thiserror::Error)]
-#[error("hub returned {status} ({code}): {message}")]
-pub struct HubApiError {
-    pub status: reqwest::StatusCode,
-    pub code: String,
-    pub message: String,
-}
-
-#[derive(Deserialize)]
-struct ErrorEnvelope {
-    error: ErrorFields,
-}
-
-#[derive(Deserialize)]
-struct ErrorFields {
-    code: String,
-    message: String,
-}
 
 /// Check an HTTP response and return the body bytes on success. On failure,
 /// parses the hub's standard error envelope (`{"error":{"code","message"}}`)
@@ -36,21 +16,13 @@ struct ErrorFields {
 pub async fn check_response(resp: reqwest::Response) -> anyhow::Result<Vec<u8>> {
     let status = resp.status();
     let body = resp.bytes().await?.to_vec();
-    if !status.is_success() {
-        return Err(
-            if let Ok(env) = serde_json::from_slice::<ErrorEnvelope>(&body) {
-                HubApiError {
-                    status,
-                    code: env.error.code,
-                    message: env.error.message,
-                }
-                .into()
-            } else {
-                anyhow!("hub returned {status} with unparsable error body")
-            },
-        );
+    if status.is_success() {
+        return Ok(body);
     }
-    Ok(body)
+    Err(hub_error::parse(status.as_u16(), &body).map_or_else(
+        || anyhow!("hub returned {status} with unparsable error body"),
+        Into::into,
+    ))
 }
 
 /// Sign `payload` with `kp` and POST it to `/v1/entries` as CBOR. Returns
@@ -128,7 +100,7 @@ mod tests {
     #[test]
     fn is_sequence_conflict_matches_typed_api_error() {
         let err: anyhow::Error = HubApiError {
-            status: reqwest::StatusCode::CONFLICT,
+            status: 409,
             code: "sequence_conflict".to_string(),
             message: "sequence number already used".to_string(),
         }
@@ -139,7 +111,7 @@ mod tests {
     #[test]
     fn is_sequence_conflict_rejects_other_codes() {
         let err: anyhow::Error = HubApiError {
-            status: reqwest::StatusCode::FORBIDDEN,
+            status: 403,
             code: "tenant_not_allowed".to_string(),
             message: String::new(),
         }

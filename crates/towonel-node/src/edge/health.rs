@@ -10,6 +10,7 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
 use serde::Serialize;
+use towonel_common::metrics::{register_counter, register_gauge};
 
 /// Edge observability surface. Counters are wrapped in cheap `Arc`s by
 /// prometheus-client, so cloning `EdgeMetrics` around tasks is free.
@@ -26,39 +27,29 @@ pub struct EdgeMetrics {
 
 impl EdgeMetrics {
     pub fn new() -> Self {
-        let mut registry = Registry::default();
-        let active_connections = Gauge::default();
-        let total_connections = Counter::default();
-        let total_bytes_in = Counter::default();
-        let total_bytes_out = Counter::default();
-
-        registry.register(
-            "towonel_edge_active_connections",
-            "Active tunneled connections",
-            active_connections.clone(),
-        );
-        registry.register(
-            "towonel_edge_total_connections",
-            "Total connections handled",
-            total_connections.clone(),
-        );
-        registry.register(
-            "towonel_edge_bytes_in",
-            "Total bytes received from clients",
-            total_bytes_in.clone(),
-        );
-        registry.register(
-            "towonel_edge_bytes_out",
-            "Total bytes sent to clients",
-            total_bytes_out.clone(),
-        );
-
+        let mut r = Registry::default();
         Self {
-            active_connections,
-            total_connections,
-            total_bytes_in,
-            total_bytes_out,
-            registry: Arc::new(registry),
+            active_connections: register_gauge(
+                &mut r,
+                "towonel_edge_active_connections",
+                "Active tunneled connections",
+            ),
+            total_connections: register_counter(
+                &mut r,
+                "towonel_edge_total_connections",
+                "Total connections handled",
+            ),
+            total_bytes_in: register_counter(
+                &mut r,
+                "towonel_edge_bytes_in",
+                "Total bytes received from clients",
+            ),
+            total_bytes_out: register_counter(
+                &mut r,
+                "towonel_edge_bytes_out",
+                "Total bytes sent to clients",
+            ),
+            registry: Arc::new(r),
         }
     }
 }

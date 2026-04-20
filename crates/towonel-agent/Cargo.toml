@@ -29,7 +29,6 @@ webpki-roots = { workspace = true }
 ppp = { workspace = true }
 arc-swap = { workspace = true }
 backon = { workspace = true }
-thiserror = { workspace = true }
 prometheus-client = { workspace = true }
 
 [lints]

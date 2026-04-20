@@ -5,6 +5,9 @@ use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::registry::Registry;
+use towonel_common::metrics::{
+    register_counter, register_counter_family, register_gauge, register_gauge_family,
+};
 
 /// Reasons the hub rejects a signed config entry. Values become the
 /// `reason=""` label on `towonel_hub_entries_rejected`; keep them stable —
@@ -52,68 +55,49 @@ pub struct HubMetrics {
 
 impl HubMetrics {
     pub fn new() -> Self {
-        let mut registry = Registry::default();
-
-        let entries_accepted = Counter::default();
-        let entries_rejected: Family<EntryRejectLabels, Counter> = Family::default();
-        let federation_push_success: Family<PeerLabels, Counter> = Family::default();
-        let federation_push_failures: Family<PeerLabels, Counter> = Family::default();
-        let federation_push_last_ok_ms: Family<PeerLabels, Gauge> = Family::default();
-        let sse_subscribers_connected = Gauge::default();
-        let tenants_total = Gauge::default();
-        let requests_total: Family<RequestLabels, Counter> = Family::default();
-
-        registry.register(
-            "towonel_hub_entries_accepted",
-            "Signed config entries accepted by the hub",
-            entries_accepted.clone(),
-        );
-        registry.register(
-            "towonel_hub_entries_rejected",
-            "Signed config entries rejected by the hub, by reason",
-            entries_rejected.clone(),
-        );
-        registry.register(
-            "towonel_hub_federation_push_success",
-            "Outbound federation pushes that succeeded, per peer",
-            federation_push_success.clone(),
-        );
-        registry.register(
-            "towonel_hub_federation_push_failures",
-            "Outbound federation pushes that failed, per peer",
-            federation_push_failures.clone(),
-        );
-        registry.register(
-            "towonel_hub_federation_push_last_ok_ms",
-            "Unix time (ms) of the last successful federation push, per peer",
-            federation_push_last_ok_ms.clone(),
-        );
-        registry.register(
-            "towonel_hub_sse_subscribers_connected",
-            "Currently connected /v1/routes/subscribe clients",
-            sse_subscribers_connected.clone(),
-        );
-        registry.register(
-            "towonel_hub_tenants_total",
-            "Tenants currently active in the ownership policy",
-            tenants_total.clone(),
-        );
-        registry.register(
-            "towonel_hub_requests",
-            "HTTP requests to the hub API, by matched route and response status",
-            requests_total.clone(),
-        );
-
+        let mut r = Registry::default();
         Self {
-            entries_accepted,
-            entries_rejected,
-            federation_push_success,
-            federation_push_failures,
-            federation_push_last_ok_ms,
-            sse_subscribers_connected,
-            tenants_total,
-            requests_total,
-            registry: Arc::new(registry),
+            entries_accepted: register_counter(
+                &mut r,
+                "towonel_hub_entries_accepted",
+                "Signed config entries accepted by the hub",
+            ),
+            entries_rejected: register_counter_family(
+                &mut r,
+                "towonel_hub_entries_rejected",
+                "Signed config entries rejected by the hub, by reason",
+            ),
+            federation_push_success: register_counter_family(
+                &mut r,
+                "towonel_hub_federation_push_success",
+                "Outbound federation pushes that succeeded, per peer",
+            ),
+            federation_push_failures: register_counter_family(
+                &mut r,
+                "towonel_hub_federation_push_failures",
+                "Outbound federation pushes that failed, per peer",
+            ),
+            federation_push_last_ok_ms: register_gauge_family(
+                &mut r,
+                "towonel_hub_federation_push_last_ok_ms",
+                "Unix time (ms) of the last successful federation push, per peer",
+            ),
+            sse_subscribers_connected: register_gauge(
+                &mut r,
+                "towonel_hub_sse_subscribers_connected",
+                "Currently connected /v1/routes/subscribe clients",
+            ),
+            tenants_total: register_gauge(
+                &mut r,
+                "towonel_hub_tenants_total",
+                "Tenants currently active in the ownership policy",
+            ),
+            requests_total: register_counter_family(
+                &mut r,
+                "towonel_hub_requests",
+                "HTTP requests to the hub API, by matched route and response status",
+            ),
+            registry: Arc::new(r),
         }
     }
 

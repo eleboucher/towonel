@@ -12,12 +12,13 @@ use tokio::net::{TcpStream, lookup_host};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::hostname::wildcard_lookup;
+use towonel_common::metrics::GaugeGuard;
 use towonel_common::tunnel::{
     COPY_BUF_SIZE, ClientAddrs, forward_quic_to_writer, read_client_addrs, read_hostname_header,
 };
 
 use crate::config::{ProxyProtocol, ServiceConfig};
-use crate::metrics::{self, ActiveStreamGuard, AgentMetrics};
+use crate::metrics::{self, AgentMetrics};
 
 mod proxy_protocol;
 
@@ -272,7 +273,7 @@ async fn handle_stream(
 ) -> anyhow::Result<()> {
     let start = Instant::now();
     metrics.streams_accepted.inc();
-    let _active = ActiveStreamGuard::new(metrics);
+    let _active = GaugeGuard::inc(&metrics.streams_active);
 
     let handshake = async {
         let hostname = read_hostname_header(&mut quic_recv)
