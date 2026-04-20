@@ -1,7 +1,6 @@
 [package]
 name = "towonel-node"
 version.workspace = true
-edition = "2024"
 publish = false
 
 [[bin]]

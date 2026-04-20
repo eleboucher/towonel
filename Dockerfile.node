@@ -35,7 +35,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
                AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
                AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
     fi && \
-    cargo chef cook --release --workspace --recipe-path recipe.json
+    cargo chef cook --release --workspace --recipe-path recipe.json && \
+    if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY src/ src/
@@ -55,7 +56,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     fi && \
     cargo build --release -p towonel-node \
     && mkdir -p /out \
-    && cp target/release/towonel /out/
+    && cp target/release/towonel /out/ \
+    && { [ "$ENABLE_SCCACHE" = "1" ] && sccache --show-stats || true; }
 
 FROM debian:bookworm-slim AS runtime-prep
 RUN apt-get update \
