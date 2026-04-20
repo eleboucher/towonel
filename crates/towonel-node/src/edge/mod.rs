@@ -5,8 +5,8 @@ pub mod subscribe;
 pub mod tls;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use iroh::EndpointAddr;
 use iroh::endpoint::{Connection, Endpoint};
@@ -36,11 +36,6 @@ const PEEK_BUF_SIZE: usize = 16_384;
 const PEEK_MAX_ATTEMPTS: u32 = 20;
 const PEEK_RETRY_DELAY: Duration = Duration::from_millis(5);
 
-/// Typical route candidate count: one agent per hostname in most tenants,
-/// occasionally 2-3 for HA. Inline capacity of 4 keeps the scoring path
-/// allocation-free for the common case.
-type AgentScoreVec<T> = SmallVec<[T; 4]>;
-
 /// Pool of iroh QUIC connections, keyed by agent `EndpointId`.
 ///
 /// QUIC connections are expensive to establish; streams are cheap. We keep
@@ -49,44 +44,10 @@ type AgentScoreVec<T> = SmallVec<[T; 4]>;
 /// a handle out of the map without blocking.
 type AgentPool = papaya::HashMap<iroh::EndpointId, Connection>;
 
-/// Per-agent health state. Lock-free via atomics so the hot path doesn't
-/// contend on a shared mutex.
-struct AgentHealthState {
-    /// Consecutive connection failures. Reset to 0 on success.
-    consecutive_failures: AtomicU32,
-    /// Unix timestamp (seconds) of the last successful stream open.
-    last_success_ts: AtomicU64,
-}
-
-impl AgentHealthState {
-    const fn new() -> Self {
-        Self {
-            consecutive_failures: AtomicU32::new(0),
-            last_success_ts: AtomicU64::new(0),
-        }
-    }
-
-    fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        self.last_success_ts.store(now, Ordering::Relaxed);
-    }
-
-    fn record_failure(&self) {
-        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Lower score = healthier. Agents with no failures sort first; among
-    /// those, the most recently successful one wins.
-    fn score(&self) -> (u32, u64) {
-        let failures = self.consecutive_failures.load(Ordering::Relaxed);
-        let recency_inv = u64::MAX - self.last_success_ts.load(Ordering::Relaxed);
-        (failures, recency_inv)
-    }
-}
+/// Per-agent consecutive connect failures. Reset to 0 on success;
+/// `fetch_add(1)` on failure. Ordering by this value demotes recently
+/// failing agents without remembering how long ago they failed.
+type AgentHealthState = AtomicU32;
 
 /// Shared map of per-agent health. Populated lazily on first connection
 /// attempt. Never shrinks (agents that disappear from the route table
@@ -306,41 +267,41 @@ fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentHealthS
     if let Some(existing) = guard.get(&id) {
         return Arc::clone(existing);
     }
-    let state = Arc::new(AgentHealthState::new());
     // Concurrent insert is fine: whoever lost the race drops their Arc and we
     // return the winning one. All callers ultimately see the same Arc.
-    Arc::clone(guard.get_or_insert(id, state))
+    Arc::clone(guard.get_or_insert(id, Arc::new(AgentHealthState::new(0))))
 }
 
-/// Score `candidates` by agent health, then dial them in order until one
-/// succeeds. Records success/failure into the health map as a side effect.
-/// Returns the chosen agent plus an open bidirectional QUIC stream.
+/// Shuffle `candidates` for fair spread, then stable-sort by consecutive
+/// failures so healthy agents are tried before failing ones. Dials in order
+/// until one succeeds; records success/failure as a side effect. Returns the
+/// chosen agent plus an open bidirectional QUIC stream.
 async fn pick_agent_and_open_stream(
     ctx: &ConnCtx,
-    candidates: self::router::Candidates,
+    mut candidates: self::router::Candidates,
 ) -> anyhow::Result<(
     EndpointAddr,
     iroh::endpoint::SendStream,
     iroh::endpoint::RecvStream,
 )> {
-    let mut scored: AgentScoreVec<(EndpointAddr, Arc<AgentHealthState>, (u32, u64))> =
+    fastrand::shuffle(&mut candidates);
+    let mut scored: SmallVec<[(EndpointAddr, Arc<AgentHealthState>); 4]> =
         SmallVec::with_capacity(candidates.len());
     for addr in candidates {
         let h = get_health(&ctx.health, addr.id);
-        let score = h.score();
-        scored.push((addr, h, score));
+        scored.push((addr, h));
     }
-    scored.sort_by_key(|(_, _, score)| *score);
+    scored.sort_by_key(|(_, h)| h.load(Ordering::Relaxed));
 
     let mut last_err: Option<anyhow::Error> = None;
-    for (agent_addr, health_state, _) in scored {
+    for (agent_addr, health) in scored {
         match open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr.clone()).await {
             Ok((send, recv)) => {
-                health_state.record_success();
+                health.store(0, Ordering::Relaxed);
                 return Ok((agent_addr, send, recv));
             }
             Err(e) => {
-                health_state.record_failure();
+                health.fetch_add(1, Ordering::Relaxed);
                 debug!(
                     agent = %agent_addr.id.fmt_short(),
                     error = %e,

@@ -48,7 +48,7 @@ pub async fn run(
     let policy = || {
         ExponentialBuilder::default()
             .with_min_delay(Duration::from_secs(1))
-            .with_max_delay(Duration::from_secs(60))
+            .with_max_delay(Duration::from_mins(1))
             .with_max_times(usize::MAX)
             .with_jitter()
     };

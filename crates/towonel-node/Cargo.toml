@@ -52,6 +52,7 @@ papaya = { workspace = true }
 smallvec = { workspace = true }
 tokio-util = { workspace = true }
 normpath = { workspace = true }
+fastrand = { workspace = true }
 
 [dev-dependencies]
 

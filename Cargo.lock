@@ -5674,6 +5674,7 @@ dependencies = [
  "clap",
  "ed25519-dalek 2.2.0",
  "eventsource-stream",
+ "fastrand",
  "figment",
  "getrandom 0.4.2",
  "hex",
