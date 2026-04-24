@@ -91,7 +91,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_edge_total_connections_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_edge_connections_total{instance=~\"$instance\"}[5m]))",
           "legendFormat": "conns/s"
         }
       ]
@@ -199,7 +199,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(towonel_edge_total_connections_total{instance=~\"$instance\"}[5m])",
+          "expr": "rate(towonel_edge_connections_total{instance=~\"$instance\"}[5m])",
           "legendFormat": "{{instance}}"
         }
       ]
@@ -458,58 +458,22 @@
     },
 
     {
-      "id": 60,
+      "id": 70,
       "type": "row",
-      "title": "Hub — Federation",
+      "title": "Hub — Process",
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 51},
       "collapsed": false
     },
     {
-      "id": 61,
+      "id": 71,
       "type": "timeseries",
-      "title": "Federation pushes by peer",
+      "title": "Resident memory (RSS)",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 52},
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "bytes",
           "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
-        },
-        "overrides": [
-          {
-            "matcher": {"id": "byRegexp", "options": "/ failures$/"},
-            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
-          }
-        ]
-      },
-      "options": {
-        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
-        "tooltip": {"mode": "multi", "sort": "desc"}
-      },
-      "targets": [
-        {"refId": "A", "expr": "sum by (peer) (rate(towonel_hub_federation_push_success_total[5m]))", "legendFormat": "{{peer}} success"},
-        {"refId": "B", "expr": "sum by (peer) (rate(towonel_hub_federation_push_failures_total[5m]))", "legendFormat": "{{peer}} failures"}
-      ]
-    },
-    {
-      "id": 62,
-      "type": "timeseries",
-      "title": "Time since last successful push",
-      "description": "Seconds since last successful federation push per peer. Rising values indicate a stuck/broken peer.",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 52},
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s",
-          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"},
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {"color": "green", "value": null},
-              {"color": "orange", "value": 300},
-              {"color": "red", "value": 900}
-            ]
-          }
         },
         "overrides": []
       },
@@ -518,11 +482,72 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {
-          "refId": "A",
-          "expr": "(time() * 1000 - towonel_hub_federation_push_last_ok_ms) / 1000",
-          "legendFormat": "{{peer}}"
-        }
+        {"refId": "A", "expr": "process_resident_memory_bytes{job=~\"towonel-hub|$instance\"}", "legendFormat": "{{instance}}"}
+      ]
+    },
+    {
+      "id": 72,
+      "type": "timeseries",
+      "title": "CPU usage",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 52},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "rate(process_cpu_seconds_total[5m])", "legendFormat": "{{instance}}"}
+      ]
+    },
+    {
+      "id": 73,
+      "type": "timeseries",
+      "title": "Open file descriptors",
+      "description": "`process_open_fds / process_max_fds`. Rising ratios hint at FD leaks.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 60},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "process_open_fds", "legendFormat": "{{instance}} open"},
+        {"refId": "B", "expr": "process_max_fds", "legendFormat": "{{instance}} max"}
+      ]
+    },
+    {
+      "id": 74,
+      "type": "stat",
+      "title": "Uptime",
+      "description": "Time since process start.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 60},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {"refId": "A", "expr": "time() - process_start_time_seconds", "legendFormat": "{{instance}}"}
       ]
     }
   ]

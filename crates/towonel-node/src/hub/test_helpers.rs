@@ -10,7 +10,7 @@ use towonel_common::identity::TenantKeypair;
 use towonel_common::invite::InviteToken;
 use towonel_common::ownership::OwnershipPolicy;
 
-use super::api::{AppState, FederationState, OutboundFederation, health_router, router_unlimited};
+use super::api::{AppState, health_router, new_nonce_cache, router_unlimited};
 use super::db::temp_db;
 
 pub(super) const OPERATOR_KEY: &str = "test-operator-api-key";
@@ -21,48 +21,22 @@ fn fake_endpoint_id() -> iroh::EndpointId {
     iroh::SecretKey::from([1u8; 32]).public()
 }
 
-pub(super) fn fake_node_id_hex() -> String {
-    fake_endpoint_id().to_string()
-}
-
 pub(super) struct TestHub {
     pub base_url: String,
     pub state: Arc<AppState>,
     _task: tokio::task::JoinHandle<()>,
 }
 
-#[derive(Default)]
-pub(super) struct OutboundConfig {
-    pub peer_urls: Vec<String>,
-    pub signing_key: Option<iroh::SecretKey>,
-    pub sync_invite_redeem: bool,
-}
-
 impl TestHub {
     pub(super) async fn start() -> Self {
-        Self::start_with(OutboundConfig::default()).await
-    }
-
-    pub(super) async fn start_with(outbound: OutboundConfig) -> Self {
         let db = temp_db().await;
         let (route_tx, _route_rx) = broadcast::channel(16);
         let policy = arc_swap::ArcSwap::from_pointee(OwnershipPolicy::new());
-
-        let OutboundConfig {
-            peer_urls,
-            signing_key,
-            sync_invite_redeem,
-        } = outbound;
-        let outbound_federation = signing_key.map(|sk| OutboundFederation {
-            peer_urls,
-            signing_key: sk,
-        });
 
         let state = Arc::new(AppState {
             db,
             route_tx,
             policy,
-            http_client: reqwest::Client::new(),
             identity: super::HubIdentity {
                 node_id: fake_endpoint_id(),
                 edge_addresses: vec!["127.0.0.1:4443".to_string()],
@@ -72,20 +46,10 @@ impl TestHub {
             operator_api_key: zeroize::Zeroizing::new(OPERATOR_KEY.to_string()),
             public_url: "https://hub.test.example".to_string(),
             invite_lock: tokio::sync::Mutex::new(()),
-            federation: FederationState {
-                trusted_peers: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
-                nonces: super::federation::new_nonce_cache(),
-                outbound: outbound_federation,
-                sync_invite_redeem,
-            },
-            dns_webhook_url: None,
-            prev_hostnames: arc_swap::ArcSwap::from_pointee(std::collections::HashSet::new()),
             metrics: super::metrics::HubMetrics::new(),
-            peer_statuses: super::peer_status::new_peer_status_map(&[]),
-            tasks: tokio_util::task::TaskTracker::new(),
             invite_hash_key: std::sync::Arc::new(towonel_common::invite::InviteHashKey::generate()),
-            heartbeat_nonces: super::federation::new_nonce_cache(),
-            allow_loopback_peers: true,
+            heartbeat_nonces: new_nonce_cache(),
+            edge_sub_nonces: new_nonce_cache(),
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

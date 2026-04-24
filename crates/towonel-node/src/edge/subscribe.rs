@@ -39,11 +39,11 @@ pub async fn run(
         .build()
         .context("building reqwest client")?;
 
-    // Rotates on each failure so the next retry attempts a different hub in
-    // the federation list. `AtomicUsize` keeps the future `Send` (a `Cell`
-    // would not) and backon's `FnMut` closure can mutate it via `Relaxed`
-    // ordering — there is no cross-thread happens-before relationship to
-    // preserve here.
+    // Rotates on each failure so the next retry attempts a different hub
+    // when the operator has configured a failover list. `AtomicUsize` keeps
+    // the future `Send` (a `Cell` would not) and backon's `FnMut` closure
+    // can mutate it via `Relaxed` ordering — there is no cross-thread
+    // happens-before relationship to preserve here.
     let idx = AtomicUsize::new(0);
     let policy = || {
         ExponentialBuilder::default()

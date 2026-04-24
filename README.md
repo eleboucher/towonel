@@ -21,9 +21,7 @@ dynamic IPs without opening inbound ports.
 - **Post-quantum signed control plane** — all config entries signed
   with ML-DSA-65 (FIPS 204).
 - **Pluggable storage** — SQLite for single-node, PostgreSQL for HA.
-- **Federation** — replicate tenants and entries across hubs over
-  HTTPS, pinned by iroh `node_id`.
-- **Prometheus metrics** and a DNS webhook for automation.
+- **Prometheus metrics** for observability.
 
 ## Architecture
 
@@ -167,8 +165,6 @@ lists (peers, tenants, services) require JSON.
 | `TOWONEL_HUB_DB_DRIVER`             | `sqlite`       | `sqlite` or `postgres`                                    |
 | `TOWONEL_HUB_DB_DSN`                | `hub.db`       | Connection string                                         |
 | `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`     | Pool size                                                 |
-| `TOWONEL_HUB_DNS_WEBHOOK_URL`       |                | Webhook for hostname changes                              |
-| `TOWONEL_HUB_PEERS`                 |                | Federation peers (JSON array of `{url, node_id}`)         |
 
 ### Edge
 
@@ -272,34 +268,6 @@ step and no persistent key file. Revoke via `towonel edge-invite revoke
 --id <invite-id>`; the edge loses access on the next subscription
 attempt.
 
-## Federation
-
-Hubs can replicate tenants and entries bidirectionally over HTTPS.
-Peers are pinned by iroh `node_id` to close an MITM window at first
-contact:
-
-```bash
-TOWONEL_HUB_PEERS='[
-  {"url":"https://hub-b.example.eu:8443","node_id":"deadbeef..."},
-  {"url":"https://hub-c.example.eu:8443","node_id":"cafebabe..."}
-]'
-```
-
-Push state is persisted, so a restart does not replay everything.
-Inbound pushes are signed with the hub's iroh node key and replay-protected.
-
-## DNS webhook
-
-The hub POSTs to `TOWONEL_HUB_DNS_WEBHOOK_URL` whenever the active
-hostname set changes:
-
-```json
-{ "added": ["app.alice.example.eu"], "removed": ["old.example.eu"] }
-```
-
-Wire this to your DNS provider (Cloudflare, Route53, OVH, etc.) to
-keep A records in sync with the edge IP.
-
 ## Security
 
 - The edge sees SNI, source IPs, and byte counts — never bodies,
@@ -309,11 +277,11 @@ keep A records in sync with the edge IP.
 - Invite tokens are bearer credentials: they carry the tenant signing
   seed. Treat them as secret. In-memory copies are zeroed on drop;
   `Debug` redacts the seed.
-- Invite secrets are stored SHA-256 hashed and compared in constant
-  time. Revoked invites return the same `401` as a wrong secret.
+- Invite secrets are stored as BLAKE3 keyed hashes (keyed by a per-hub
+  operator secret) and compared in constant time. Revoked invites return
+  the same `401` as a wrong secret.
 - Heartbeat signatures are body-bound; a captured header cannot be
   replayed with a different body.
-- Federation pushes are signed with the hub's iroh node key, with a nonce cache for replay protection.
 - Per-IP rate limiting on public endpoints.
 
 ## HTTP API
@@ -334,7 +302,6 @@ keep A records in sync with the edge IP.
 | `GET`    | `/v1/edge-invites`         | operator      | List edge invites                          |
 | `DELETE` | `/v1/edge-invites/{id}`    | operator      | Revoke edge invite                         |
 | `DELETE` | `/v1/tenants/{id}`         | operator      | Remove tenant                              |
-| `GET`    | `/v1/dns/records`          | operator      | Active hostnames + edges                   |
 
 ## Roadmap
 

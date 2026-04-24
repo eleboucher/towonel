@@ -17,7 +17,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
 use iroh::{Endpoint, endpoint::presets::N0};
-use prometheus_client::encoding::text::encode;
+use prometheus::{Encoder, TextEncoder};
 use towonel_common::protocol::ALPN_TUNNEL;
 use tracing::{error, info, warn};
 
@@ -124,8 +124,13 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
 
     if !agent_config.services.is_empty() {
         #[allow(clippy::large_futures)]
-        let result =
-            publish_tls::publish(&ctx.hub_url, &ctx.tenant_kp, &agent_config.services).await;
+        let result = publish_tls::publish(
+            &ctx.client,
+            &ctx.hub_url,
+            &ctx.tenant_kp,
+            &agent_config.services,
+        )
+        .await;
         if let Err(e) = result {
             warn!(error = %e, "TLS policy publish failed; edge will use passthrough defaults");
         }
@@ -172,8 +177,8 @@ async fn serve_http(port: u16, metrics: Arc<AgentMetrics>) {
 }
 
 async fn metrics_handler(State(metrics): State<Arc<AgentMetrics>>) -> Response {
-    let mut body = String::new();
-    if let Err(e) = encode(&mut body, metrics.registry()) {
+    let mut buf = Vec::new();
+    if let Err(e) = TextEncoder::new().encode(&metrics.registry().gather(), &mut buf) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("metrics encoding failed: {e}"),
@@ -184,9 +189,9 @@ async fn metrics_handler(State(metrics): State<Arc<AgentMetrics>>) -> Response {
         StatusCode::OK,
         [(
             header::CONTENT_TYPE,
-            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+            "text/plain; version=0.0.4; charset=utf-8",
         )],
-        body,
+        buf,
     )
         .into_response()
 }

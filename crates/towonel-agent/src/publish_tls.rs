@@ -8,7 +8,11 @@ use crate::hub_client::{fetch_latest_sequence, submit_entry};
 /// Publish per-service TLS policy entries so the edge knows which
 /// hostnames it should terminate vs pass-through. Sequence numbers are
 /// allocated after the agent's own `UpsertAgent` registration.
+///
+/// Uses the caller's `reqwest::Client` so the connection pool and timeout
+/// configuration are shared with the bootstrap and heartbeat paths.
 pub async fn publish(
+    client: &reqwest::Client,
     hub_url: &str,
     tenant_kp: &TenantKeypair,
     services: &[ServiceConfig],
@@ -16,8 +20,7 @@ pub async fn publish(
     if services.is_empty() {
         return Ok(());
     }
-    let client = reqwest::Client::new();
-    let mut seq = fetch_latest_sequence(&client, hub_url, tenant_kp).await?;
+    let mut seq = fetch_latest_sequence(client, hub_url, tenant_kp).await?;
 
     for svc in services {
         seq += 1;
@@ -31,7 +34,7 @@ pub async fn publish(
                 mode: svc.tls_mode,
             },
         };
-        match submit_entry(&client, hub_url, tenant_kp, payload).await {
+        match submit_entry(client, hub_url, tenant_kp, payload).await {
             Ok(()) => info!(
                 hostname = %svc.hostname,
                 mode = svc.tls_mode.label(),

@@ -35,7 +35,9 @@ impl CertStore {
 
     pub async fn reload(&self) {
         let cloned = self.clone();
-        let _ = tokio::task::spawn_blocking(move || cloned.reload_blocking()).await;
+        if let Err(e) = tokio::task::spawn_blocking(move || cloned.reload_blocking()).await {
+            warn!(error = %e, "cert store reload task failed; TLS store may be stale");
+        }
     }
 
     fn reload_blocking(&self) {

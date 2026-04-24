@@ -1,6 +1,4 @@
-use serde_json::Value;
-
-use super::test_helpers::{OPERATOR_KEY, TestHub};
+use super::test_helpers::TestHub;
 
 async fn get_text(client: &reqwest::Client, url: &str) -> (reqwest::StatusCode, String) {
     let resp = client.get(url).send().await.expect("send");
@@ -18,54 +16,21 @@ async fn metrics_endpoint_exposes_counters() {
 
     assert_eq!(status, 200, "metrics body: {body}");
     // Non-labeled metrics are registered eagerly so they always appear.
+    // `process_*` come from the `prometheus` crate's process collector and
+    // are a sanity check that runtime metrics are actually exported.
     for name in [
         "towonel_hub_entries_accepted",
         "towonel_hub_sse_subscribers_connected",
         "towonel_hub_tenants_total",
+        "process_resident_memory_bytes",
+        "process_cpu_seconds_total",
+        "process_open_fds",
     ] {
         assert!(
             body.contains(name),
             "missing metric `{name}` in /metrics output; got:\n{body}"
         );
     }
-    assert!(
-        body.contains("# EOF"),
-        "OpenMetrics trailer missing: {body}"
-    );
-}
-
-#[tokio::test]
-async fn federation_status_requires_operator_auth() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(hub.url("/v1/federation/status"))
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(resp.status(), 401);
-}
-
-#[tokio::test]
-async fn federation_status_returns_known_peers() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let resp = client
-        .get(hub.url("/v1/federation/status"))
-        .bearer_auth(OPERATOR_KEY)
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(resp.status(), 200);
-    let body: Value = resp.json().await.expect("json");
-
-    assert!(body.get("peers").is_some(), "expected peers field: {body}");
-    assert!(
-        body["peers"].as_object().unwrap().is_empty(),
-        "peer map should be empty in test hub with no configured peers"
-    );
 }
 
 #[tokio::test]

@@ -1,7 +1,3 @@
-//! Runtime path for stateless agents: parse the invite token, call
-//! /v1/bootstrap for edge metadata, register an ephemeral iroh identity as
-//! an agent, and keep it alive with heartbeats.
-
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;

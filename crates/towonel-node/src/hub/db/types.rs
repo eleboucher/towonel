@@ -74,15 +74,6 @@ pub struct RedeemedTenant {
     pub pq_public_key: PqPublicKey,
 }
 
-/// A tenant whose registration came from a peer hub via federation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FederatedTenant {
-    pub tenant_id: TenantId,
-    pub pq_public_key: PqPublicKey,
-    pub hostnames: Vec<String>,
-    pub registered_at_ms: u64,
-}
-
 /// `edge_node_id` is derived from the seed in the token and bound at
 /// creation time. Edge invites don't carry an expiry: revoke to cut
 /// access.

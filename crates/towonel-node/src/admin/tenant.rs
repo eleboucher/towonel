@@ -28,11 +28,19 @@ fn derive_key(passphrase: &[u8], salt: &[u8]) -> anyhow::Result<zeroize::Zeroizi
     Ok(key)
 }
 
+/// Which keypair kind `cmd_keypair_init` should generate. Typed so the CLI
+/// dispatcher can't feed a stray string through and fall into `unreachable!`.
+#[derive(Debug, Clone, Copy)]
+pub enum KeypairKind {
+    Tenant,
+    Agent,
+}
+
 // No await inside but matches the async interface of the other command handlers.
 #[allow(clippy::unused_async)]
-pub async fn cmd_keypair_init(key_path: &std::path::Path, kind: &str) -> anyhow::Result<()> {
+pub async fn cmd_keypair_init(key_path: &std::path::Path, kind: KeypairKind) -> anyhow::Result<()> {
     match kind {
-        "tenant" => {
+        KeypairKind::Tenant => {
             if key_path.exists() {
                 return Err(anyhow!(
                     "tenant key file {} already exists; refusing to overwrite",
@@ -56,14 +64,13 @@ pub async fn cmd_keypair_init(key_path: &std::path::Path, kind: &str) -> anyhow:
                 kp.public_key(),
             );
         }
-        "agent" => {
+        KeypairKind::Agent => {
             let key = super::generate_and_save_agent_key(key_path)?;
             let kp = towonel_common::identity::AgentKeypair::from_signing_key(key);
             println!("Generated agent keypair");
             println!("  Private key: {}", key_path.display());
             println!("  Agent ID:    {}", kp.id());
         }
-        _ => unreachable!(),
     }
     Ok(())
 }

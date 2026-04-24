@@ -1,11 +1,9 @@
 pub(super) mod entities;
-mod federation;
 mod invites;
 mod liveness;
 mod migration;
 mod types;
 
-pub use federation::FederationPushState;
 pub use liveness::LivenessBump;
 pub use types::*;
 
@@ -98,25 +96,6 @@ impl Db {
             .all(&self.conn)
             .await?;
         rows.into_iter().map(model_to_entry).collect()
-    }
-
-    /// Same as [`Self::get_all_entries`] but also returns the stored sequence
-    /// for each entry. Used by federation push, which needs the sequence
-    /// without paying for an ML-DSA signature verify per row.
-    pub async fn list_entries_with_sequence(
-        &self,
-    ) -> anyhow::Result<Vec<(SignedConfigEntry, u64)>> {
-        let rows = entities::entries::Entity::find()
-            .order_by_asc(entities::entries::Column::TenantId)
-            .order_by_asc(entities::entries::Column::Sequence)
-            .all(&self.conn)
-            .await?;
-        rows.into_iter()
-            .map(|m| {
-                let seq = m.sequence.cast_unsigned();
-                Ok((model_to_entry(m)?, seq))
-            })
-            .collect()
     }
 }
 

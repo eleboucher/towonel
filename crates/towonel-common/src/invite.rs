@@ -100,14 +100,14 @@ impl InviteToken {
     }
 
     #[must_use]
-    pub fn encode(&self) -> String {
-        format!(
+    pub fn encode(&self) -> Zeroizing<String> {
+        Zeroizing::new(format!(
             "{TENANT_TOKEN_PREFIX}{}.{}.{}.{}",
             B64.encode(self.hub_url.as_bytes()),
             B64.encode(self.invite_id),
             B64.encode(self.invite_secret),
             B64.encode(self.tenant_seed),
-        )
+        ))
     }
 
     pub fn decode(s: &str) -> Result<Self, InviteTokenError> {
@@ -221,14 +221,14 @@ impl EdgeInviteToken {
     }
 
     #[must_use]
-    pub fn encode(&self) -> String {
-        format!(
+    pub fn encode(&self) -> Zeroizing<String> {
+        Zeroizing::new(format!(
             "{EDGE_TOKEN_PREFIX}{}.{}.{}.{}",
             B64.encode(self.hub_url.as_bytes()),
             B64.encode(self.invite_id),
             B64.encode(self.invite_secret),
             B64.encode(self.node_seed),
-        )
+        ))
     }
 
     pub fn decode(s: &str) -> Result<Self, InviteTokenError> {

@@ -5,7 +5,7 @@ use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
-use towonel_common::identity::{TenantId, TenantKeypair};
+use towonel_common::identity::TenantKeypair;
 use towonel_common::invite::{InviteToken, hash_invite_secret};
 use tracing::warn;
 
@@ -15,7 +15,6 @@ use super::db::{InviteRow, InviteStatus, PendingInvite};
 use super::{
     AppState, conflict, internal_error, invalid_request, json_ok, not_found, parse_invite_id,
 };
-use crate::hub::federation::{TenantPush, push_tenant_sync};
 
 #[derive(Debug, Deserialize)]
 pub(super) struct CreateInviteRequest {
@@ -131,11 +130,9 @@ pub(super) async fn post_invite(
         );
     });
 
-    maybe_sync_push(&state, &tenant_id, &pq_public_key, &req.hostnames).await;
-
     json_ok(CreateInviteResponse {
         status: "ok",
-        token: token.encode(),
+        token: token.encode().to_string(),
         invite_id: token.invite_id_b64(),
         tenant_id: tenant_id.to_string(),
         name,
@@ -213,25 +210,4 @@ pub(super) async fn delete_invite(
             internal_error()
         }
     }
-}
-
-async fn maybe_sync_push(
-    state: &AppState,
-    tenant_id: &TenantId,
-    pq_public_key: &towonel_common::identity::PqPublicKey,
-    hostnames: &[String],
-) {
-    if !state.federation.sync_invite_redeem {
-        return;
-    }
-    if state.federation.outbound.is_none() {
-        return;
-    }
-    let body = TenantPush {
-        tenant_id: *tenant_id,
-        pq_public_key: pq_public_key.clone(),
-        hostnames: hostnames.to_vec(),
-        registered_at_ms: now_ms(),
-    };
-    push_tenant_sync(state, &body).await;
 }

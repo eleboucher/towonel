@@ -3,7 +3,6 @@
 //! (URL/key resolution, response checking) live here.
 
 pub mod entry;
-pub mod hub;
 pub mod invite;
 pub mod tenant;
 

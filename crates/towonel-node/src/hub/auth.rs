@@ -12,7 +12,7 @@ pub use towonel_common::auth::body_hash_hex;
 /// edge, etc.).
 ///
 /// `auth_domain` is the string prepended to the signed message
-/// (e.g. `"towonel/federation/v1"` or `"towonel/edge-sub/v1"`).
+/// (e.g. `"towonel/edge-sub/v1"` or `"towonel/agent-heartbeat/v1"`).
 /// `max_skew_ms` is the maximum allowed clock skew in milliseconds.
 /// `body` is the exact request body the signature is expected to cover; pass
 /// `&[]` for GET handlers. `SHA-256(body)` is hex-encoded and appended to the

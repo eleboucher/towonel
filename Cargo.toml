@@ -98,7 +98,9 @@ getrandom = "0.4"
 fastrand = "2"
 reqwest = { version = "0.13", features = ["json", "stream"] }
 eventsource-stream = "0.2"
-prometheus-client = "0.24"
+prometheus = { version = "0.14", default-features = false, features = [
+  "process",
+] }
 base64 = "0.22"
 sha2 = "0.11.0-rc.5"
 url = "2"
