@@ -23,7 +23,7 @@ anyhow = { workspace = true }
 getrandom = { workspace = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
-prometheus-client = { workspace = true }
+prometheus = { workspace = true }
 petname = { workspace = true }
 ppp = { workspace = true }
 

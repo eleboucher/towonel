@@ -329,8 +329,8 @@ async fn run_order(
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        let key_path_clone = key_path.clone();
-        tokio::task::spawn_blocking(move || std::fs::set_permissions(&key_path_clone, perms))
+        let key_path = key_path.clone();
+        tokio::task::spawn_blocking(move || std::fs::set_permissions(&key_path, perms))
             .await
             .map_err(|e| anyhow::anyhow!("set_permissions join failed: {e}"))??;
     }

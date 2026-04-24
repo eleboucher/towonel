@@ -1,56 +1,74 @@
-//! Thin helpers around `prometheus-client` so each metrics module doesn't
-//! repeat the `let x = Counter::default(); registry.register(name, help, x.clone())`
-//! dance for every series.
+//! Thin helpers around the `prometheus` crate so each metrics module doesn't
+//! repeat the construction + registration dance for every series.
+//!
+//! All `register_*` helpers panic on duplicate names or invalid identifiers
+//! — both would be programmer errors caught immediately in a test run.
 
-use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::registry::Registry;
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 
-pub fn register_counter(registry: &mut Registry, name: &str, help: &str) -> Counter {
-    let c = Counter::default();
-    registry.register(name, help, c.clone());
+#[must_use]
+pub fn register_counter(registry: &Registry, name: &str, help: &str) -> IntCounter {
+    #[allow(clippy::expect_used)]
+    let c = IntCounter::new(name, help).expect("valid metric identifier");
+    #[allow(clippy::expect_used)]
+    registry
+        .register(Box::new(c.clone()))
+        .expect("unique metric name");
     c
 }
 
-pub fn register_gauge(registry: &mut Registry, name: &str, help: &str) -> Gauge {
-    let g = Gauge::default();
-    registry.register(name, help, g.clone());
+#[must_use]
+pub fn register_gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
+    #[allow(clippy::expect_used)]
+    let g = IntGauge::new(name, help).expect("valid metric identifier");
+    #[allow(clippy::expect_used)]
+    registry
+        .register(Box::new(g.clone()))
+        .expect("unique metric name");
     g
 }
 
-pub fn register_counter_family<L>(
-    registry: &mut Registry,
+#[must_use]
+pub fn register_counter_vec(
+    registry: &Registry,
     name: &str,
     help: &str,
-) -> Family<L, Counter>
-where
-    L: EncodeLabelSet + Clone + std::hash::Hash + Eq + std::fmt::Debug + Send + Sync + 'static,
-{
-    let f: Family<L, Counter> = Family::default();
-    registry.register(name, help, f.clone());
-    f
+    labels: &[&str],
+) -> IntCounterVec {
+    #[allow(clippy::expect_used)]
+    let v = IntCounterVec::new(Opts::new(name, help), labels).expect("valid metric identifier");
+    #[allow(clippy::expect_used)]
+    registry
+        .register(Box::new(v.clone()))
+        .expect("unique metric name");
+    v
 }
 
-pub fn register_gauge_family<L>(registry: &mut Registry, name: &str, help: &str) -> Family<L, Gauge>
-where
-    L: EncodeLabelSet + Clone + std::hash::Hash + Eq + std::fmt::Debug + Send + Sync + 'static,
-{
-    let f: Family<L, Gauge> = Family::default();
-    registry.register(name, help, f.clone());
-    f
+#[must_use]
+pub fn register_gauge_vec(
+    registry: &Registry,
+    name: &str,
+    help: &str,
+    labels: &[&str],
+) -> IntGaugeVec {
+    #[allow(clippy::expect_used)]
+    let v = IntGaugeVec::new(Opts::new(name, help), labels).expect("valid metric identifier");
+    #[allow(clippy::expect_used)]
+    registry
+        .register(Box::new(v.clone()))
+        .expect("unique metric name");
+    v
 }
 
 /// RAII: increments on `inc`, decrements on drop. Survives task
 /// cancellation since `Drop` runs when the enclosing future is dropped.
 pub struct GaugeGuard {
-    gauge: Gauge,
+    gauge: IntGauge,
 }
 
 impl GaugeGuard {
     #[must_use]
-    pub fn inc(gauge: &Gauge) -> Self {
+    pub fn inc(gauge: &IntGauge) -> Self {
         gauge.inc();
         Self {
             gauge: gauge.clone(),
@@ -67,11 +85,12 @@ impl Drop for GaugeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use prometheus::{Encoder, TextEncoder};
 
     #[test]
     fn gauge_guard_tracks_inc_and_dec() {
-        let mut reg = Registry::default();
-        let g = register_gauge(&mut reg, "test_active", "active things");
+        let reg = Registry::new();
+        let g = register_gauge(&reg, "test_active", "active things");
         assert_eq!(g.get(), 0);
         {
             let _a = GaugeGuard::inc(&g);
@@ -83,11 +102,12 @@ mod tests {
 
     #[test]
     fn counter_helper_registers_series() {
-        let mut reg = Registry::default();
-        let c = register_counter(&mut reg, "test_total", "total things");
+        let reg = Registry::new();
+        let c = register_counter(&reg, "test_total", "total things");
         c.inc();
-        let mut out = String::new();
-        prometheus_client::encoding::text::encode(&mut out, &reg).unwrap();
-        assert!(out.contains("test_total_total"), "missing series: {out}");
+        let mut buf = Vec::new();
+        TextEncoder::new().encode(&reg.gather(), &mut buf).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("test_total"), "missing series: {out}");
     }
 }

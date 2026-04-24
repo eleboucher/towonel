@@ -5,45 +5,44 @@ use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{Router, get};
-use prometheus_client::encoding::text::encode;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::registry::Registry;
+use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
 use serde::Serialize;
 use towonel_common::metrics::{register_counter, register_gauge};
 
-/// Edge observability surface. Cheap to clone: inner metrics hold `Arc`s.
+/// Edge observability surface. Cheap to clone: the `prometheus` metric
+/// types are internally `Arc`-shared and the `Registry` is held as an `Arc`.
 #[derive(Clone)]
 pub struct EdgeMetrics {
-    pub active_connections: Gauge,
-    pub total_connections: Counter,
-    pub total_bytes_in: Counter,
-    pub total_bytes_out: Counter,
+    pub active_connections: IntGauge,
+    pub total_connections: IntCounter,
+    pub total_bytes_in: IntCounter,
+    pub total_bytes_out: IntCounter,
     registry: Arc<Registry>,
 }
 
 impl EdgeMetrics {
     pub fn new() -> Self {
-        let mut r = Registry::default();
+        let r = Registry::new();
+        towonel_common::process_metrics::register(&r);
         Self {
             active_connections: register_gauge(
-                &mut r,
+                &r,
                 "towonel_edge_active_connections",
                 "Active tunneled connections",
             ),
             total_connections: register_counter(
-                &mut r,
-                "towonel_edge_total_connections",
+                &r,
+                "towonel_edge_connections_total",
                 "Total connections handled",
             ),
             total_bytes_in: register_counter(
-                &mut r,
-                "towonel_edge_bytes_in",
+                &r,
+                "towonel_edge_bytes_in_total",
                 "Total bytes received from clients",
             ),
             total_bytes_out: register_counter(
-                &mut r,
-                "towonel_edge_bytes_out",
+                &r,
+                "towonel_edge_bytes_out_total",
                 "Total bytes sent to clients",
             ),
             registry: Arc::new(r),
@@ -71,8 +70,8 @@ async fn health(State(metrics): State<EdgeMetrics>) -> Json<HealthResponse> {
 }
 
 async fn metrics_handler(State(metrics): State<EdgeMetrics>) -> impl IntoResponse {
-    let mut body = String::new();
-    if let Err(e) = encode(&mut body, &metrics.registry) {
+    let mut buf = Vec::new();
+    if let Err(e) = TextEncoder::new().encode(&metrics.registry.gather(), &mut buf) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("metrics encoding failed: {e}"),
@@ -83,9 +82,9 @@ async fn metrics_handler(State(metrics): State<EdgeMetrics>) -> impl IntoRespons
         StatusCode::OK,
         [(
             header::CONTENT_TYPE,
-            "application/openmetrics-text; version=1.0.0; charset=utf-8",
+            "text/plain; version=0.0.4; charset=utf-8",
         )],
-        body,
+        buf,
     )
         .into_response()
 }

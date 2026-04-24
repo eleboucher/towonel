@@ -191,86 +191,10 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_table(
-                Table::create()
-                    .table(FederatedTenants::Table)
-                    .col(
-                        ColumnDef::new(FederatedTenants::TenantId)
-                            .binary()
-                            .not_null()
-                            .primary_key(),
-                    )
-                    .col(
-                        ColumnDef::new(FederatedTenants::PqPublicKey)
-                            .binary()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(FederatedTenants::RegisteredAtMs)
-                            .big_integer()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(FederatedTenants::SourcePeerNodeId)
-                            .binary()
-                            .not_null(),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .create_table(
-                Table::create()
-                    .table(FederatedTenantHostnames::Table)
-                    .col(
-                        ColumnDef::new(FederatedTenantHostnames::TenantId)
-                            .binary()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(FederatedTenantHostnames::HostnameLower)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(FederatedTenantHostnames::Hostname)
-                            .string()
-                            .not_null(),
-                    )
-                    .primary_key(
-                        Index::create()
-                            .col(FederatedTenantHostnames::TenantId)
-                            .col(FederatedTenantHostnames::HostnameLower),
-                    )
-                    .foreign_key(
-                        ForeignKey::create()
-                            .from(
-                                FederatedTenantHostnames::Table,
-                                FederatedTenantHostnames::TenantId,
-                            )
-                            .to(FederatedTenants::Table, FederatedTenants::TenantId)
-                            .on_delete(ForeignKeyAction::Cascade),
-                    )
-                    .to_owned(),
-            )
-            .await?;
-
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        manager
-            .drop_table(
-                Table::drop()
-                    .table(FederatedTenantHostnames::Table)
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .drop_table(Table::drop().table(FederatedTenants::Table).to_owned())
-            .await?;
         manager
             .drop_table(Table::drop().table(Edges::Table).to_owned())
             .await?;
@@ -350,21 +274,4 @@ enum Edges {
     EdgeNodeId,
     Name,
     RegisteredAtMs,
-}
-
-#[derive(DeriveIden)]
-enum FederatedTenants {
-    Table,
-    TenantId,
-    PqPublicKey,
-    RegisteredAtMs,
-    SourcePeerNodeId,
-}
-
-#[derive(DeriveIden)]
-enum FederatedTenantHostnames {
-    Table,
-    TenantId,
-    HostnameLower,
-    Hostname,
 }

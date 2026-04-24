@@ -5,32 +5,37 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use serde::Serialize;
 use towonel_common::metrics::GaugeGuard;
 use towonel_common::routing::RouteTable;
 
-use super::{AGENT_LIVE_TTL_MS, AppState, internal_error, json_ok, unauthorized};
+use super::{AGENT_LIVE_TTL_MS, AppState, internal_error, unauthorized};
 
-/// Timestamp window for signature freshness. Replay within this window is
-/// acceptable (the endpoint just opens another identical SSE stream).
 const EDGE_SUB_MAX_CLOCK_SKEW_MS: u64 = 60_000;
 
 const EDGE_SUB_AUTH_DOMAIN: &str = "towonel/edge-sub/v1";
 
 /// Parse the `Authorization: Signature <node_id>.<ts>.<sig>` header, check
-/// the timestamp window, verify the signature against `node_id`, and
-/// confirm the node is registered via a pending (not revoked)
-/// `edge_invites` row.
 async fn authenticate_edge_subscriber(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<[u8; 32], &'static str> {
-    let (node_id_bytes, _ts_ms) = crate::hub::auth::verify_signature_header(
+    let (node_id_bytes, ts_ms) = crate::hub::auth::verify_signature_header(
         headers,
         EDGE_SUB_AUTH_DOMAIN,
         EDGE_SUB_MAX_CLOCK_SKEW_MS,
         &[], // GET has no body
     )?;
+
+    let key = (node_id_bytes, ts_ms);
+    let fresh = state
+        .edge_sub_nonces
+        .entry(key)
+        .or_insert_with(async {})
+        .await
+        .is_fresh();
+    if !fresh {
+        return Err("replayed (node_id, timestamp) pair");
+    }
 
     if !state
         .db
@@ -41,6 +46,18 @@ async fn authenticate_edge_subscriber(
         return Err("edge is not registered with this hub");
     }
     Ok(node_id_bytes)
+}
+
+pub(super) async fn build_initial_snapshot(state: &AppState) -> anyhow::Result<RouteTable> {
+    let policy_snapshot = state.policy.load_full();
+    let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
+    let (entries, live) =
+        tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
+    Ok(RouteTable::from_entries_with_liveness(
+        &entries,
+        &policy_snapshot,
+        Some(&live),
+    ))
 }
 
 /// Serialize a `RouteTable` as canonical CBOR, base64url-encode it, and
@@ -68,28 +85,16 @@ pub(super) async fn routes_subscribe(
     };
     tracing::info!(edge = %hex::encode(node_id), "edge subscriber connected");
 
-    let initial_table = {
-        let policy_snapshot = state.policy.load_full();
-        let entries = match state.db.get_all_entries().await {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to fetch entries for initial snapshot");
-                return internal_error();
-            }
-        };
-        let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
-        let live = match state.db.live_agents(cutoff).await {
-            Ok(l) => l,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to fetch liveness for initial snapshot");
-                return internal_error();
-            }
-        };
-        RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live))
+    let initial_table = match build_initial_snapshot(&state).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build initial route snapshot");
+            return internal_error();
+        }
     };
 
     let mut rx = state.route_tx.subscribe();
-
+    let state_for_recover = Arc::clone(&state);
     let guard = GaugeGuard::inc(&state.metrics.sse_subscribers_connected);
 
     let stream = async_stream::stream! {
@@ -98,7 +103,23 @@ pub(super) async fn routes_subscribe(
         loop {
             match rx.recv().await {
                 Ok(table) => yield Ok(route_event(&table)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {},
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Client fell behind the 64-slot broadcast buffer. Resend
+                    // a fresh snapshot so it resyncs instead of silently
+                    // missing route updates until the next one lands.
+                    tracing::warn!(
+                        edge = %hex::encode(node_id),
+                        skipped = n,
+                        "edge SSE subscriber lagged; resending current snapshot",
+                    );
+                    match build_initial_snapshot(&state_for_recover).await {
+                        Ok(t) => yield Ok(route_event(&t)),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "lag-recovery snapshot failed; closing");
+                            break;
+                        }
+                    }
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
@@ -107,26 +128,4 @@ pub(super) async fn routes_subscribe(
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
-}
-
-/// `GET /v1/dns/records` -- returns all active hostnames paired with this
-/// hub's edge addresses. An external-dns sidecar or cron job can poll this
-/// to create A / AAAA records pointing each hostname at the edge IPs.
-#[derive(Serialize)]
-struct DnsRecord<'a> {
-    hostname: &'a str,
-    targets: &'a [String],
-}
-
-pub(super) async fn get_dns_records(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let hostnames = state.prev_hostnames.load();
-    let records: Vec<DnsRecord<'_>> = hostnames
-        .iter()
-        .map(|h| DnsRecord {
-            hostname: h.as_str(),
-            targets: &state.identity.edge_addresses,
-        })
-        .collect();
-
-    json_ok(serde_json::json!({ "records": records }))
 }

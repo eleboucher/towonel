@@ -446,6 +446,99 @@
           "format": "table"
         }
       ]
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Process",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 49},
+      "collapsed": false
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "Resident memory (RSS)",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 50},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "process_resident_memory_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
+      ]
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "CPU usage",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 50},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}"}
+      ]
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "Open file descriptors",
+      "description": "`process_open_fds` vs `process_max_fds`. Rising ratios hint at FD leaks.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 58},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {"refId": "A", "expr": "process_open_fds{instance=~\"$instance\"}", "legendFormat": "{{instance}} open"},
+        {"refId": "B", "expr": "process_max_fds{instance=~\"$instance\"}", "legendFormat": "{{instance}} max"}
+      ]
+    },
+    {
+      "id": 54,
+      "type": "stat",
+      "title": "Uptime",
+      "description": "Time since process start.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 58},
+      "fieldConfig": {
+        "defaults": {"unit": "s"},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {"refId": "A", "expr": "time() - process_start_time_seconds{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
+      ]
     }
   ]
 }

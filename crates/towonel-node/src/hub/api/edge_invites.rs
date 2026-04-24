@@ -58,7 +58,7 @@ pub(super) async fn post_edge_invite(
 
     json_ok(CreateEdgeInviteResponse {
         status: "ok",
-        token: token.encode(),
+        token: token.encode().to_string(),
         invite_id: token.invite_id_b64(),
         name,
         edge_node_id: hex::encode(edge_node_id),

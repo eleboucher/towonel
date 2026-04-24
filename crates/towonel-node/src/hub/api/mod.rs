@@ -1,14 +1,13 @@
-mod admin;
 mod agent_heartbeat;
 mod bootstrap;
 mod edge_invites;
 mod entries;
-mod federation_status;
 mod invites;
 mod metrics_handler;
 mod subscribe;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use axum::Router;
@@ -21,7 +20,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::Serialize;
 use tokio::sync::{Mutex, broadcast};
-use tokio_util::task::TaskTracker;
 use tower_http::ServiceBuilderExt;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::MakeRequestUuid;
@@ -33,7 +31,6 @@ use tracing::Level;
 
 use super::db;
 use super::metrics::HubMetrics;
-use super::peer_status::PeerStatusMap;
 use db::Db;
 
 pub(super) use towonel_common::CBOR_CONTENT_TYPE;
@@ -53,6 +50,27 @@ pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
 /// minutes is long enough to debug a dead pod without keeping rows forever.
 pub const AGENT_PRUNE_TTL_MS: u64 = 300_000;
 
+/// Freshness window for signed heartbeat/edge-subscribe requests. A request
+/// outside ±`MAX_CLOCK_SKEW_MS` is rejected outright.
+const MAX_CLOCK_SKEW_MS: u64 = 60_000;
+
+/// Bound on the replay-nonce cache. Entries are also evicted by TTL; the cap
+/// only matters under extreme traffic.
+const MAX_NONCE_ENTRIES: u64 = 10_000;
+
+/// Replay-protection cache for `(node_id, ts_ms)` pairs. TTL is 2× the
+/// freshness window so any in-window retry is caught.
+pub type NonceCache = moka::future::Cache<([u8; 32], u64), ()>;
+
+/// Construct an empty nonce cache with the project-wide cap and TTL.
+#[must_use]
+pub fn new_nonce_cache() -> NonceCache {
+    moka::future::Cache::builder()
+        .max_capacity(MAX_NONCE_ENTRIES)
+        .time_to_live(Duration::from_millis(MAX_CLOCK_SKEW_MS * 2))
+        .build()
+}
+
 /// Shared application state for all axum handlers.
 pub struct AppState {
     pub db: Db,
@@ -64,8 +82,6 @@ pub struct AppState {
     /// across concurrent writers is provided by `invite_lock` for the
     /// check-then-register windows that need it.
     pub policy: ArcSwap<OwnershipPolicy>,
-    /// Shared HTTP client for outbound requests (DNS webhook, etc.).
-    pub http_client: reqwest::Client,
     /// Identity information (`node_id`, edge info, version).
     pub identity: super::HubIdentity,
     /// Bearer token protecting operator-only endpoints.
@@ -74,51 +90,19 @@ pub struct AppState {
     pub public_url: String,
     /// Serializes the check+insert window in `POST /v1/invites`.
     pub invite_lock: Mutex<()>,
-    /// Federation state: trusted peers and nonce cache.
-    pub federation: FederationState,
-    /// Optional webhook URL for DNS automation.
-    pub dns_webhook_url: Option<String>,
-    /// Hostnames present in the last broadcasted route table. Single-writer
-    /// (the route-rebuild path) / many-reader (`/v1/dns/records`); `ArcSwap`
-    /// keeps reads lock-free.
-    pub prev_hostnames: ArcSwap<std::collections::HashSet<String>>,
     /// Prometheus metrics surface exposed on `/metrics`.
     pub metrics: HubMetrics,
-    /// Per-peer federation push status, surfaced via `/v1/federation/status`.
-    pub peer_statuses: PeerStatusMap,
-    /// Tracker for fire-and-forget background tasks (DNS webhook, etc.).
-    pub tasks: TaskTracker,
     /// Operator secret used to keyed-hash invite secrets before persistence.
     pub invite_hash_key: Arc<InviteHashKey>,
     /// Replay cache for heartbeat (`node_id`, `ts_ms`) pairs. Stops an
     /// attacker with a captured heartbeat from keeping a revoked agent
     /// looking live within the ±60s clock-skew window.
-    pub heartbeat_nonces: super::federation::NonceCache,
-    /// Accept `http://` and loopback hosts in `/v1/admin/resync`. Only set
-    /// by the integration-test scaffolding; production leaves this `false`.
-    pub allow_loopback_peers: bool,
-}
-
-/// Federation-related runtime state.
-pub struct FederationState {
-    /// iroh `node_ids` of configured federation peers.
-    pub trusted_peers: super::federation::TrustedPeerSet,
-    /// Nonce cache for federation auth: prevents within-window replay.
-    /// Bounded size + TTL eviction via moka.
-    pub nonces: super::federation::NonceCache,
-    /// Outbound peer surface for synchronous pushes. `None` when the hub
-    /// has no configured peers (federation disabled).
-    pub outbound: Option<OutboundFederation>,
-    /// Push the new tenant to all peers inside `redeem_invite` before
-    /// responding. Trades redemption latency for consistency on the op
-    /// operators care about most.
-    pub sync_invite_redeem: bool,
-}
-
-/// Outbound federation identity: the signing key + URLs of peer hubs.
-pub struct OutboundFederation {
-    pub peer_urls: Vec<String>,
-    pub signing_key: iroh::SecretKey,
+    pub heartbeat_nonces: NonceCache,
+    /// Replay cache for edge-subscribe (`node_id`, `ts_ms`) pairs. A captured
+    /// `Authorization` header for `GET /v1/routes/subscribe` would otherwise
+    /// replay for the full freshness window and let an attacker open a
+    /// second SSE stream to observe the route table.
+    pub edge_sub_nonces: NonceCache,
 }
 
 impl AppState {
@@ -146,52 +130,10 @@ pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Resu
     let (entries, live) =
         tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
     let table = RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live));
-    broadcast_routes(state, table);
-    Ok(())
-}
-
-/// Broadcast `table` to edges and fire the DNS webhook if hostnames changed.
-pub fn broadcast_routes(state: &Arc<AppState>, table: RouteTable) {
-    let new_hostnames = table.hostnames();
     if state.route_tx.send(table).is_err() {
         tracing::debug!("route broadcast: no active subscribers");
     }
-
-    if let Some(url) = &state.dns_webhook_url {
-        let prev = state.prev_hostnames.load();
-        let added: Vec<&String> = new_hostnames.difference(&prev).collect();
-        let removed: Vec<&String> = prev.difference(&new_hostnames).collect();
-
-        if !added.is_empty() || !removed.is_empty() {
-            let url = url.clone();
-            let client = state.http_client.clone();
-            let body = serde_json::json!({
-                "added": added,
-                "removed": removed,
-            });
-            state.tasks.spawn(async move {
-                match client
-                    .post(&url)
-                    .header("Content-Type", "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                {
-                    Ok(resp) if resp.status().is_success() => {
-                        tracing::info!(url = %url, "DNS webhook notified");
-                    }
-                    Ok(resp) => {
-                        tracing::warn!(url = %url, status = %resp.status(), "DNS webhook returned error");
-                    }
-                    Err(e) => {
-                        tracing::warn!(url = %url, error = %e, "DNS webhook request failed");
-                    }
-                }
-            });
-        }
-
-        state.prev_hostnames.store(Arc::new(new_hostnames));
-    }
+    Ok(())
 }
 
 /// Build the axum router with a per-IP rate limiter on the public surface.
@@ -221,19 +163,6 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let unlimited_public = Router::new()
         .route("/v1/health", get(entries::health))
         .route("/v1/edges", get(entries::list_edges));
-    let federation_routes = Router::new()
-        .route(
-            "/v1/federation/tenants",
-            post(super::federation::push_tenant),
-        )
-        .route(
-            "/v1/federation/tenant-removals",
-            post(super::federation::push_removal),
-        )
-        .route(
-            "/v1/federation/entries",
-            post(super::federation::push_entry),
-        );
 
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(|req: &axum::http::Request<_>| {
@@ -259,7 +188,6 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     Router::new()
         .merge(public_write)
         .merge(unlimited_public)
-        .merge(federation_routes)
         .merge(operator_routes)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -286,10 +214,6 @@ fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/edge-invites/{id}",
             delete(edge_invites::delete_edge_invite),
         )
-        .route("/v1/dns/records", get(subscribe::get_dns_records))
-        .route("/v1/admin/federation/snapshot", get(admin::snapshot))
-        .route("/v1/admin/resync", post(admin::resync))
-        .route("/v1/federation/status", get(federation_status::get_status))
         .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
 }
 

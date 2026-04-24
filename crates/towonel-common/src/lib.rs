@@ -6,6 +6,7 @@ pub mod identity;
 pub mod invite;
 pub mod metrics;
 pub mod ownership;
+pub mod process_metrics;
 pub mod protocol;
 pub mod random_name;
 pub mod routing;

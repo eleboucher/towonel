@@ -1,6 +1,3 @@
-//! Minimal hub RPC helpers — POST signed entry, parse CBOR response, typed
-//! error envelope. Not a full SDK.
-
 use anyhow::{Context, anyhow};
 use towonel_common::CBOR_CONTENT_TYPE;
 use towonel_common::config_entry::{ConfigPayload, SignedConfigEntry};

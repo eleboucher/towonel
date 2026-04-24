@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use anyhow::Context;
 use serde::Deserialize;
 use towonel_common::invite::EdgeInviteToken;
 
@@ -115,10 +116,15 @@ pub struct IdentityConfig {
 }
 
 impl IdentityConfig {
-    pub fn load_secret_key(&self) -> anyhow::Result<iroh::SecretKey> {
+    pub async fn load_secret_key_async(&self) -> anyhow::Result<iroh::SecretKey> {
         match &self.source {
             IdentitySource::KeyFile(path) => {
-                towonel_common::identity::load_or_generate_secret_key(path)
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || {
+                    towonel_common::identity::load_or_generate_secret_key(&path)
+                })
+                .await
+                .context("identity-load task panicked")?
             }
             IdentitySource::EdgeInviteSeed(seed) => Ok(iroh::SecretKey::from_bytes(seed)),
         }
@@ -133,46 +139,12 @@ pub struct HubConfig {
     pub health_listen_addr: String,
     pub operator_api_key_path: PathBuf,
     pub public_url: Option<String>,
-    pub peers: Vec<FederationPeer>,
-    pub federation: FederationConfig,
-    pub dns_webhook_url: Option<String>,
+    /// Keyed-hash key for invite secrets. Loaded from
+    /// [`crate::hub::INVITE_HASH_KEY_ENV`] during `NodeConfig::load` so a
+    /// missing/invalid value fails startup before DB migrations run.
+    /// `Arc` so downstream `HubParams` can cheaply share it without re-reading env.
+    pub invite_hash_key: Option<std::sync::Arc<towonel_common::invite::InviteHashKey>>,
 }
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct FederationPeer {
-    pub url: String,
-    #[serde(default)]
-    pub node_id: Option<String>,
-}
-
-/// Operator-selected operations that push state to peers synchronously rather
-/// than relying on the 15 s async reconciliation loop.
-#[derive(Debug, Default)]
-pub struct FederationConfig {
-    pub synchronous_operations: Vec<String>,
-}
-
-impl FederationConfig {
-    pub fn sync_invite_redeem(&self) -> bool {
-        self.synchronous_operations
-            .iter()
-            .any(|s| s == SYNC_OP_INVITE_REDEEM)
-    }
-
-    pub fn validate(&self) -> anyhow::Result<()> {
-        for op in &self.synchronous_operations {
-            if op != SYNC_OP_INVITE_REDEEM {
-                anyhow::bail!(
-                    "hub.federation.synchronous_operations: unknown op {op:?}; known: [{SYNC_OP_INVITE_REDEEM:?}]"
-                );
-            }
-        }
-        Ok(())
-    }
-}
-
-const SYNC_OP_INVITE_REDEEM: &str = "invite_redeem";
 
 #[derive(Debug)]
 pub struct EdgeConfig {
@@ -225,13 +197,10 @@ struct RawEnv {
     hub_health_listen_addr: Option<String>,
     hub_operator_api_key_path: Option<PathBuf>,
     hub_public_url: Option<String>,
-    hub_dns_webhook_url: Option<String>,
     hub_db_driver: Option<DbDriver>,
     hub_db_dsn: Option<String>,
     hub_db_max_open_conns: Option<u32>,
     hub_db_max_idle_conns: Option<u32>,
-    hub_peers: Option<String>,
-    hub_sync_operations: Vec<String>,
 
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
@@ -245,19 +214,15 @@ struct RawEnv {
     edge_tls_http_listen_addr: Option<String>,
 
     tenants: Option<String>,
-
-    allow_unpinned_federation_peers: Option<bool>,
 }
 
 impl NodeConfig {
     /// Load from `TOWONEL_*` env vars. Lists are CSV; structured values
-    /// (`TOWONEL_HUB_PEERS`, `TOWONEL_TENANTS`) are JSON. The README lists
-    /// every knob.
+    /// (`TOWONEL_TENANTS`) are JSON. The README lists every knob.
     pub fn load() -> anyhow::Result<Self> {
         let raw: RawEnv = envy::prefixed("TOWONEL_").from_env()?;
-        let allow_unpinned = raw.allow_unpinned_federation_peers.unwrap_or(false);
         let c = Self::from_raw(raw)?;
-        c.validate(allow_unpinned)?;
+        c.validate()?;
         Ok(c)
     }
 
@@ -309,8 +274,18 @@ impl NodeConfig {
             listen_workers: r.edge_listen_workers.unwrap_or(1),
         };
 
+        let hub_enabled = r.hub_enabled.unwrap_or(true);
+        // Validate the invite-hash key upfront so a missing or malformed env
+        // var fails startup loudly, before any DB work. Edge-only nodes don't
+        // need it (they never verify invite secrets).
+        let invite_hash_key = if hub_enabled {
+            Some(std::sync::Arc::new(crate::hub::load_invite_hash_key()?))
+        } else {
+            None
+        };
+
         let hub = HubConfig {
-            enabled: r.hub_enabled.unwrap_or(true),
+            enabled: hub_enabled,
             database: DatabaseConfig {
                 driver: r.hub_db_driver.unwrap_or(DbDriver::Sqlite),
                 dsn: r.hub_db_dsn,
@@ -327,11 +302,7 @@ impl NodeConfig {
                 .hub_operator_api_key_path
                 .unwrap_or_else(|| PathBuf::from("operator.key")),
             public_url: r.hub_public_url,
-            peers: parse_json_opt("TOWONEL_HUB_PEERS", r.hub_peers.as_deref())?.unwrap_or_default(),
-            federation: FederationConfig {
-                synchronous_operations: trim_entries(r.hub_sync_operations),
-            },
-            dns_webhook_url: r.hub_dns_webhook_url,
+            invite_hash_key,
         };
 
         let tenants = parse_json_opt("TOWONEL_TENANTS", r.tenants.as_deref())?.unwrap_or_default();
@@ -344,38 +315,10 @@ impl NodeConfig {
         })
     }
 
-    fn validate(&self, allow_unpinned: bool) -> anyhow::Result<()> {
-        for peer in &self.hub.peers {
-            require_https(&peer.url, "federation peer URL")?;
-            match &peer.node_id {
-                Some(id) if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) => {}
-                Some(id) => {
-                    anyhow::bail!(
-                        "federation peer node_id must be 64 hex chars: got {id:?} for {}",
-                        peer.url
-                    );
-                }
-                None if allow_unpinned => {
-                    tracing::warn!(
-                        peer = %peer.url,
-                        "federation peer has no pinned node_id and TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=true; bootstrap will trust the first /v1/health response (MITM-able)"
-                    );
-                }
-                None => {
-                    anyhow::bail!(
-                        "federation peer {} has no pinned node_id — set node_id, or set TOWONEL_ALLOW_UNPINNED_FEDERATION_PEERS=true to override (not recommended)",
-                        peer.url
-                    );
-                }
-            }
-        }
+    fn validate(&self) -> anyhow::Result<()> {
         for url in &self.edge.hub_urls {
             require_https(url, "hub_urls entry")?;
         }
-        if let Some(url) = &self.hub.dns_webhook_url {
-            require_https(url, "dns_webhook_url")?;
-        }
-        self.hub.federation.validate()?;
         Ok(())
     }
 }
@@ -427,25 +370,6 @@ fn require_https(url: &str, context: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn federation_sync_invite_redeem_recognised() {
-        let cfg = FederationConfig {
-            synchronous_operations: vec!["invite_redeem".to_string()],
-        };
-        assert!(cfg.validate().is_ok());
-        assert!(cfg.sync_invite_redeem());
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn federation_unknown_sync_op_rejected() {
-        let cfg = FederationConfig {
-            synchronous_operations: vec!["delete_tenant".to_string()],
-        };
-        let err = cfg.validate().expect_err("unknown op must be rejected");
-        assert!(err.to_string().contains("delete_tenant"));
-    }
 
     #[test]
     fn trim_entries_normalizes_csv() {

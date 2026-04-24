@@ -167,7 +167,6 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
     #[derive(Serialize)]
     struct EdgeEntry<'a> {
         node_id: iroh::EndpointId,
-        healthy: bool,
         addresses: &'a [String],
     }
     #[derive(Serialize)]
@@ -192,11 +191,7 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
             } else {
                 empty
             };
-            EdgeEntry {
-                node_id,
-                healthy: true,
-                addresses,
-            }
+            EdgeEntry { node_id, addresses }
         })
         .collect();
 

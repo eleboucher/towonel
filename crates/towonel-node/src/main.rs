@@ -68,31 +68,6 @@ enum Command {
         #[command(subcommand)]
         action: EdgeInviteAction,
     },
-    /// Operator-only: hub-level administrative operations.
-    Hub {
-        #[command(subcommand)]
-        action: HubAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum HubAction {
-    /// Disaster-recovery resync: pull federation state (tenants, removals,
-    /// entries) from `--from-peer` into the local hub. Idempotent.
-    Resync {
-        /// Local hub URL. Defaults to `TOWONEL_HUB_URL`.
-        #[arg(long)]
-        hub_url: Option<String>,
-        /// Operator key for the LOCAL hub. Defaults to `$TOWONEL_OPERATOR_KEY`.
-        #[arg(long)]
-        api_key: Option<String>,
-        /// Peer hub URL to pull state from.
-        #[arg(long)]
-        from_peer: String,
-        /// Operator key for the PEER hub (needed to fetch its snapshot).
-        #[arg(long)]
-        peer_key: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -283,7 +258,7 @@ async fn main() -> anyhow::Result<()> {
         None | Some(Command::Serve) => run_node().await,
         Some(Command::Tenant { action }) => match action {
             TenantAction::Init { key_path } => {
-                admin::tenant::cmd_keypair_init(&key_path, "tenant").await
+                admin::tenant::cmd_keypair_init(&key_path, admin::tenant::KeypairKind::Tenant).await
             }
             TenantAction::Leave { key_path, hub_url } => {
                 admin::tenant::cmd_tenant_leave(key_path, hub_url).await
@@ -317,7 +292,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Some(Command::Agent { action }) => match action {
             AgentAction::Init { key_path } => {
-                admin::tenant::cmd_keypair_init(&key_path, "agent").await
+                admin::tenant::cmd_keypair_init(&key_path, admin::tenant::KeypairKind::Agent).await
             }
         },
         Some(Command::Invite { action }) => match action {
@@ -352,14 +327,6 @@ async fn main() -> anyhow::Result<()> {
                 id,
             } => admin::invite::cmd_edge_invite_revoke(hub_url, api_key, id).await,
         },
-        Some(Command::Hub { action }) => match action {
-            HubAction::Resync {
-                hub_url,
-                api_key,
-                from_peer,
-                peer_key,
-            } => admin::hub::cmd_hub_resync(hub_url, api_key, from_peer, peer_key).await,
-        },
     }
 }
 
@@ -371,7 +338,8 @@ async fn run_node() -> anyhow::Result<()> {
 
     let secret_key = config
         .identity
-        .load_secret_key()
+        .load_secret_key_async()
+        .await
         .context("failed to load node identity")?;
     let node_id = secret_key.public();
     info!(%node_id, "loaded node identity");
@@ -386,7 +354,6 @@ async fn run_node() -> anyhow::Result<()> {
     match (config.hub.enabled, config.edge.enabled) {
         (true, true) => {
             let (route_tx, route_rx) = broadcast::channel::<RouteTable>(64);
-            let hub_secret_key = iroh::SecretKey::from(secret_key.to_bytes());
             let (router, edge, edge_node_id, edge_addresses) =
                 build_edge(secret_key, &config.tenants, &config.edge).await?;
 
@@ -402,12 +369,7 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_addresses: public_addresses,
                 software_version: SOFTWARE_VERSION,
             };
-            let hub = hub::Hub::new(build_hub_params(
-                &config,
-                identity,
-                hub_secret_key,
-                route_tx,
-            )?);
+            let hub = hub::Hub::new(build_hub_params(&config, identity, route_tx).await?);
 
             tokio::spawn(route_sync_task(route_rx, router));
 
@@ -429,7 +391,8 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_addresses: Vec::new(),
                 software_version: SOFTWARE_VERSION,
             };
-            let hub = hub::Hub::new(build_hub_params(&config, identity, secret_key, route_tx)?);
+            drop(secret_key);
+            let hub = hub::Hub::new(build_hub_params(&config, identity, route_tx).await?);
             tokio::select! {
                 res = hub.run() => {
                     if let Err(e) = res { error!("hub error: {e}"); }
@@ -438,7 +401,7 @@ async fn run_node() -> anyhow::Result<()> {
             }
         }
         (false, true) => {
-            let subscriber_key = iroh::SecretKey::from(secret_key.to_bytes());
+            let subscriber_key = secret_key.clone();
             let (router, edge, _edge_node_id, _edge_addresses) =
                 build_edge(secret_key, &config.tenants, &config.edge).await?;
 
@@ -482,17 +445,20 @@ fn default_public_url(hub: &config::HubConfig) -> String {
 ///
 /// Shared between the hub+edge and hub-only match arms so the field
 /// wiring isn't duplicated.
-fn build_hub_params(
+async fn build_hub_params(
     config: &config::NodeConfig,
     identity: HubIdentity,
-    secret_key: iroh::SecretKey,
     route_tx: broadcast::Sender<RouteTable>,
 ) -> anyhow::Result<hub::HubParams> {
     let policy = build_ownership_policy(&config.tenants)?;
-    let operator_api_key = hub::load_or_generate_operator_key(&config.hub.operator_api_key_path)?;
-    let invite_hash_key = std::sync::Arc::new(hub::load_invite_hash_key()?);
+    let operator_api_key =
+        hub::load_or_generate_operator_key(&config.hub.operator_api_key_path).await?;
+    let invite_hash_key = config
+        .hub
+        .invite_hash_key
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("invite_hash_key was not loaded during config"))?;
     let public_url = default_public_url(&config.hub);
-    let peers = config.hub.peers.clone();
     Ok(hub::HubParams {
         listen_addr: config.hub.listen_addr.clone(),
         health_listen_addr: config.hub.health_listen_addr.clone(),
@@ -503,10 +469,6 @@ fn build_hub_params(
         operator_api_key,
         invite_hash_key,
         public_url,
-        peers,
-        secret_key,
-        dns_webhook_url: config.hub.dns_webhook_url.clone(),
-        sync_invite_redeem: config.hub.federation.sync_invite_redeem(),
     })
 }
 

@@ -1,16 +1,10 @@
 pub mod api;
 pub mod auth;
 pub mod db;
-pub mod federation;
 pub mod metrics;
-pub mod peer_status;
 
 #[cfg(test)]
-mod admin_tests;
-#[cfg(test)]
 mod api_tests;
-#[cfg(test)]
-mod federation_tests;
 #[cfg(test)]
 mod observability_tests;
 #[cfg(test)]
@@ -21,7 +15,6 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use towonel_common::identity::write_key_file;
 use towonel_common::invite::InviteHashKey;
@@ -51,8 +44,20 @@ pub fn load_invite_hash_key() -> anyhow::Result<InviteHashKey> {
 }
 
 /// Load the operator API key from `path`, or generate a new random one and
-/// save it with 0o600 permissions.
-pub fn load_or_generate_operator_key(path: &Path) -> anyhow::Result<zeroize::Zeroizing<String>> {
+/// save it with 0o600 permissions. File I/O happens on a blocking pool so
+/// the async runtime isn't stalled at startup.
+pub async fn load_or_generate_operator_key(
+    path: &Path,
+) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || load_or_generate_operator_key_blocking(&path))
+        .await
+        .map_err(|e| anyhow::anyhow!("operator-key task panicked: {e}"))?
+}
+
+fn load_or_generate_operator_key_blocking(
+    path: &Path,
+) -> anyhow::Result<zeroize::Zeroizing<String>> {
     if path.exists() {
         let content = std::fs::read_to_string(path)?;
         let trimmed = content.trim().to_string();
@@ -95,10 +100,6 @@ pub struct HubParams {
     pub operator_api_key: zeroize::Zeroizing<String>,
     pub invite_hash_key: Arc<InviteHashKey>,
     pub public_url: String,
-    pub peers: Vec<crate::config::FederationPeer>,
-    pub secret_key: iroh::SecretKey,
-    pub dns_webhook_url: Option<String>,
-    pub sync_invite_redeem: bool,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -107,32 +108,9 @@ pub struct Hub {
     p: HubParams,
 }
 
-fn spawn_background_loops(
-    state: &Arc<api::AppState>,
-    peers: &[crate::config::FederationPeer],
-    secret_key: &iroh::SecretKey,
-) {
-    for peer in peers {
-        let peer_cfg = peer.clone();
-        let sk = iroh::SecretKey::from(secret_key.to_bytes());
-        let state_for_peer = Arc::clone(state);
-        tokio::spawn(async move {
-            if let Err(e) = federation::run_peer(peer_cfg, sk, state_for_peer).await {
-                tracing::error!(error = %e, "federation peer task exited");
-            }
-        });
-    }
+fn spawn_background_loops(state: &Arc<api::AppState>) {
     tokio::spawn(refresh_metrics_loop(Arc::clone(state)));
     tokio::spawn(agent_liveness_prune_loop(Arc::clone(state)));
-}
-
-/// Shared HTTP client used by the hub for outbound requests (DNS webhook,
-/// admin resync). Federation `run_peer` builds its own longer-timeout client.
-fn build_http_client() -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .build()
 }
 
 impl Hub {
@@ -140,8 +118,7 @@ impl Hub {
         Self { p: params }
     }
 
-    /// Run the hub. Opens the `SQLite` database and starts the HTTP management API.
-    #[allow(clippy::too_many_lines)]
+    /// Run the hub. Opens the DB and starts the HTTP management API.
     pub async fn run(&self) -> anyhow::Result<()> {
         let db_url = self.p.database.connection_url()?;
         info!(
@@ -171,18 +148,6 @@ impl Hub {
             }
             policy.register_tenant(&tenant.tenant_id, tenant.pq_public_key, tenant.hostnames);
         }
-        for federated in db.list_federated_tenants().await? {
-            if removed.contains(&federated.tenant_id)
-                || policy.is_known_tenant(&federated.tenant_id)
-            {
-                continue;
-            }
-            policy.register_tenant(
-                &federated.tenant_id,
-                federated.pq_public_key,
-                federated.hostnames,
-            );
-        }
 
         // Initial broadcast: intersect with surviving liveness rows from the
         // previous process, so edges don't briefly see zombie agents after
@@ -205,19 +170,11 @@ impl Hub {
             Err(e) => tracing::warn!(error = %e, "initial route broadcast skipped"),
         }
 
-        let trusted_peers = init_trusted_peers(&self.p.peers).await?;
-        let peer_urls: Vec<String> = self.p.peers.iter().map(|p| p.url.clone()).collect();
-        let outbound = (!peer_urls.is_empty()).then(|| api::OutboundFederation {
-            peer_urls: peer_urls.clone(),
-            signing_key: iroh::SecretKey::from(self.p.secret_key.to_bytes()),
-        });
         let metrics = metrics::HubMetrics::new();
-        let peer_statuses = peer_status::new_peer_status_map(&peer_urls);
         let state = Arc::new(api::AppState {
             db,
             route_tx: self.p.route_tx.clone(),
             policy: arc_swap::ArcSwap::from_pointee(policy),
-            http_client: build_http_client()?,
             identity: HubIdentity {
                 node_id: self.p.identity.node_id,
                 edge_node_id: self.p.identity.edge_node_id,
@@ -227,23 +184,13 @@ impl Hub {
             operator_api_key: self.p.operator_api_key.clone(),
             public_url: self.p.public_url.clone(),
             invite_lock: tokio::sync::Mutex::new(()),
-            federation: api::FederationState {
-                trusted_peers: trusted_peers.clone(),
-                nonces: federation::new_nonce_cache(),
-                outbound,
-                sync_invite_redeem: self.p.sync_invite_redeem,
-            },
-            dns_webhook_url: self.p.dns_webhook_url.clone(),
-            prev_hostnames: arc_swap::ArcSwap::from_pointee(std::collections::HashSet::new()),
             metrics,
-            peer_statuses,
-            tasks: tokio_util::task::TaskTracker::new(),
             invite_hash_key: Arc::clone(&self.p.invite_hash_key),
-            heartbeat_nonces: federation::new_nonce_cache(),
-            allow_loopback_peers: false,
+            heartbeat_nonces: api::new_nonce_cache(),
+            edge_sub_nonces: api::new_nonce_cache(),
         });
 
-        spawn_background_loops(&state, &self.p.peers, &self.p.secret_key);
+        spawn_background_loops(&state);
 
         let api_app = api::router(Arc::clone(&state))
             .into_make_service_with_connect_info::<std::net::SocketAddr>();
@@ -261,35 +208,6 @@ impl Hub {
         }
         Ok(())
     }
-}
-
-/// Decode and validate the pinned `node_id` on a [`crate::config::FederationPeer`].
-/// Returns `None` when the operator didn't pin one (bootstrap will discover it
-/// at cost of an MITM window, already warned at config load).
-fn peer_pinned_node_id(peer: &crate::config::FederationPeer) -> anyhow::Result<Option<[u8; 32]>> {
-    let Some(hex_id) = peer.node_id.as_deref() else {
-        return Ok(None);
-    };
-    let bytes: [u8; 32] = hex::FromHex::from_hex(hex_id)
-        .map_err(|e| anyhow::anyhow!("peer {} node_id is not 32 hex bytes: {e}", peer.url))?;
-    Ok(Some(bytes))
-}
-
-/// Seed the `trusted_peers` set with any operator-pinned peer `node_ids`, so
-/// inbound federation pushes are accepted immediately without waiting for the
-/// per-peer bootstrap task to probe `/v1/health`.
-async fn init_trusted_peers(
-    peers: &[crate::config::FederationPeer],
-) -> anyhow::Result<federation::TrustedPeerSet> {
-    let trusted = Arc::new(RwLock::new(std::collections::HashSet::new()));
-    let mut set = trusted.write().await;
-    for peer in peers {
-        if let Some(pinned) = peer_pinned_node_id(peer)? {
-            set.insert(pinned);
-        }
-    }
-    drop(set);
-    Ok(trusted)
 }
 
 /// Periodically prune stale `agent_liveness` rows and trigger a route
@@ -320,10 +238,8 @@ async fn agent_liveness_prune_loop(state: Arc<api::AppState>) {
 
 /// Periodically refresh `tenants_total` from the in-memory policy.
 ///
-/// This is the only gauge we can't update at the mutation site cheaply --
-/// every `OwnershipPolicy::register_tenant` / `remove` call could bump it,
-/// but that's a lot of hot-path instrumentation for a gauge nobody needs
-/// sub-second accuracy on. A 15 s refresh is fine for dashboards.
+/// A 15 s refresh is fine for dashboards; we don't need to instrument every
+/// policy mutation just to keep a gauge accurate to the second.
 async fn refresh_metrics_loop(state: Arc<api::AppState>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

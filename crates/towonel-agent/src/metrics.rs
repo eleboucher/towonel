@@ -1,12 +1,8 @@
 use std::sync::Arc;
 
-use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::registry::Registry;
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
 use towonel_common::metrics::{
-    register_counter, register_counter_family, register_gauge, register_gauge_family,
+    register_counter, register_counter_vec, register_gauge, register_gauge_vec,
 };
 
 /// Values become label strings on exported metrics; keep them stable so
@@ -29,88 +25,73 @@ pub mod direction {
     pub const ORIGIN_TO_EDGE: &str = "origin_to_edge";
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct ReasonLabel {
-    pub reason: String,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct OutcomeLabel {
-    pub outcome: String,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct DirectionLabel {
-    pub direction: String,
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
-pub struct InfoLabel {
-    pub version: String,
-}
-
 #[derive(Clone)]
 pub struct AgentMetrics {
-    pub edge_connections_accepted: Counter,
-    pub edge_connections_rejected: Counter,
-    pub streams_accepted: Counter,
-    pub streams_completed: Counter,
-    pub stream_errors: Family<ReasonLabel, Counter>,
-    pub streams_active: Gauge,
-    pub bytes_total: Family<DirectionLabel, Counter>,
-    pub heartbeats: Family<OutcomeLabel, Counter>,
-    pub info: Family<InfoLabel, Gauge>,
+    pub edge_connections_accepted: IntCounter,
+    pub edge_connections_rejected: IntCounter,
+    pub streams_accepted: IntCounter,
+    pub streams_completed: IntCounter,
+    pub stream_errors: IntCounterVec,
+    pub streams_active: IntGauge,
+    pub bytes_total: IntCounterVec,
+    pub heartbeats: IntCounterVec,
+    pub info: IntGaugeVec,
     registry: Arc<Registry>,
 }
 
 impl AgentMetrics {
     pub fn new() -> Self {
-        let mut r = Registry::default();
+        let r = Registry::new();
+        towonel_common::process_metrics::register(&r);
         Self {
             edge_connections_accepted: register_counter(
-                &mut r,
-                "towonel_agent_edge_connections_accepted",
+                &r,
+                "towonel_agent_edge_connections_accepted_total",
                 "iroh connections accepted from trusted edges",
             ),
             edge_connections_rejected: register_counter(
-                &mut r,
-                "towonel_agent_edge_connections_rejected",
+                &r,
+                "towonel_agent_edge_connections_rejected_total",
                 "iroh connections rejected because the remote is not a trusted edge",
             ),
             streams_accepted: register_counter(
-                &mut r,
-                "towonel_agent_streams_accepted",
+                &r,
+                "towonel_agent_streams_accepted_total",
                 "Bi-directional streams opened by an edge",
             ),
             streams_completed: register_counter(
-                &mut r,
-                "towonel_agent_streams_completed",
+                &r,
+                "towonel_agent_streams_completed_total",
                 "Streams that finished forwarding without error",
             ),
-            stream_errors: register_counter_family(
-                &mut r,
-                "towonel_agent_stream_errors",
+            stream_errors: register_counter_vec(
+                &r,
+                "towonel_agent_stream_errors_total",
                 "Stream failures by reason",
+                &["reason"],
             ),
             streams_active: register_gauge(
-                &mut r,
+                &r,
                 "towonel_agent_streams_active",
                 "Streams currently being forwarded",
             ),
-            bytes_total: register_counter_family(
-                &mut r,
-                "towonel_agent_bytes",
+            bytes_total: register_counter_vec(
+                &r,
+                "towonel_agent_bytes_total",
                 "Bytes forwarded between edge and origin, by direction",
+                &["direction"],
             ),
-            heartbeats: register_counter_family(
-                &mut r,
-                "towonel_agent_heartbeats",
+            heartbeats: register_counter_vec(
+                &r,
+                "towonel_agent_heartbeats_total",
                 "Heartbeat POSTs to the hub, by outcome",
+                &["outcome"],
             ),
-            info: register_gauge_family(
-                &mut r,
+            info: register_gauge_vec(
+                &r,
                 "towonel_agent_info",
                 "Agent build info; value is always 1",
+                &["version"],
             ),
             registry: Arc::new(r),
         }
@@ -121,35 +102,19 @@ impl AgentMetrics {
     }
 
     pub fn set_info(&self, version: &str) {
-        self.info
-            .get_or_create(&InfoLabel {
-                version: version.to_string(),
-            })
-            .set(1);
+        self.info.with_label_values(&[version]).set(1);
     }
 
     pub fn record_stream_error(&self, reason: &'static str) {
-        self.stream_errors
-            .get_or_create(&ReasonLabel {
-                reason: reason.to_string(),
-            })
-            .inc();
+        self.stream_errors.with_label_values(&[reason]).inc();
     }
 
     pub fn record_heartbeat(&self, outcome: &'static str) {
-        self.heartbeats
-            .get_or_create(&OutcomeLabel {
-                outcome: outcome.to_string(),
-            })
-            .inc();
+        self.heartbeats.with_label_values(&[outcome]).inc();
     }
 
     pub fn add_bytes(&self, dir: &'static str, n: u64) {
-        self.bytes_total
-            .get_or_create(&DirectionLabel {
-                direction: dir.to_string(),
-            })
-            .inc_by(n);
+        self.bytes_total.with_label_values(&[dir]).inc_by(n);
     }
 }
 
@@ -162,7 +127,7 @@ impl Default for AgentMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use prometheus_client::encoding::text::encode;
+    use prometheus::{Encoder, TextEncoder};
     use towonel_common::metrics::GaugeGuard;
 
     #[test]
@@ -179,18 +144,21 @@ mod tests {
         m.record_heartbeat(heartbeat_outcome::OK);
         m.record_heartbeat(heartbeat_outcome::ERROR);
 
-        let mut out = String::new();
-        encode(&mut out, m.registry()).unwrap();
+        let mut buf = Vec::new();
+        TextEncoder::new()
+            .encode(&m.registry().gather(), &mut buf)
+            .unwrap();
+        let out = String::from_utf8(buf).unwrap();
 
         for name in [
-            "towonel_agent_edge_connections_accepted_total",
-            "towonel_agent_edge_connections_rejected_total",
-            "towonel_agent_streams_accepted_total",
-            "towonel_agent_streams_completed_total",
-            "towonel_agent_stream_errors_total",
+            "towonel_agent_edge_connections_accepted",
+            "towonel_agent_edge_connections_rejected",
+            "towonel_agent_streams_accepted",
+            "towonel_agent_streams_completed",
+            "towonel_agent_stream_errors",
             "towonel_agent_streams_active",
-            "towonel_agent_bytes_total",
-            "towonel_agent_heartbeats_total",
+            "towonel_agent_bytes",
+            "towonel_agent_heartbeats",
             "towonel_agent_info",
         ] {
             assert!(out.contains(name), "missing metric {name} in:\n{out}");
