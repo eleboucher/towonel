@@ -479,7 +479,7 @@ mod tests {
         let a = input(10, "alice", &["app.alice.example.eu"]);
         let b = input(11, "bob", &["app.bob.example.eu"]);
         let c = input(12, "charlie", &["app.charlie.example.eu"]);
-        let a_id = insert(&db, &a).await;
+        let _a_id = insert(&db, &a).await;
         let _b_id = insert(&db, &b).await;
         let c_id = insert(&db, &c).await;
 
@@ -491,6 +491,5 @@ mod tests {
         assert!(ids.contains(&a.tenant.id()));
         assert!(ids.contains(&b.tenant.id()));
         assert!(!ids.contains(&c.tenant.id()));
-        let _ = a_id; // silence unused
     }
 }

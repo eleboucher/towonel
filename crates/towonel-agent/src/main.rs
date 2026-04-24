@@ -123,7 +123,6 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let heartbeat = stateless::spawn_heartbeat(ctx.clone(), metrics.clone());
 
     if !agent_config.services.is_empty() {
-        #[allow(clippy::large_futures)]
         let result = publish_tls::publish(
             &ctx.client,
             &ctx.hub_url,
