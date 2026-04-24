@@ -235,7 +235,6 @@ enum EdgeInviteAction {
     },
 }
 
-// Large futures are an artifact of async state machine size; Box::pin adds overhead.
 #[allow(clippy::large_futures)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -330,9 +329,6 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-// run_node() is long because it branches over (hub, edge) mode combinations.
-// Splitting it would not improve readability.
-#[allow(clippy::too_many_lines)]
 async fn run_node() -> anyhow::Result<()> {
     let config = config::NodeConfig::load()?;
 
