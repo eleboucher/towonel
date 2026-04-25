@@ -142,3 +142,4 @@ petname = { version = "3", default-features = false, features = [
   "default-words",
 ] }
 envy = "0.4"
+tabled = "0.20"
