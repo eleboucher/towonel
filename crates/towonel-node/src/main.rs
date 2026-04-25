@@ -353,6 +353,8 @@ async fn run_node() -> anyhow::Result<()> {
             let (router, edge, edge_node_id, edge_addresses) =
                 build_edge(secret_key, &config.tenants, &config.edge).await?;
 
+            let edge = configure_hub_self_route(edge, &config.hub);
+
             let public_addresses = if config.edge.public_addresses.is_empty() {
                 edge_addresses
             } else {
@@ -435,6 +437,29 @@ fn default_public_url(hub: &config::HubConfig) -> String {
     hub.public_url
         .clone()
         .unwrap_or_else(|| format!("https://{}", hub.listen_addr))
+}
+
+fn host_from_url(url: &str) -> Option<String> {
+    url::Url::parse(url).ok()?.host_str().map(str::to_lowercase)
+}
+
+fn configure_hub_self_route(edge: edge::Edge, hub: &config::HubConfig) -> edge::Edge {
+    let public_url = default_public_url(hub);
+    let Some(host) = host_from_url(&public_url) else {
+        return edge;
+    };
+    let edge = edge.with_hub_self_route(edge::HubSelfRoute {
+        hostname: host.clone(),
+        local_addr: hub.listen_addr.clone(),
+    });
+    if let Some(acme) = edge.acme() {
+        tokio::spawn(async move {
+            if let Err(e) = acme.ensure_cert(&host).await {
+                warn!(error = %e, %host, "initial hub cert request failed; will retry on first connection");
+            }
+        });
+    }
+    edge
 }
 
 /// Build [`hub::HubParams`] from the node config and an identity.

@@ -58,6 +58,8 @@ type AgentHealthMap = papaya::HashMap<iroh::EndpointId, Arc<AgentHealthState>>;
 /// TLS policy, and dispatches:
 ///   - `Passthrough`: raw TLS bytes forwarded to the agent (agent/origin handles TLS)
 ///   - `Terminate`: edge handshakes TLS here, forwards plaintext to the agent
+///   - `Hub self-route`: SNI matches the colocated hub's public hostname; TLS
+///     is terminated and proxied to the local hub HTTP listener.
 ///
 /// A single port serves both modes. Tenants pick per-hostname.
 pub struct Edge {
@@ -69,6 +71,7 @@ pub struct Edge {
     health_listen_addr: String,
     listen_workers: usize,
     tls: Option<TlsState>,
+    hub_self_route: Option<Arc<HubSelfRoute>>,
     metrics: EdgeMetrics,
 }
 
@@ -76,6 +79,11 @@ struct TlsState {
     acceptor: tokio_rustls::TlsAcceptor,
     cert_store: CertStore,
     acme: Option<Arc<AcmeCoordinator>>,
+}
+
+pub struct HubSelfRoute {
+    pub hostname: String,
+    pub local_addr: String,
 }
 
 impl Edge {
@@ -94,6 +102,7 @@ impl Edge {
             health_listen_addr,
             listen_workers: 1,
             tls: None,
+            hub_self_route: None,
             metrics: EdgeMetrics::new(),
         }
     }
@@ -112,6 +121,16 @@ impl Edge {
             acme,
         });
         self
+    }
+
+    #[must_use]
+    pub fn with_hub_self_route(mut self, route: HubSelfRoute) -> Self {
+        self.hub_self_route = Some(Arc::new(route));
+        self
+    }
+
+    pub fn acme(&self) -> Option<Arc<AcmeCoordinator>> {
+        self.tls.as_ref().and_then(|t| t.acme.clone())
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -133,6 +152,7 @@ impl Edge {
             tls_acceptor: self.tls.as_ref().map(|t| t.acceptor.clone()),
             cert_store: self.tls.as_ref().map(|t| t.cert_store.clone()),
             acme: self.tls.as_ref().and_then(|t| t.acme.clone()),
+            hub_self_route: self.hub_self_route.clone(),
         });
 
         let listeners = bind_listeners(&self.listen_addr, self.listen_workers).await?;
@@ -237,6 +257,7 @@ struct ConnCtx {
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     cert_store: Option<CertStore>,
     acme: Option<Arc<AcmeCoordinator>>,
+    hub_self_route: Option<Arc<HubSelfRoute>>,
 }
 
 /// Dispatch a single incoming TCP connection. Peek the SNI, look up the
@@ -359,6 +380,25 @@ async fn handle_connection_inner(
         let hostname = extract_sni(&peek_buf[..n])
             .ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?;
         debug!(%hostname, "SNI extracted");
+
+        if let Some(self_route) = ctx.hub_self_route.as_ref()
+            && self_route.hostname.eq_ignore_ascii_case(hostname)
+        {
+            let (bytes_in, bytes_out) =
+                pipe_to_local_hub(tcp_stream, hostname, &self_route.local_addr, ctx).await?;
+            ctx.metrics.total_bytes_in.inc_by(bytes_in);
+            ctx.metrics.total_bytes_out.inc_by(bytes_out);
+            #[allow(clippy::cast_possible_truncation)]
+            let duration_ms = start.elapsed().as_millis() as u64;
+            debug!(
+                %hostname,
+                bytes_in,
+                bytes_out,
+                duration_ms,
+                "hub self-route connection closed"
+            );
+            return Ok(());
+        }
 
         let (candidates, policy) = ctx
             .router
@@ -491,6 +531,42 @@ async fn pipe_terminate(
 
     let (c2a, a2c) = tokio::join!(c2a, a2c);
     Ok((c2a, a2c))
+}
+
+async fn pipe_to_local_hub(
+    tcp_stream: TcpStream,
+    hostname: &str,
+    local_addr: &str,
+    ctx: &ConnCtx,
+) -> anyhow::Result<(u64, u64)> {
+    let acceptor = ctx
+        .tls_acceptor
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("hub self-route requires TLS termination"))?;
+    let cert_store = ctx
+        .cert_store
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("hub self-route requires a cert store"))?;
+
+    if !cert_store.has_cert(hostname) {
+        match &ctx.acme {
+            Some(acme) => acme.ensure_cert(hostname).await?,
+            None => anyhow::bail!("no cert for hub hostname {hostname} and ACME disabled"),
+        }
+    }
+
+    let mut tls_stream = acceptor.accept(tcp_stream).await?;
+    debug!(%hostname, "TLS handshake complete (hub self-route)");
+
+    let mut local = TcpStream::connect(local_addr).await.map_err(|e| {
+        anyhow::anyhow!("hub self-route: failed to connect to local hub at {local_addr}: {e}")
+    })?;
+    let _ = local.set_nodelay(true);
+
+    let (c2h, h2c) = tokio::io::copy_bidirectional(&mut tls_stream, &mut local)
+        .await
+        .unwrap_or((0, 0));
+    Ok((c2h, h2c))
 }
 
 /// Return a new bidirectional QUIC stream to the agent, reusing a pooled
