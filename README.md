@@ -10,97 +10,58 @@ dynamic IPs without opening inbound ports.
 > Status: **alpha**. Functional and covered by integration tests. Wire
 > format and APIs may change between `0.0.x` releases.
 
-## Features
+## Quick start
 
-- **TLS passthrough by default** — the edge forwards raw TLS; keys and
-  request content stay on the origin.
-- **Edge TLS termination** — optional per hostname, with on-demand
-  Let's Encrypt issuance.
-- **Stateless agent** — no disk state, no init. One invite token boots
-  any number of replicas.
-- **Post-quantum signed control plane** — all config entries signed
-  with ML-DSA-65 (FIPS 204).
-- **Pluggable storage** — SQLite for single-node, PostgreSQL for HA.
-- **Prometheus metrics** for observability.
+You need:
 
-## Architecture
+- A public VPS for the **hub** (ports `80`, `443`, `8443` open).
+- A machine that can reach your service for the **agent** (homelab, k8s, VM).
+- A DNS record pointing your hostname at the VPS.
 
-```
-           Internet                        Your network
-        (public VPS)                (homelab / k8s / VM)
+### 1. Run the hub
 
- Client       towonel                    towonel-agent
-   │        ┌─────────┐                      │
-   │ TLS    │  hub    │◄── towonel <cmd>     │
-   │ ────►  │  API    │                      │
-   │        │         │   iroh QUIC stream   │
-   │        │  edge   │◄────────────────────►│──► origin
-   │        │  :443   │   (passthrough or    │
-   │        │         │    terminate)        │
-   │        └─────────┘                      │
-```
-
-An edge can also run in **edge-only** mode and subscribe to a remote
-hub — useful for scaling the data plane horizontally across regions
-while keeping a single control plane.
-
-## Install
-
-From source:
-
-```bash
-cargo build --release -p towonel-node -p towonel-agent
-```
-
-From the container registry:
+On the VPS:
 
 ```bash
 docker pull git.erwanleboucher.dev/eleboucher/towonel-node:latest
-docker pull git.erwanleboucher.dev/eleboucher/towonel-agent:latest
+docker run -d --name towonel \
+  -p 80:80 -p 443:443 -p 8443:8443 \
+  -v towonel-data:/var/lib/towonel \
+  -e TOWONEL_IDENTITY_KEY_PATH=/var/lib/towonel/node.key \
+  -e TOWONEL_HUB_OPERATOR_API_KEY_PATH=/var/lib/towonel/operator.key \
+  -e TOWONEL_HUB_DB_DSN=/var/lib/towonel/hub.db \
+  git.erwanleboucher.dev/eleboucher/towonel-node:latest
 ```
 
-## Quick start
-
-### 1. Run the hub on a public VPS
-
-```bash
-towonel
-```
-
-Keys in `node.key` and `operator.key` are generated on first boot.
-Keep `operator.key` — it authenticates invite creation.
+`node.key` and `operator.key` are generated on first boot. Keep
+`operator.key` — it authenticates all admin commands.
 
 ### 2. Create an invite
 
 ```bash
-towonel invite create \
+docker exec towonel towonel invite create \
   --name alice \
   --hostnames 'app.alice.example.eu,*.alice.example.eu'
 # tt_inv_2_<token>
 ```
 
-On the hub host, `--hub-url` and `--api-key` default to the local
-listen address and `operator.key`. Pass them explicitly when running
-the CLI from another machine.
-
-The token embeds the tenant signing seed, the hub URL, and the invite
-secret. It is both the bootstrap credential and the runtime identity
-for every agent in that tenant. Default expiry is `never`; pass
-`--expires 48h` for a short-lived credential.
+The token carries the tenant identity and is the only secret the agent
+needs. Default expiry is `never`; pass `--expires 48h` for a short-lived
+credential.
 
 ### 3. Run the agent
 
-```bash
-TOWONEL_INVITE_TOKEN=tt_inv_2_... \
-TOWONEL_AGENT_SERVICES='[
-  {"hostname":"app.alice.example.eu","origin":"127.0.0.1:8443"},
-  {"hostname":"*.alice.example.eu","origin":"127.0.0.1:8080",
-   "tls_mode":{"mode":"terminate"}}
-]' towonel-agent
-```
+On the machine that can reach your service:
 
-On boot the agent derives the tenant key from the token, generates a
-fresh iroh identity, registers with the hub, and starts heartbeating.
+```bash
+docker run -d --name towonel-agent \
+  --network host \
+  -e TOWONEL_INVITE_TOKEN=tt_inv_2_... \
+  -e TOWONEL_AGENT_SERVICES='[
+    {"hostname":"app.alice.example.eu","origin":"127.0.0.1:8443"}
+  ]' \
+  git.erwanleboucher.dev/eleboucher/towonel-agent:latest
+```
 
 ### 4. Point DNS
 
@@ -109,121 +70,20 @@ dig +short app.alice.example.eu   # should resolve to the VPS IP
 curl https://app.alice.example.eu
 ```
 
-## Deployment
-
-### Docker Compose
-
-```bash
-docker compose up -d
-```
-
-See [`docker-compose.yml`](docker-compose.yml) for the full stack and
-environment surface.
-
-### Kubernetes
-
-The agent is stateless, so a plain `Deployment` scales horizontally.
-Every replica shares the same invite token and generates its own
-iroh identity; the hub drops dead replicas after `90s`.
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata: { name: towonel-agent }
-spec:
-  replicas: 3
-  selector: { matchLabels: { app: towonel-agent } }
-  template:
-    metadata: { labels: { app: towonel-agent } }
-    spec:
-      containers:
-        - name: agent
-          image: git.erwanleboucher.dev/eleboucher/towonel-agent:latest
-          env:
-            - name: TOWONEL_INVITE_TOKEN
-              valueFrom:
-                secretKeyRef: { name: towonel-bootstrap, key: token }
-            - name: TOWONEL_AGENT_SERVICES
-              valueFrom:
-                configMapKeyRef: { name: towonel-agent-services, key: services.json }
-```
-
-No PVC, no `StatefulSet`, no init container.
-
-## Configuration
-
-All settings come from `TOWONEL_*` environment variables (flat names,
-single underscore). Lists may be passed as CSV or JSON; structured
-lists (tenants, services) require JSON.
-
-### Hub
-
-| Variable                            | Default        | Description                                               |
-| ----------------------------------- | -------------- | --------------------------------------------------------- |
-| `TOWONEL_IDENTITY_KEY_PATH`         | `node.key`     | Node identity key                                         |
-| `TOWONEL_HUB_ENABLED`               | `true`         | Enable the hub API                                        |
-| `TOWONEL_INVITE_HASH_KEY`           |                | Key for hashing invite secrets (must be set for security) |
-| `TOWONEL_HUB_LISTEN_ADDR`           | `0.0.0.0:8443` | Hub API bind address                                      |
-| `TOWONEL_HUB_PUBLIC_URL`            | derived        | URL embedded in invite tokens                             |
-| `TOWONEL_HUB_OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file                                     |
-| `TOWONEL_HUB_DB_DRIVER`             | `sqlite`       | `sqlite` or `postgres`                                    |
-| `TOWONEL_HUB_DB_DSN`                | `hub.db`       | Connection string                                         |
-| `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`     | Pool size                                                 |
-
-### Edge
-
-| Variable                            | Default        | Description                    |
-| ----------------------------------- | -------------- | ------------------------------ |
-| `TOWONEL_EDGE_ENABLED`              | `true`         | Enable the edge listener       |
-| `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`  | TLS bind address               |
-| `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090` | Health + metrics               |
-| `TOWONEL_EDGE_HUB_URL`              |                | Remote hub (edge-only mode); `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias |
-| `TOWONEL_EDGE_PUBLIC_ADDRESSES`     |                | Addresses advertised to agents |
-| `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                | Enables Let's Encrypt issuance |
-| `TOWONEL_EDGE_TLS_CERT_DIR`         | `/data/certs`  | Cert cache directory           |
-| `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`        | Use Let's Encrypt staging      |
-| `TOWONEL_EDGE_TLS_HTTP_LISTEN_ADDR` | `0.0.0.0:80`   | HTTP-01 responder              |
-
-### Agent
-
-| Variable                      | Description                                     |
-| ----------------------------- | ----------------------------------------------- |
-| `TOWONEL_INVITE_TOKEN`        | **Required.** `tt_inv_2_...` token from the hub |
-| `TOWONEL_AGENT_SERVICES`      | JSON array of services                          |
-| `TOWONEL_AGENT_TRUSTED_EDGES` | Optional override for trusted edge IDs          |
-
-Service shape:
-
-```json
-{
-  "hostname": "app.alice.example.eu",
-  "origin": "127.0.0.1:8080",
-  "origin_server_name": "optional SNI for the origin dial",
-  "tls_mode": { "mode": "passthrough" }
-}
-```
-
-### CLI
-
-| Variable               | Description                               |
-| ---------------------- | ----------------------------------------- |
-| `TOWONEL_HUB_URL`      | Default `--hub-url`                       |
-| `TOWONEL_OPERATOR_KEY` | Default `--api-key` for operator commands |
-
-Full examples live in [`examples/agent.env.example`](examples/agent.env.example)
-and [`examples/node.env.example`](examples/node.env.example).
+Add more services by extending `TOWONEL_AGENT_SERVICES`. Add replicas by
+running the agent container N times. Add regions by inviting another VPS
+as an edge node (see [Edge nodes](#edge-nodes)).
 
 ## TLS modes
 
-Mode is chosen per hostname by the agent via a signed
-`SetHostnameTls` entry.
+Mode is chosen per hostname.
 
 **Passthrough (default).** The edge reads SNI and forwards raw TLS to
-the origin. The origin holds the cert. The edge sees neither keys
-nor plaintext. ACME challenges work through the tunnel.
+the origin. The origin holds the cert. The edge sees neither keys nor
+plaintext. ACME challenges work through the tunnel.
 
-**Terminate.** The edge issues an on-demand Let's Encrypt cert for
-the hostname and forwards plaintext to the agent.
+**Terminate.** The edge issues an on-demand Let's Encrypt cert for the
+hostname and forwards plaintext to the agent.
 
 - HTTP-01 issuance is triggered on first request, cached, renewed lazily.
 - Requires inbound `:80` on the edge for challenges.
@@ -232,7 +92,46 @@ the hostname and forwards plaintext to the agent.
 - Failures back off exponentially, then enter a 5-minute cooldown per
   hostname.
 
-## Tenants and invites
+Pin a mode in the service entry:
+
+```json
+{
+  "hostname": "app.alice.example.eu",
+  "origin": "127.0.0.1:8080",
+  "tls_mode": { "mode": "terminate" }
+}
+```
+
+### Passthrough behind Envoy / Envoy Gateway
+
+> **Heads up.** In passthrough mode the agent prepends a **PROXY protocol
+> v2** header to every connection so the origin can recover the real
+> client IP. Envoy will reject the connection (or treat the header bytes
+> as request bytes) unless you tell it to accept PROXY protocol.
+
+For **Envoy Gateway**, attach a `ClientTrafficPolicy` to the listener:
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: envoy
+spec:
+  proxyProtocol:
+    optional: true
+```
+
+For raw Envoy, enable the `envoy.filters.listener.proxy_protocol` listener
+filter on the inbound listener.
+
+If you don't want PROXY protocol at all (e.g. the origin doesn't speak it
+and you don't care about client IP), set it explicitly on the service:
+
+```json
+{ "hostname": "app.example.eu", "origin": "127.0.0.1:8443", "proxy_protocol": "none" }
+```
+
+## Managing tenants and invites
 
 Each invite is a tenant. Revoking an invite removes the tenant.
 
@@ -253,6 +152,10 @@ towonel entry submit --op delete-hostname --hostname old.alice.example.eu
 towonel entry list
 ```
 
+On the hub host, `--hub-url` and `--api-key` default to the local listen
+address and `operator.key`. Pass them explicitly when running the CLI
+from another machine.
+
 ## Edge nodes
 
 Grow edge capacity by inviting additional VPS operators:
@@ -265,47 +168,93 @@ towonel edge-invite create --name charlie-fra1
 TOWONEL_EDGE_INVITE_TOKEN=tt_edge_2_... towonel
 ```
 
-The v2 edge token embeds a 32-byte seed that deterministically derives
-the edge's iroh identity. The hub pre-registers the resulting `node_id`
-at invite creation, so the edge can start immediately with no redemption
-step and no persistent key file. Revoke via `towonel edge-invite revoke
---id <invite-id>`; the edge loses access on the next subscription
-attempt.
+The edge token deterministically derives the edge's iroh identity, so
+the new edge starts immediately with no redemption step and no persistent
+key file. Revoke via `towonel edge-invite revoke --id <invite-id>`.
 
-## Security
+## Deployment
 
-- The edge sees SNI, source IPs, and byte counts — never bodies,
-  headers, or TLS keys. A malicious edge can deny service but cannot
-  read or forge traffic.
-- All config entries are signed with ML-DSA-65 (FIPS 204, PQ).
-- Invite tokens are bearer credentials: they carry the tenant signing
-  seed. Treat them as secret. In-memory copies are zeroed on drop;
-  `Debug` redacts the seed.
-- Invite secrets are stored as BLAKE3 keyed hashes (keyed by a per-hub
-  operator secret) and compared in constant time. Revoked invites return
-  the same `401` as a wrong secret.
-- Heartbeat signatures are body-bound; a captured header cannot be
-  replayed with a different body.
-- Per-IP rate limiting on public endpoints.
+### Docker Compose
 
-## HTTP API
+```bash
+docker compose up -d
+```
 
-| Method   | Path                       | Auth          | Description                                |
-| -------- | -------------------------- | ------------- | ------------------------------------------ |
-| `POST`   | `/v1/entries`              | tenant sig    | Submit a signed config entry               |
-| `GET`    | `/v1/tenants/{id}/entries` | none          | List entries for a tenant                  |
-| `GET`    | `/v1/health`               | none          | Hub health                                 |
-| `GET`    | `/v1/edges`                | none          | List edge nodes                            |
-| `GET`    | `/v1/routes/subscribe`     | edge sig      | SSE route stream                           |
-| `POST`   | `/v1/bootstrap`            | invite secret | Pod boot                                   |
-| `POST`   | `/v1/agent/heartbeat`      | agent sig     | Liveness (90s TTL)                         |
-| `POST`   | `/v1/invites`              | operator      | Create invite                              |
-| `GET`    | `/v1/invites`              | operator      | List invites                               |
-| `DELETE` | `/v1/invites/{id}`         | operator      | Revoke invite                              |
-| `POST`   | `/v1/edge-invites`         | operator      | Create edge invite (pre-registers node_id) |
-| `GET`    | `/v1/edge-invites`         | operator      | List edge invites                          |
-| `DELETE` | `/v1/edge-invites/{id}`    | operator      | Revoke edge invite                         |
-| `DELETE` | `/v1/tenants/{id}`         | operator      | Remove tenant                              |
+See [`docker-compose.yml`](docker-compose.yml) for the full stack and
+environment surface.
+
+## Configuration reference
+
+All settings come from `TOWONEL_*` environment variables (flat names,
+single underscore). Lists may be passed as CSV or JSON; structured
+lists (tenants, services) require JSON.
+
+Full examples live in [`examples/agent.env.example`](examples/agent.env.example)
+and [`examples/node.env.example`](examples/node.env.example).
+
+### Hub
+
+| Variable                            | Default        | Description                                               |
+| ----------------------------------- | -------------- | --------------------------------------------------------- |
+| `TOWONEL_IDENTITY_KEY_PATH`         | `node.key`     | Node identity key                                         |
+| `TOWONEL_HUB_ENABLED`               | `true`         | Enable the hub API                                        |
+| `TOWONEL_INVITE_HASH_KEY`           |                | Key for hashing invite secrets (must be set for security) |
+| `TOWONEL_HUB_LISTEN_ADDR`           | `0.0.0.0:8443` | Hub API bind address                                      |
+| `TOWONEL_HUB_PUBLIC_URL`            | derived        | URL embedded in invite tokens                             |
+| `TOWONEL_HUB_OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file                                     |
+| `TOWONEL_HUB_DB_DRIVER`             | `sqlite`       | `sqlite` or `postgres`                                    |
+| `TOWONEL_HUB_DB_DSN`                | `hub.db`       | Connection string                                         |
+| `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`     | Pool size                                                 |
+
+### Edge
+
+| Variable                            | Default        | Description                                                                       |
+| ----------------------------------- | -------------- | --------------------------------------------------------------------------------- |
+| `TOWONEL_EDGE_ENABLED`              | `true`         | Enable the edge listener                                                          |
+| `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`  | TLS bind address                                                                  |
+| `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090` | Health + metrics                                                                  |
+| `TOWONEL_EDGE_HUB_URL`              |                | Remote hub (edge-only mode); `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias |
+| `TOWONEL_EDGE_PUBLIC_ADDRESSES`     |                | Addresses advertised to agents                                                    |
+| `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                | Enables Let's Encrypt issuance                                                    |
+| `TOWONEL_EDGE_TLS_CERT_DIR`         | `/data/certs`  | Cert cache directory                                                              |
+| `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`        | Use Let's Encrypt staging                                                         |
+| `TOWONEL_EDGE_TLS_HTTP_LISTEN_ADDR` | `0.0.0.0:80`   | HTTP-01 responder                                                                 |
+
+### Agent
+
+| Variable                      | Description                                     |
+| ----------------------------- | ----------------------------------------------- |
+| `TOWONEL_INVITE_TOKEN`        | **Required.** `tt_inv_2_...` token from the hub |
+| `TOWONEL_AGENT_SERVICES`      | JSON array of services                          |
+| `TOWONEL_AGENT_TRUSTED_EDGES` | Optional override for trusted edge IDs          |
+
+Service shape:
+
+```json
+{
+  "hostname": "app.alice.example.eu",
+  "origin": "127.0.0.1:8080",
+  "origin_server_name": "optional SNI for the origin dial",
+  "tls_mode": { "mode": "passthrough" },
+  "proxy_protocol": "v2"
+}
+```
+
+`proxy_protocol` defaults to `v2` for passthrough services and `none`
+for terminated services.
+
+### CLI
+
+| Variable               | Description                               |
+| ---------------------- | ----------------------------------------- |
+| `TOWONEL_HUB_URL`      | Default `--hub-url`                       |
+| `TOWONEL_OPERATOR_KEY` | Default `--api-key` for operator commands |
+
+## Install from source
+
+```bash
+cargo build --release -p towonel-node -p towonel-agent
+```
 
 ## Roadmap
 
