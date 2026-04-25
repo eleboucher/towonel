@@ -373,11 +373,10 @@ fn safe_cert_path(
 ) -> anyhow::Result<PathBuf> {
     let base = cert_dir.normalize()?;
     let candidate = base.as_path().join(format!("{hostname}.{ext}"));
-    let normalized = candidate.normalize()?;
-    if !normalized.as_path().starts_with(base.as_path()) {
+    if !candidate.starts_with(base.as_path()) {
         anyhow::bail!("refusing to write cert outside cert_dir for `{hostname}`");
     }
-    Ok(normalized.into_path_buf())
+    Ok(candidate)
 }
 
 #[cfg(test)]
