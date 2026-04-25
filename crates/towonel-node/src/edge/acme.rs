@@ -1,13 +1,13 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use axum::response::IntoResponse;
-use backon::{ExponentialBuilder, Retryable};
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, LetsEncrypt,
-    NewAccount, NewOrder,
+    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Error as AcmeError,
+    Identifier, LetsEncrypt, NewAccount, NewOrder, Problem,
 };
 use normpath::PathExt;
 use tokio::net::TcpListener;
@@ -21,17 +21,17 @@ use super::tls::CertStore;
 /// removed once the order either succeeds or fails.
 pub type ChallengeTokens = Arc<papaya::HashMap<String, String>>;
 
-const FAILURE_COOLDOWN: Duration = Duration::from_mins(5);
+const FAILURE_COOLDOWN: Duration = Duration::from_mins(15);
 
-/// Time budget for a single ACME order attempt. Three retry attempts with
-/// exponential backoff and jitter can cap total wall time at roughly
-/// `ATTEMPTS × ATTEMPT_TIMEOUT + cumulative backoff`.
-const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_ATTEMPTS: usize = 3;
+/// LE rate-limit windows run 1h–168h; 24h covers most without back-to-back hits.
+const RATE_LIMIT_COOLDOWN: Duration = Duration::from_hours(24);
 
-/// Total wait the follower allows while the leader retries. Must be bigger
-/// than `MAX_ATTEMPTS × ATTEMPT_TIMEOUT` plus backoff, or followers give up
-/// before the leader can declare success.
+/// Single attempt only — each retry runs `new_order` + `finalize` and a network
+/// blip after `finalize` succeeds server-side would issue a duplicate cert
+/// against LE's weekly per-identifier quota.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// Must exceed [`ATTEMPT_TIMEOUT`] so followers do not give up before the leader.
 const ISSUANCE_TIMEOUT: Duration = Duration::from_mins(3);
 
 pub struct AcmeCoordinator {
@@ -42,7 +42,17 @@ pub struct AcmeCoordinator {
     cert_store: CertStore,
     tokens: ChallengeTokens,
     inflight: Mutex<HashMap<String, Arc<Notify>>>,
-    failures: Mutex<HashMap<String, Instant>>,
+    /// Hostname → unix-second deadline before which a new attempt is denied.
+    /// Mirrored on disk in `<cert_dir>/<hostname>.acme-failure` so cooldowns
+    /// survive restarts.
+    failures: Mutex<HashMap<String, u64>>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct FailureRecord {
+    retry_after_unix: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 impl AcmeCoordinator {
@@ -58,9 +68,11 @@ impl AcmeCoordinator {
             LetsEncrypt::Production.url()
         };
         let account_path = cert_store.cert_dir().join("account.json");
+        let failures = load_persisted_failures(cert_store.cert_dir());
         info!(
             staging,
             account_path = %account_path.display(),
+            persisted_cooldowns = failures.len(),
             "ACME coordinator ready (lazy account; will register on first cert request)"
         );
 
@@ -72,7 +84,7 @@ impl AcmeCoordinator {
             cert_store,
             tokens,
             inflight: Mutex::new(HashMap::new()),
-            failures: Mutex::new(HashMap::new()),
+            failures: Mutex::new(failures),
         }
     }
 
@@ -126,13 +138,22 @@ impl AcmeCoordinator {
             return Ok(());
         }
 
-        if let Some(ts) = self.failures.lock().await.get(hostname).copied()
-            && ts.elapsed() < FAILURE_COOLDOWN
-        {
-            let remaining_secs = FAILURE_COOLDOWN.saturating_sub(ts.elapsed()).as_secs();
-            anyhow::bail!(
-                "recent ACME failure for {hostname} (cooldown {remaining_secs}s remaining)",
-            );
+        // `inflight` gates one ensure_cert per hostname, so the cleanup
+        // branch below cannot race a concurrent insert.
+        let now = unix_now();
+        let snapshot = self.failures.lock().await.get(hostname).copied();
+        match snapshot {
+            Some(retry_after) if now < retry_after => {
+                anyhow::bail!(
+                    "recent ACME failure for {hostname} (cooldown {}s remaining)",
+                    retry_after - now,
+                );
+            }
+            Some(_) => {
+                self.failures.lock().await.remove(hostname);
+                clear_persisted_failure(self.cert_store.cert_dir(), hostname).await;
+            }
+            None => {}
         }
 
         let (notify, follower_wait) = {
@@ -168,9 +189,12 @@ impl AcmeCoordinator {
         }
 
         let result = match self.account().await {
-            Ok(account) => {
-                issue_with_retry(account, hostname, &self.cert_store, &self.tokens).await
-            }
+            Ok(account) => tokio::time::timeout(
+                ATTEMPT_TIMEOUT,
+                provision_cert(account, hostname, &self.cert_store, &self.tokens),
+            )
+            .await
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("ACME attempt timed out for {hostname}"))),
             Err(e) => Err(e),
         };
 
@@ -178,16 +202,32 @@ impl AcmeCoordinator {
         let outcome = match result {
             Ok(()) => {
                 self.cert_store.reload().await;
+                clear_persisted_failure(self.cert_store.cert_dir(), hostname).await;
                 self.failures.lock().await.remove(hostname);
                 info!(%hostname, "ACME cert issued");
                 Ok(())
             }
             Err(e) => {
+                let (cooldown, reason) = classify_failure(&e);
+                let retry_after = unix_now() + cooldown.as_secs();
+                // Persist before the in-memory write: on crash between the two,
+                // we'd rather restart with a cooldown set than without one.
+                if let Err(persist_err) =
+                    persist_failure(self.cert_store.cert_dir(), hostname, retry_after, reason).await
+                {
+                    warn!(%hostname, error = %persist_err, "failed to persist ACME failure record");
+                }
                 self.failures
                     .lock()
                     .await
-                    .insert(hostname.to_string(), Instant::now());
-                warn!(%hostname, error = %e, "ACME issuance failed after retries");
+                    .insert(hostname.to_string(), retry_after);
+                warn!(
+                    %hostname,
+                    error = %e,
+                    cooldown_secs = cooldown.as_secs(),
+                    reason,
+                    "ACME issuance failed; cooling down before next attempt"
+                );
                 Err(e)
             }
         };
@@ -240,42 +280,16 @@ pub async fn run_http01_server(listen_addr: &str, tokens: ChallengeTokens) -> an
     Ok(())
 }
 
-/// Drive `provision_cert` with exponential backoff + jitter. A single
-/// attempt is capped at [`ATTEMPT_TIMEOUT`]; the whole loop gives up after
-/// [`MAX_ATTEMPTS`] transient failures.
-async fn issue_with_retry(
-    account: &Account,
-    hostname: &str,
-    cert_store: &CertStore,
-    tokens: &ChallengeTokens,
-) -> anyhow::Result<()> {
-    let policy = ExponentialBuilder::default()
-        .with_min_delay(Duration::from_secs(2))
-        .with_max_delay(Duration::from_secs(30))
-        .with_max_times(MAX_ATTEMPTS - 1) // total attempts = initial + retries
-        .with_jitter();
-
-    (|| async {
-        tokio::time::timeout(
-            ATTEMPT_TIMEOUT,
-            provision_cert(account, hostname, cert_store, tokens),
-        )
-        .await
-        .unwrap_or_else(|_| Err(anyhow::anyhow!("ACME attempt timed out for {hostname}")))
-    })
-    .retry(policy)
-    .notify(|err, dur| {
-        warn!(%hostname, error = %err, ?dur, "ACME attempt failed; retrying");
-    })
-    .await
-}
-
 async fn provision_cert(
     account: &Account,
     hostname: &str,
     cert_store: &CertStore,
     tokens: &ChallengeTokens,
 ) -> anyhow::Result<()> {
+    // Fail before contacting LE: a write error after `finalize()` would
+    // issue an LE cert we cannot persist, burning a weekly quota slot.
+    ensure_cert_dir_writable(cert_store.cert_dir()).await?;
+
     debug!(%hostname, "starting ACME order");
     let identifiers = [Identifier::Dns(hostname.to_string())];
     let order = &NewOrder::new(&identifiers);
@@ -379,9 +393,209 @@ fn safe_cert_path(
     Ok(candidate)
 }
 
+async fn ensure_cert_dir_writable(cert_dir: &Path) -> anyhow::Result<()> {
+    let probe = cert_dir.join(".acme-probe");
+    tokio::fs::write(&probe, b"")
+        .await
+        .with_context(|| format!("ACME cert_dir not writable: {}", cert_dir.display()))?;
+    let _ = tokio::fs::remove_file(&probe).await;
+    Ok(())
+}
+
+fn classify_failure(err: &anyhow::Error) -> (Duration, &'static str) {
+    for cause in err.chain() {
+        if let Some(AcmeError::Api(problem)) = cause.downcast_ref::<AcmeError>()
+            && is_rate_limited(problem)
+        {
+            return (RATE_LIMIT_COOLDOWN, "rateLimited");
+        }
+    }
+    (FAILURE_COOLDOWN, "other")
+}
+
+fn is_rate_limited(problem: &Problem) -> bool {
+    problem.r#type.as_deref() == Some("urn:ietf:params:acme:error:rateLimited")
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+fn failure_path(cert_dir: &Path, hostname: &str) -> anyhow::Result<PathBuf> {
+    safe_cert_path(cert_dir, hostname, "acme-failure")
+}
+
+async fn persist_failure(
+    cert_dir: &Path,
+    hostname: &str,
+    retry_after_unix: u64,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let path = failure_path(cert_dir, hostname)?;
+    let body = serde_json::to_vec(&FailureRecord {
+        retry_after_unix,
+        reason: Some(reason.to_string()),
+    })?;
+    tokio::fs::write(&path, body)
+        .await
+        .with_context(|| format!("failed to persist ACME failure for {hostname}"))?;
+    Ok(())
+}
+
+async fn clear_persisted_failure(cert_dir: &Path, hostname: &str) {
+    let Ok(path) = failure_path(cert_dir, hostname) else {
+        return;
+    };
+    if let Err(e) = tokio::fs::remove_file(&path).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(%hostname, error = %e, "failed to remove ACME failure sidecar");
+    }
+}
+
+fn load_persisted_failures(cert_dir: &Path) -> HashMap<String, u64> {
+    let mut out = HashMap::new();
+    let entries = match std::fs::read_dir(cert_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(dir = %cert_dir.display(), error = %e, "failed to scan cert_dir for ACME failure sidecars");
+            return out;
+        }
+    };
+    let now = unix_now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("acme-failure") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // Reject crafted filenames before they reach the failures map.
+        if validate_hostname(stem).is_err() {
+            warn!(file = %path.display(), "skipping ACME failure sidecar with invalid hostname");
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<FailureRecord>(&bytes) else {
+            warn!(file = %path.display(), "failed to parse ACME failure sidecar; removing");
+            let _ = std::fs::remove_file(&path);
+            continue;
+        };
+        if record.retry_after_unix <= now {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        out.insert(stem.to_string(), record.retry_after_unix);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::validate_hostname;
+    use super::{
+        FailureRecord, RATE_LIMIT_COOLDOWN, classify_failure, failure_path,
+        load_persisted_failures, validate_hostname,
+    };
+    use instant_acme::{Error as AcmeError, Problem};
+    use std::path::PathBuf;
+
+    fn temp_cert_dir(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("towonel-acme-test-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn rate_limit_problem() -> Problem {
+        Problem {
+            r#type: Some("urn:ietf:params:acme:error:rateLimited".to_string()),
+            detail: Some("too many certificates".to_string()),
+            status: Some(429),
+            subproblems: vec![],
+        }
+    }
+
+    #[test]
+    fn classify_failure_picks_rate_limit_cooldown_for_le_rate_limit() {
+        let err: anyhow::Error = AcmeError::Api(rate_limit_problem()).into();
+        let (cooldown, reason) = classify_failure(&err);
+        assert_eq!(cooldown, RATE_LIMIT_COOLDOWN);
+        assert_eq!(reason, "rateLimited");
+    }
+
+    #[test]
+    fn classify_failure_picks_default_cooldown_for_unrelated_errors() {
+        let err = anyhow::anyhow!("disk full");
+        let (cooldown, reason) = classify_failure(&err);
+        assert_eq!(cooldown, super::FAILURE_COOLDOWN);
+        assert_eq!(reason, "other");
+    }
+
+    #[test]
+    fn classify_failure_unwraps_through_anyhow_context() {
+        let err = anyhow::Error::from(AcmeError::Api(rate_limit_problem()))
+            .context("provisioning towonel.example.com");
+        let (cooldown, _) = classify_failure(&err);
+        assert_eq!(cooldown, RATE_LIMIT_COOLDOWN);
+    }
+
+    #[test]
+    fn load_persisted_failures_drops_expired_and_keeps_active_entries() {
+        let dir = temp_cert_dir("load");
+
+        let active = failure_path(&dir, "active.example.com").unwrap();
+        let active_record = FailureRecord {
+            retry_after_unix: super::unix_now() + 3600,
+            reason: Some("rateLimited".to_string()),
+        };
+        std::fs::write(&active, serde_json::to_vec(&active_record).unwrap()).unwrap();
+
+        let expired = failure_path(&dir, "expired.example.com").unwrap();
+        std::fs::write(
+            &expired,
+            serde_json::to_vec(&FailureRecord {
+                retry_after_unix: 1,
+                reason: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let loaded = load_persisted_failures(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded.get("active.example.com").copied(),
+            Some(active_record.retry_after_unix)
+        );
+        assert!(active.exists(), "active sidecar should be retained");
+        assert!(!expired.exists(), "expired sidecar should be deleted");
+    }
+
+    #[test]
+    fn load_persisted_failures_skips_unrelated_files() {
+        let dir = temp_cert_dir("ignore");
+        std::fs::write(dir.join("account.json"), b"{}").unwrap();
+        std::fs::write(dir.join("foo.example.com.crt"), b"").unwrap();
+        std::fs::write(dir.join("foo.example.com.key"), b"").unwrap();
+        let loaded = load_persisted_failures(&dir);
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn load_persisted_failures_purges_corrupted_records() {
+        let dir = temp_cert_dir("corrupt");
+        let path = failure_path(&dir, "broken.example.com").unwrap();
+        std::fs::write(&path, b"not json").unwrap();
+        let loaded = load_persisted_failures(&dir);
+        assert!(loaded.is_empty());
+        assert!(!path.exists(), "corrupted sidecar should be deleted");
+    }
 
     #[test]
     fn valid_hostnames_are_accepted() {
