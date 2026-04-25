@@ -151,7 +151,7 @@ pub struct EdgeConfig {
     pub enabled: bool,
     pub listen_addr: String,
     pub health_listen_addr: String,
-    pub hub_urls: Vec<String>,
+    pub hub_url: Option<String>,
     pub public_addresses: Vec<String>,
     pub tls: Option<TlsConfig>,
     /// Number of TCP accept workers sharing `listen_addr` via `SO_REUSEPORT`
@@ -205,7 +205,10 @@ struct RawEnv {
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
     edge_health_listen_addr: Option<String>,
-    edge_hub_urls: Vec<String>,
+    edge_hub_url: Option<String>,
+    /// Deprecated alias for `edge_hub_url`; kept so existing deployments
+    /// still boot. Prefer `TOWONEL_EDGE_HUB_URL` (no `S`).
+    edge_hub_urls: Option<String>,
     edge_public_addresses: Vec<String>,
     edge_listen_workers: Option<usize>,
     edge_tls_cert_dir: Option<PathBuf>,
@@ -253,12 +256,25 @@ impl NodeConfig {
             },
         };
 
-        let mut edge_hub_urls = trim_entries(r.edge_hub_urls);
-        if let Some(token) = &edge_invite
-            && edge_hub_urls.is_empty()
-        {
-            edge_hub_urls.push(token.hub_url.trim_end_matches('/').to_string());
-        }
+        let hub_url_explicit = r
+            .edge_hub_url
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                let alias = r
+                    .edge_hub_urls
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())?;
+                tracing::warn!(
+                    "TOWONEL_EDGE_HUB_URLS is deprecated; rename to TOWONEL_EDGE_HUB_URL"
+                );
+                Some(alias)
+            });
+        let hub_url = hub_url_explicit.or_else(|| {
+            edge_invite
+                .as_ref()
+                .map(|t| t.hub_url.trim_end_matches('/').to_string())
+        });
 
         let edge = EdgeConfig {
             enabled: r.edge_enabled.unwrap_or(true),
@@ -268,7 +284,7 @@ impl NodeConfig {
             health_listen_addr: r
                 .edge_health_listen_addr
                 .unwrap_or_else(|| "0.0.0.0:9090".to_string()),
-            hub_urls: edge_hub_urls,
+            hub_url,
             public_addresses: trim_entries(r.edge_public_addresses),
             tls,
             listen_workers: r.edge_listen_workers.unwrap_or(1),
@@ -316,8 +332,8 @@ impl NodeConfig {
     }
 
     fn validate(&self) -> anyhow::Result<()> {
-        for url in &self.edge.hub_urls {
-            require_https(url, "hub_urls entry")?;
+        if let Some(url) = &self.edge.hub_url {
+            require_https(url, "hub_url")?;
         }
         Ok(())
     }
