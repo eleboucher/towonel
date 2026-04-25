@@ -40,8 +40,9 @@ dynamic IPs without opening inbound ports.
    │        └─────────┘                      │
 ```
 
-A hub can also run in **edge-only** mode and point at a remote hub, or
-federate with peer hubs over HTTPS.
+An edge can also run in **edge-only** mode and subscribe to a remote
+hub — useful for scaling the data plane horizontally across regions
+while keeping a single control plane.
 
 ## Install
 
@@ -73,11 +74,14 @@ Keep `operator.key` — it authenticates invite creation.
 
 ```bash
 towonel invite create \
-  --hub-url https://node.example.eu:8443 \
   --name alice \
   --hostnames 'app.alice.example.eu,*.alice.example.eu'
 # tt_inv_2_<token>
 ```
+
+On the hub host, `--hub-url` and `--api-key` default to the local
+listen address and `operator.key`. Pass them explicitly when running
+the CLI from another machine.
 
 The token embeds the tenant signing seed, the hub URL, and the invite
 secret. It is both the bootstrap credential and the runtime identity
@@ -150,7 +154,7 @@ No PVC, no `StatefulSet`, no init container.
 
 All settings come from `TOWONEL_*` environment variables (flat names,
 single underscore). Lists may be passed as CSV or JSON; structured
-lists (peers, tenants, services) require JSON.
+lists (tenants, services) require JSON.
 
 ### Hub
 
@@ -173,7 +177,7 @@ lists (peers, tenants, services) require JSON.
 | `TOWONEL_EDGE_ENABLED`              | `true`         | Enable the edge listener       |
 | `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`  | TLS bind address               |
 | `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090` | Health + metrics               |
-| `TOWONEL_EDGE_HUB_URLS`             |                | Remote hubs (edge-only mode)   |
+| `TOWONEL_EDGE_HUB_URL`              |                | Remote hub (edge-only mode); `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias |
 | `TOWONEL_EDGE_PUBLIC_ADDRESSES`     |                | Addresses advertised to agents |
 | `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                | Enables Let's Encrypt issuance |
 | `TOWONEL_EDGE_TLS_CERT_DIR`         | `/data/certs`  | Cert cache directory           |

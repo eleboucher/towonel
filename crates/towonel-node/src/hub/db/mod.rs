@@ -44,7 +44,7 @@ pub fn is_unique_violation(e: &anyhow::Error) -> bool {
     }
 }
 
-/// Storage layer for signed config entries, invites, and federated state.
+/// Storage layer for signed config entries, invites, and edge registrations.
 /// Backed by `SQLite` or `PostgreSQL` depending on the URL scheme passed to
 /// [`Db::open`].
 pub struct Db {

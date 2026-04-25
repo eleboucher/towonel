@@ -403,12 +403,11 @@ async fn run_node() -> anyhow::Result<()> {
             let (router, edge, _edge_node_id, _edge_addresses) =
                 build_edge(secret_key, &config.tenants, &config.edge).await?;
 
-            if !config.edge.hub_urls.is_empty() {
-                let hub_urls = config.edge.hub_urls.clone();
+            if let Some(hub_url) = config.edge.hub_url.clone() {
                 let router_for_sub = Arc::clone(&router);
                 tokio::spawn(async move {
                     if let Err(e) =
-                        edge::subscribe::run(hub_urls, subscriber_key, router_for_sub).await
+                        edge::subscribe::run(hub_url, subscriber_key, router_for_sub).await
                     {
                         error!("route subscriber exited: {e}");
                     }
