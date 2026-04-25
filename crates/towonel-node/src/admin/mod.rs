@@ -80,11 +80,3 @@ pub fn generate_and_save_agent_key(path: &Path) -> anyhow::Result<SigningKey> {
         .with_context(|| format!("failed to write key file: {}", path.display()))?;
     Ok(key)
 }
-
-pub fn short(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max.saturating_sub(1)])
-    }
-}

@@ -1,6 +1,7 @@
 use anyhow::{Context, anyhow};
+use tabled::{Table, Tabled, settings::Style};
 
-use super::{JSON_CONTENT_TYPE, check_response, resolve_hub_url, resolve_operator_key, short};
+use super::{JSON_CONTENT_TYPE, check_response, resolve_hub_url, resolve_operator_key};
 
 #[derive(serde::Serialize)]
 struct CreateInviteReq<'a> {
@@ -96,6 +97,18 @@ struct InviteItem {
     expires_at_ms: Option<u64>,
 }
 
+#[derive(Tabled)]
+struct InviteRow<'a> {
+    #[tabled(rename = "ID")]
+    id: &'a str,
+    #[tabled(rename = "NAME")]
+    name: &'a str,
+    #[tabled(rename = "STATUS")]
+    status: &'a str,
+    #[tabled(rename = "EXPIRES_AT_MS")]
+    expires: String,
+}
+
 pub async fn cmd_invite_list(
     hub_url: Option<String>,
     api_key: Option<String>,
@@ -118,19 +131,20 @@ pub async fn cmd_invite_list(
         println!("No invites.");
         return Ok(());
     }
-    println!("{:<24} {:<16} {:<10} EXPIRES_AT_MS", "ID", "NAME", "STATUS");
-    for inv in parsed.invites {
-        let expires = inv
-            .expires_at_ms
-            .map_or_else(|| "never".to_string(), |ts| ts.to_string());
-        println!(
-            "{:<24} {:<16} {:<10} {}",
-            short(&inv.invite_id, 20),
-            short(&inv.name, 14),
-            inv.status,
-            expires
-        );
-    }
+
+    let table = Table::new(parsed.invites.iter().map(|i| {
+        InviteRow {
+            id: &i.invite_id,
+            name: &i.name,
+            status: &i.status,
+            expires: i
+                .expires_at_ms
+                .map_or_else(|| "never".to_string(), |ts| ts.to_string()),
+        }
+    }))
+    .with(Style::blank())
+    .to_string();
+    println!("{table}");
     Ok(())
 }
 
@@ -180,6 +194,16 @@ struct EdgeInviteItem {
     invite_id: String,
     name: String,
     status: String,
+}
+
+#[derive(Tabled)]
+struct EdgeInviteRow<'a> {
+    #[tabled(rename = "ID")]
+    id: &'a str,
+    #[tabled(rename = "NAME")]
+    name: &'a str,
+    #[tabled(rename = "STATUS")]
+    status: &'a str,
 }
 
 pub async fn cmd_edge_invite_create(
@@ -237,15 +261,15 @@ pub async fn cmd_edge_invite_list(
         println!("No edge invites.");
         return Ok(());
     }
-    println!("{:<24} {:<20} STATUS", "ID", "NAME");
-    for inv in &parsed.invites {
-        println!(
-            "{:<24} {:<20} {}",
-            short(&inv.invite_id, 20),
-            short(&inv.name, 18),
-            inv.status,
-        );
-    }
+
+    let table = Table::new(parsed.invites.iter().map(|i| EdgeInviteRow {
+        id: &i.invite_id,
+        name: &i.name,
+        status: &i.status,
+    }))
+    .with(Style::blank())
+    .to_string();
+    println!("{table}");
     Ok(())
 }
 
