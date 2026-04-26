@@ -2,13 +2,19 @@
 ARG ENABLE_SCCACHE=0
 
 FROM rust:1.95-bookworm AS chef
+ARG TARGETARCH
 ARG CARGO_CHEF_VERSION=0.1.77
 ARG SCCACHE_VERSION=0.10.0
-RUN curl -fsSL "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/cargo-chef-x86_64-unknown-linux-musl.tar.xz" \
-    | tar -xJO "cargo-chef-x86_64-unknown-linux-musl/cargo-chef" > /usr/local/bin/cargo-chef \
+RUN case "${TARGETARCH}" in \
+        amd64) RUST_TARGET=x86_64-unknown-linux-musl ;; \
+        arm64) RUST_TARGET=aarch64-unknown-linux-musl ;; \
+        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/cargo-chef-${RUST_TARGET}.tar.xz" \
+       | tar -xJO "cargo-chef-${RUST_TARGET}/cargo-chef" > /usr/local/bin/cargo-chef \
     && chmod +x /usr/local/bin/cargo-chef \
-    && curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
-    | tar -xzO "sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" > /usr/local/bin/sccache \
+    && curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${RUST_TARGET}.tar.gz" \
+       | tar -xzO "sccache-v${SCCACHE_VERSION}-${RUST_TARGET}/sccache" > /usr/local/bin/sccache \
     && chmod +x /usr/local/bin/sccache
 WORKDIR /app
 
@@ -20,13 +26,20 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ARG ENABLE_SCCACHE
+ARG BUILDARCH
+ARG TARGETARCH
+RUN if [ "$ENABLE_SCCACHE" = "1" ] && [ "$BUILDARCH" != "$TARGETARCH" ]; then \
+        echo "Disabling sccache for emulated build (BUILDARCH=$BUILDARCH TARGETARCH=$TARGETARCH)"; \
+        ENABLE_SCCACHE=0; \
+    fi; echo "$ENABLE_SCCACHE" > /tmp/.sccache_enabled
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/root/.cache/sccache \
     --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
     --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then \
+    SCCACHE_ON="$(cat /tmp/.sccache_enabled)" && \
+    if [ "$SCCACHE_ON" = "1" ]; then \
         export RUSTC_WRAPPER=sccache \
                SCCACHE_BUCKET=sccache \
                SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
@@ -36,7 +49,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
                AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
     fi && \
     cargo chef cook --release --workspace --recipe-path recipe.json && \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    if [ "$SCCACHE_ON" = "1" ]; then sccache --show-stats; fi
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY src/ src/
@@ -45,7 +58,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/root/.cache/sccache \
     --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
     --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then \
+    SCCACHE_ON="$(cat /tmp/.sccache_enabled)" && \
+    if [ "$SCCACHE_ON" = "1" ]; then \
         export RUSTC_WRAPPER=sccache \
                SCCACHE_BUCKET=sccache \
                SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
@@ -57,7 +71,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release -p towonel-node \
     && mkdir -p /out \
     && cp target/release/towonel /out/ \
-    && { [ "$ENABLE_SCCACHE" = "1" ] && sccache --show-stats || true; }
+    && { [ "$SCCACHE_ON" = "1" ] && sccache --show-stats || true; }
 
 FROM debian:bookworm-slim AS runtime-prep
 RUN apt-get update \
