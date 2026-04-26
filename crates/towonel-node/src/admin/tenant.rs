@@ -79,7 +79,7 @@ pub async fn cmd_tenant_leave(
     key_path: Option<PathBuf>,
     hub_url: Option<String>,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let key_path = resolve_tenant_key_path(key_path)?;
     let keypair = load_tenant_keypair(&key_path)?;
     let tenant_id = keypair.id();
@@ -187,7 +187,7 @@ pub async fn cmd_tenant_remove(
     api_key: Option<String>,
     tenant_id: String,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let api_key = resolve_operator_key(api_key)?;
 
     let tenant: towonel_common::identity::TenantId = tenant_id

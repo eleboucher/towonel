@@ -31,7 +31,7 @@ pub async fn cmd_invite_create(
     if hostnames.is_empty() {
         return Err(anyhow!("--hostnames must have at least one entry"));
     }
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let api_key = resolve_operator_key(api_key)?;
     let expires_in_secs = parse_expires(&expires)?;
 
@@ -113,7 +113,7 @@ pub async fn cmd_invite_list(
     hub_url: Option<String>,
     api_key: Option<String>,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let api_key = resolve_operator_key(api_key)?;
 
     let url = format!("{}/v1/invites", hub_url.trim_end_matches('/'));
@@ -153,7 +153,7 @@ pub async fn cmd_invite_revoke(
     api_key: Option<String>,
     id: String,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let api_key = resolve_operator_key(api_key)?;
 
     let url = format!("{}/v1/invites/{id}", hub_url.trim_end_matches('/'));
@@ -211,7 +211,7 @@ pub async fn cmd_edge_invite_create(
     api_key: Option<String>,
     name: Option<String>,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let api_key = resolve_operator_key(api_key)?;
 
     let url = format!("{}/v1/edge-invites", hub_url.trim_end_matches('/'));
@@ -243,7 +243,7 @@ pub async fn cmd_edge_invite_list(
     hub_url: Option<String>,
     api_key: Option<String>,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let api_key = resolve_operator_key(api_key)?;
 
     let url = format!("{}/v1/edge-invites", hub_url.trim_end_matches('/'));
@@ -278,7 +278,7 @@ pub async fn cmd_edge_invite_revoke(
     api_key: Option<String>,
     id: String,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let api_key = resolve_operator_key(api_key)?;
 
     let url = format!("{}/v1/edge-invites/{id}", hub_url.trim_end_matches('/'));
