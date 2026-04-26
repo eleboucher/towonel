@@ -1,14 +1,15 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use iroh::{EndpointAddr, EndpointId};
 use smallvec::SmallVec;
+use tokio::sync::watch;
 use tracing::warn;
 
-use towonel_common::identity::AgentId;
-use towonel_common::routing::RouteTable;
+use towonel_common::identity::{AgentId, TenantId};
+use towonel_common::routing::{RouteTable, TcpListenerBinding};
 use towonel_common::tls_policy::TlsMode;
 
 use crate::config::TenantEntry;
@@ -26,6 +27,9 @@ pub struct Router {
     /// Direct socket addresses per agent, used when relay discovery is
     /// unavailable (e.g. Docker e2e tests).
     direct_addrs: HashMap<AgentId, Vec<SocketAddr>>,
+    /// `watch` (not `Notify`) so bursts of `replace()` calls while the
+    /// reconciler is busy don't get coalesced into a single wakeup.
+    tcp_listeners_changed: watch::Sender<u64>,
 }
 
 impl Router {
@@ -84,19 +88,33 @@ impl Router {
 
         let table = RouteTable::from_raw(routes);
         let addr_cache = build_addr_cache(&table, &direct_addrs);
+        let (tx, _) = watch::channel(0);
         Ok(Self {
             table: ArcSwap::from_pointee(table),
             addr_cache: ArcSwap::from_pointee(addr_cache),
             direct_addrs,
+            tcp_listeners_changed: tx,
         })
     }
 
     /// Called by the dynamic config sync after the hub broadcasts a new
-    /// table. Readers see the swap atomically.
+    /// table. Readers see the swap atomically. Wakes the TCP listener
+    /// reconciler so it can bind/unbind ports per the new `tcp_listeners` map.
     pub fn replace(&self, new_table: RouteTable) {
         let addr_cache = build_addr_cache(&new_table, &self.direct_addrs);
         self.addr_cache.store(Arc::new(addr_cache));
         self.table.store(Arc::new(new_table));
+        self.tcp_listeners_changed
+            .send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    pub fn subscribe_tcp_listener_changes(&self) -> watch::Receiver<u64> {
+        self.tcp_listeners_changed.subscribe()
+    }
+
+    #[must_use]
+    pub fn desired_tcp_listeners(&self) -> BTreeMap<u16, TcpListenerBinding> {
+        self.table.load().tcp_listeners().clone()
     }
 
     /// Missing TLS entries default to `Passthrough`. Performs a single
@@ -107,6 +125,13 @@ impl Router {
         let (agents, tls) = table.lookup_with_tls(hostname)?;
         let addrs = self.agents_to_addrs(agents)?;
         Some((addrs, tls))
+    }
+
+    #[must_use]
+    pub fn route_tcp_service(&self, tenant: &TenantId, service: &str) -> Option<Candidates> {
+        let table = self.table.load();
+        let agents = table.lookup_tcp_service(tenant, service)?;
+        self.agents_to_addrs(agents)
     }
 
     fn agents_to_addrs(&self, agents: &HashSet<AgentId>) -> Option<Candidates> {

@@ -131,6 +131,35 @@ and you don't care about client IP), set it explicitly on the service:
 { "hostname": "app.example.eu", "origin": "127.0.0.1:8443", "proxy_protocol": "none" }
 ```
 
+## Raw TCP services
+
+Forward arbitrary TCP ports — SSH, Prometheus remote-write, databases,
+anything that isn't TLS-with-SNI — alongside the regular HTTPS routes.
+
+The agent declares the listen port; the edge picks it up automatically.
+The VPS admin doesn't add anything per service.
+
+```bash
+TOWONEL_AGENT_TCP_SERVICES='[
+  {"name":"forgejo-ssh", "origin":"forgejo:22",            "listen_port":2222},
+  {"name":"prom-write",  "origin":"victoriametrics:8428",  "listen_port":9090}
+]'
+```
+
+After the agent restarts the edge binds the new ports within a few
+seconds. Re-publishing the same `name` with a different `listen_port`
+moves the binding. Removing a binding from the env does **not** retire
+it — bindings are append-only across agent restarts so a second agent
+under the same tenant can't accidentally erase the first agent's work.
+Retire a binding via `towonel admin tenant leave` (releases everything
+this tenant owns).
+
+Each port is unique per tenant and across tenants: claiming a port
+already bound to a different service — yours or somebody else's — is
+rejected at submission time. Privileged ports (`< 1024`) are blocked by
+default — set `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS=true` on the hub to
+allow them.
+
 ## Managing tenants and invites
 
 Each invite is a tenant. Revoking an invite removes the tenant.
@@ -205,6 +234,7 @@ and [`examples/node.env.example`](examples/node.env.example).
 | `TOWONEL_HUB_DB_DRIVER`             | `sqlite`       | `sqlite` or `postgres`                                    |
 | `TOWONEL_HUB_DB_DSN`                | `hub.db`       | Connection string                                         |
 | `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`     | Pool size                                                 |
+| `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS`| `false`        | Allow tenants to claim TCP ports below 1024               |
 
 ### Edge
 
@@ -222,11 +252,12 @@ and [`examples/node.env.example`](examples/node.env.example).
 
 ### Agent
 
-| Variable                      | Description                                     |
-| ----------------------------- | ----------------------------------------------- |
-| `TOWONEL_INVITE_TOKEN`        | **Required.** `tt_inv_2_...` token from the hub |
-| `TOWONEL_AGENT_SERVICES`      | JSON array of services                          |
-| `TOWONEL_AGENT_TRUSTED_EDGES` | Optional override for trusted edge IDs          |
+| Variable                       | Description                                       |
+| ------------------------------ | ------------------------------------------------- |
+| `TOWONEL_INVITE_TOKEN`         | **Required.** `tt_inv_2_...` token from the hub   |
+| `TOWONEL_AGENT_SERVICES`       | JSON array of HTTPS services                      |
+| `TOWONEL_AGENT_TCP_SERVICES`   | JSON array of raw TCP services (see above)        |
+| `TOWONEL_AGENT_TRUSTED_EDGES`  | Optional override for trusted edge IDs            |
 
 Service shape:
 
@@ -255,12 +286,6 @@ for terminated services.
 ```bash
 cargo build --release -p towonel-node -p towonel-agent
 ```
-
-## Roadmap
-
-- `towonel-access` client for non-HTTPS protocols (SSH, Postgres, RDP)
-  by wrapping raw TCP in TLS to the edge with `SNI=target-hostname`,
-  similar to `cloudflared access`.
 
 ## Contributing
 

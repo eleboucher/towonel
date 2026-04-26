@@ -103,6 +103,8 @@ pub struct AppState {
     /// replay for the full freshness window and let an attacker open a
     /// second SSE stream to observe the route table.
     pub edge_sub_nonces: NonceCache,
+    /// Serializes the check+insert window for `UpsertTcpService`.
+    pub tcp_port_lock: Mutex<()>,
 }
 
 impl AppState {

@@ -695,3 +695,334 @@ fn lookup_bare_tld_does_not_match_wildcard() {
         "bare TLD with no dots must not match any wildcard"
     );
 }
+
+#[test]
+fn tcp_service_plus_agent_produces_route() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "forgejo-ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    let agents = table.lookup_tcp_service(&kp.id(), "forgejo-ssh").unwrap();
+    assert!(agents.contains(&agent.id()));
+}
+
+#[test]
+fn tcp_service_unknown_name_returns_none() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    assert!(table.lookup_tcp_service(&kp.id(), "missing").is_none());
+}
+
+#[test]
+fn tcp_service_delete_removes_route() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+        sign_entry(
+            &kp,
+            3,
+            ConfigOp::DeleteTcpService {
+                service: "ssh".into(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    assert!(table.lookup_tcp_service(&kp.id(), "ssh").is_none());
+}
+
+#[test]
+fn tcp_service_isolated_across_tenants() {
+    let alice = TenantKeypair::generate();
+    let bob = TenantKeypair::generate();
+    let alice_agent = AgentKeypair::generate();
+    let bob_agent = AgentKeypair::generate();
+
+    let mut policy = OwnershipPolicy::new();
+    register(&mut policy, &alice, &[]);
+    register(&mut policy, &bob, &[]);
+
+    let entries = vec![
+        sign_entry(
+            &alice,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &alice,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: alice_agent.id(),
+            },
+        ),
+        sign_entry(
+            &bob,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &bob,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: bob_agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+
+    let alice_set = table.lookup_tcp_service(&alice.id(), "ssh").unwrap();
+    assert!(alice_set.contains(&alice_agent.id()));
+    assert!(!alice_set.contains(&bob_agent.id()));
+
+    let bob_set = table.lookup_tcp_service(&bob.id(), "ssh").unwrap();
+    assert!(bob_set.contains(&bob_agent.id()));
+    assert!(!bob_set.contains(&alice_agent.id()));
+}
+
+#[test]
+fn tcp_service_produces_listener_binding() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "forgejo-ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    let bindings = table.tcp_listeners();
+    let binding = bindings.get(&2222).expect("port 2222 must be bound");
+    assert_eq!(binding.tenant, kp.id());
+    assert_eq!(binding.service, "forgejo-ssh");
+}
+
+#[test]
+fn tcp_service_listen_port_update_is_in_place() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "forgejo-ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+        sign_entry(
+            &kp,
+            3,
+            ConfigOp::UpsertTcpService {
+                service: "forgejo-ssh".into(),
+                listen_port: 2223,
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    let bindings = table.tcp_listeners();
+    assert!(bindings.get(&2222).is_none(), "old port should be released");
+    let binding = bindings.get(&2223).expect("new port must be bound");
+    assert_eq!(binding.service, "forgejo-ssh");
+}
+
+#[test]
+fn tcp_service_delete_releases_listener_binding() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+        sign_entry(
+            &kp,
+            3,
+            ConfigOp::DeleteTcpService {
+                service: "ssh".into(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    assert!(
+        table.tcp_listeners().is_empty(),
+        "deleting the service must release its port"
+    );
+}
+
+#[test]
+fn tcp_service_port_collision_resolved_deterministically() {
+    // Cross-tenant collisions only happen if the hub's uniqueness guard is
+    // bypassed (e.g. two hubs); we still need a deterministic outcome here.
+    let alice = TenantKeypair::generate();
+    let bob = TenantKeypair::generate();
+    let alice_agent = AgentKeypair::generate();
+    let bob_agent = AgentKeypair::generate();
+
+    let mut policy = OwnershipPolicy::new();
+    register(&mut policy, &alice, &[]);
+    register(&mut policy, &bob, &[]);
+
+    let entries = vec![
+        sign_entry(
+            &alice,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &alice,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: alice_agent.id(),
+            },
+        ),
+        sign_entry(
+            &bob,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &bob,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: bob_agent.id(),
+            },
+        ),
+    ];
+
+    let table = RouteTable::from_entries(&entries, &policy);
+    let bindings = table.tcp_listeners();
+    assert_eq!(bindings.len(), 1, "only one tenant can win the port");
+    let winner = bindings.get(&2222).unwrap();
+    let expected = if alice.id().as_bytes() < bob.id().as_bytes() {
+        alice.id()
+    } else {
+        bob.id()
+    };
+    assert_eq!(winner.tenant, expected);
+
+    // Routing data is per-tenant; only the public listener is contested.
+    assert!(table.lookup_tcp_service(&alice.id(), "ssh").is_some());
+    assert!(table.lookup_tcp_service(&bob.id(), "ssh").is_some());
+}
+
+#[test]
+fn tcp_service_unique_agents_includes_tcp_only_agents() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "ssh".into(),
+                listen_port: 2222,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    let agents = table.unique_agents();
+    assert!(agents.contains(&agent.id()));
+}
