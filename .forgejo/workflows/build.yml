@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
 
-      - uses: https://data.forgejo.org/docker/setup-qemu-action@v3
+      - uses: https://data.forgejo.org/docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
