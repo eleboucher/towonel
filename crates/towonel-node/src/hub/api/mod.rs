@@ -320,6 +320,9 @@ pub(super) fn sequence_conflict(msg: impl Into<String>) -> Response {
 pub(super) fn unsupported_version(msg: impl Into<String>) -> Response {
     error_response(StatusCode::UNPROCESSABLE_ENTITY, "unsupported_version", msg)
 }
+pub(super) fn unsupported_op(msg: impl Into<String>) -> Response {
+    error_response(StatusCode::BAD_REQUEST, "unsupported_op", msg)
+}
 pub(super) fn unauthorized(msg: impl Into<String>) -> Response {
     error_response(StatusCode::UNAUTHORIZED, "unauthorized", msg)
 }

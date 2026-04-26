@@ -4,7 +4,7 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use serde::Serialize;
-use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
+use towonel_common::config_entry::{ConfigEntryError, ConfigOp, ConfigPayload, SignedConfigEntry};
 use towonel_common::identity::TenantId;
 use tracing::warn;
 
@@ -14,7 +14,7 @@ use super::super::metrics::reject_reason;
 use super::{
     AppState, PROTOCOL_VERSION, cbor_response, hostname_not_owned, internal_error, invalid_request,
     invalid_signature, json_ok, load_trusted_edges, rebuild_and_broadcast_routes,
-    sequence_conflict, tenant_not_allowed, unsupported_version,
+    sequence_conflict, tenant_not_allowed, unsupported_op, unsupported_version,
 };
 
 #[derive(Serialize)]
@@ -221,12 +221,21 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
 
     let payload: ConfigPayload = match entry.verify(pq_pubkey) {
         Ok(p) => p,
+        Err(e @ ConfigEntryError::Decode(_)) => {
+            state.metrics.record_reject(reject_reason::UNSUPPORTED_OP);
+            return unsupported_op(e.to_string());
+        }
+        Err(e @ ConfigEntryError::UnsupportedVersion(_)) => {
+            state
+                .metrics
+                .record_reject(reject_reason::UNSUPPORTED_VERSION);
+            return unsupported_version(e.to_string());
+        }
         Err(e) => {
             state
                 .metrics
                 .record_reject(reject_reason::INVALID_SIGNATURE);
-            warn!(error = %e, "rejected entry: signature or tenant_id mismatch");
-            return invalid_signature(format!("signature verification failed: {e}"));
+            return invalid_signature(e.to_string());
         }
     };
 
@@ -348,13 +357,18 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
         edges: Vec<EdgeEntry<'a>>,
     }
 
-    let node_ids = match load_trusted_edges(&state).await {
+    let mut node_ids = match load_trusted_edges(&state).await {
         Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "failed to list edges");
             return internal_error();
         }
     };
+    if let Some(self_edge) = state.identity.edge_node_id
+        && !node_ids.contains(&self_edge)
+    {
+        node_ids.push(self_edge);
+    }
 
     let empty: &[String] = &[];
     let edges = node_ids
