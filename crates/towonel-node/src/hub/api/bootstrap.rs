@@ -78,13 +78,20 @@ pub(super) async fn post_bootstrap(
         return gone("invite has expired");
     }
 
-    let trusted_edges = match load_trusted_edges(&state).await {
+    let mut trusted_edges = match load_trusted_edges(&state).await {
         Ok(edges) => edges,
         Err(e) => {
             warn!(error = %e, "failed to list trusted edges for bootstrap");
             return internal_error();
         }
     };
+    // When the hub runs an in-process edge, agents have no way to mint
+    // an invite for it (it's the same process), so auto-trust it.
+    if let Some(self_edge) = state.identity.edge_node_id
+        && !trusted_edges.contains(&self_edge)
+    {
+        trusted_edges.push(self_edge);
+    }
     let edge_node_id = trusted_edges.first().copied();
 
     json_ok(BootstrapResponse {
