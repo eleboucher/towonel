@@ -54,6 +54,22 @@ pub fn is_sequence_conflict(err: &anyhow::Error) -> bool {
         .is_some_and(|e| e.code == "sequence_conflict")
 }
 
+/// `true` if the hub rejected the entry because it doesn't recognize the
+/// `ConfigOp` variant. Pre-split hubs return `invalid_signature` with a CBOR
+/// `unknown variant` message; newer hubs return `unsupported_op` directly.
+#[must_use]
+pub fn is_unsupported_op(err: &anyhow::Error) -> bool {
+    let Some(e) = err.downcast_ref::<HubApiError>() else {
+        return false;
+    };
+    if e.code == "unsupported_op" {
+        return true;
+    }
+    e.code == "invalid_signature"
+        && e.message.contains("CBOR decoding error")
+        && e.message.contains("unknown variant")
+}
+
 /// Fetch all signed entries for `tenant_id` and return the largest
 /// `sequence` number. Returns 0 when the tenant has no entries yet.
 pub async fn fetch_latest_sequence(
@@ -120,5 +136,51 @@ mod tests {
         // is to stop sniffing strings.
         let err = anyhow!("hub returned 500: sequence_conflict-ish text");
         assert!(!is_sequence_conflict(&err));
+    }
+
+    #[test]
+    fn is_unsupported_op_matches_new_hub_code() {
+        let err: anyhow::Error = HubApiError {
+            status: 400,
+            code: "unsupported_op".into(),
+            message: String::new(),
+        }
+        .into();
+        assert!(is_unsupported_op(&err));
+    }
+
+    #[test]
+    fn is_unsupported_op_matches_legacy_invalid_signature_cbor() {
+        let err: anyhow::Error = HubApiError {
+            status: 400,
+            code: "invalid_signature".into(),
+            message: "CBOR decoding error: Semantic(None, \"unknown variant \
+                      `upsert_tcp_service`\")"
+                .into(),
+        }
+        .into();
+        assert!(is_unsupported_op(&err));
+    }
+
+    #[test]
+    fn is_unsupported_op_rejects_real_invalid_signature() {
+        let err: anyhow::Error = HubApiError {
+            status: 400,
+            code: "invalid_signature".into(),
+            message: "ml-dsa-65 signature verification failed".into(),
+        }
+        .into();
+        assert!(!is_unsupported_op(&err));
+    }
+
+    #[test]
+    fn is_unsupported_op_rejects_other_codes() {
+        let err: anyhow::Error = HubApiError {
+            status: 409,
+            code: "sequence_conflict".into(),
+            message: String::new(),
+        }
+        .into();
+        assert!(!is_unsupported_op(&err));
     }
 }

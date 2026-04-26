@@ -10,6 +10,7 @@ pub mod reject_reason {
     pub const INVALID_CBOR: &str = "invalid_cbor";
     pub const TENANT_NOT_ALLOWED: &str = "tenant_not_allowed";
     pub const INVALID_SIGNATURE: &str = "invalid_signature";
+    pub const UNSUPPORTED_OP: &str = "unsupported_op";
     pub const UNSUPPORTED_VERSION: &str = "unsupported_version";
     pub const INVALID_HOSTNAME: &str = "invalid_hostname";
     pub const HOSTNAME_NOT_OWNED: &str = "hostname_not_owned";

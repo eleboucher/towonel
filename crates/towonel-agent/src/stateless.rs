@@ -17,7 +17,7 @@ use towonel_common::invite::InviteToken;
 use tracing::{info, warn};
 
 use crate::hub_client::{
-    check_response, fetch_latest_sequence, is_sequence_conflict, submit_entry,
+    check_response, fetch_latest_sequence, is_sequence_conflict, is_unsupported_op, submit_entry,
 };
 use crate::metrics::{self, AgentMetrics};
 
@@ -347,6 +347,16 @@ pub async fn publish_tcp_services(
                     tokio::time::sleep(delay).await;
                     next_seq =
                         fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+                }
+                // Hub predates TCP service support. Skip rather than abort
+                // so HTTP-only agents keep working against an older hub.
+                Err(e) if is_unsupported_op(&e) => {
+                    warn!(
+                        hub_url = %ctx.hub_url,
+                        error = %e,
+                        "hub does not support TCP service forwarding; skipping",
+                    );
+                    return Ok(());
                 }
                 Err(e) => return Err(e),
             }
