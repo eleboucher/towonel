@@ -68,7 +68,7 @@ pub async fn cmd_entry_submit(
     hostname: Option<String>,
     agent_id_hex: Option<String>,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let key_path = resolve_tenant_key_path(key_path)?;
     let keypair = load_tenant_keypair(&key_path)?;
     let tenant_id = keypair.id();
@@ -120,7 +120,7 @@ pub async fn cmd_entry_list(
     hub_url: Option<String>,
     key_path: Option<PathBuf>,
 ) -> anyhow::Result<()> {
-    let hub_url = resolve_hub_url(hub_url)?;
+    let hub_url = resolve_hub_url(hub_url);
     let key_path = resolve_tenant_key_path(key_path)?;
     let keypair = load_tenant_keypair(&key_path)?;
     let tenant_id = keypair.id();
