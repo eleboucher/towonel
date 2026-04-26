@@ -802,3 +802,234 @@ async fn bootstrap_after_revoke_returns_unauthorized_no_oracle() {
     assert_eq!(status, 401);
     assert_eq!(body["error"]["code"], "unauthorized");
 }
+
+async fn submit_entry(
+    client: &reqwest::Client,
+    hub: &TestHub,
+    tenant: &TenantKeypair,
+    sequence: u64,
+    op: ConfigOp,
+) -> (u16, Value) {
+    let payload = ConfigPayload {
+        version: 1,
+        tenant_id: tenant.id(),
+        sequence,
+        timestamp: 1_700_000_000_000,
+        op,
+    };
+    let entry = SignedConfigEntry::sign(&payload, tenant).unwrap();
+    let mut body = Vec::new();
+    ciborium::into_writer(&entry, &mut body).unwrap();
+    let resp = client
+        .post(hub.url("/v1/entries"))
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await.unwrap_or_default();
+    let body: Value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        ciborium::from_reader(bytes.as_ref())
+            .or_else(|_| serde_json::from_slice(&bytes))
+            .unwrap_or(Value::Null)
+    };
+    (status, body)
+}
+
+#[tokio::test]
+async fn upsert_tcp_service_accepted() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "ssh".into(),
+            listen_port: 2222,
+        },
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+    assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test]
+async fn upsert_tcp_service_zero_port_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "bad".into(),
+            listen_port: 0,
+        },
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("must not be 0"),
+        "got body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn upsert_tcp_service_privileged_port_rejected_by_default() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "http".into(),
+            listen_port: 80,
+        },
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("privileged"),
+        "got body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn upsert_tcp_service_cross_tenant_port_collision_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let alice_token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let alice = tenant_from_token(&alice_token);
+    let bob_token = create_invite(&hub, &client, "bob", &["app.bob.test"]).await;
+    let bob = tenant_from_token(&bob_token);
+
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &alice,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "ssh".into(),
+            listen_port: 2222,
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &bob,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "ssh".into(),
+            listen_port: 2222,
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "got body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already claimed"),
+        "got body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn upsert_tcp_service_same_tenant_can_update_port() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "ssh".into(),
+            listen_port: 2222,
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        2,
+        ConfigOp::UpsertTcpService {
+            service: "ssh".into(),
+            listen_port: 2223,
+        },
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+}
+
+#[tokio::test]
+async fn upsert_tcp_service_same_tenant_different_service_same_port_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "ssh".into(),
+            listen_port: 2222,
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        2,
+        ConfigOp::UpsertTcpService {
+            service: "metrics".into(),
+            listen_port: 2222,
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "got body: {body}");
+    let msg = body["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        msg.contains("already bound to service `ssh`"),
+        "got body: {body}"
+    );
+}

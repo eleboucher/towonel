@@ -91,6 +91,8 @@ pub async fn cmd_tenant_leave(
         std::collections::HashSet::default();
     let mut authorized_agents: std::collections::HashSet<AgentId> =
         std::collections::HashSet::default();
+    let mut owned_tcp_services: std::collections::HashSet<String> =
+        std::collections::HashSet::default();
 
     for entry in &entries {
         let Ok(payload) = entry.verify(pq_pubkey) else {
@@ -111,17 +113,26 @@ pub async fn cmd_tenant_leave(
                 authorized_agents.remove(&agent_id);
             }
             ConfigOp::SetHostnameTls { .. } => {}
+            ConfigOp::UpsertTcpService { service, .. } => {
+                owned_tcp_services.insert(service);
+            }
+            ConfigOp::DeleteTcpService { service } => {
+                owned_tcp_services.remove(&service);
+            }
         }
     }
 
-    if owned_hostnames.is_empty() && authorized_agents.is_empty() {
-        println!("No hostnames or agents to release for tenant {tenant_id}.");
+    if owned_hostnames.is_empty() && authorized_agents.is_empty() && owned_tcp_services.is_empty() {
+        println!("No hostnames, TCP services, or agents to release for tenant {tenant_id}.");
         return Ok(());
     }
 
     println!("This will:");
     for h in &owned_hostnames {
         println!("  - DeleteHostname {h}");
+    }
+    for s in &owned_tcp_services {
+        println!("  - DeleteTcpService {s}");
     }
     for a in &authorized_agents {
         println!("  - RevokeAgent {a}");
@@ -140,6 +151,17 @@ pub async fn cmd_tenant_leave(
         )
         .await?;
         println!("- DeleteHostname {h} (seq {seq})");
+    }
+    for s in owned_tcp_services {
+        seq += 1;
+        submit_payload(
+            &hub_url,
+            &keypair,
+            seq,
+            ConfigOp::DeleteTcpService { service: s.clone() },
+        )
+        .await?;
+        println!("- DeleteTcpService {s} (seq {seq})");
     }
     for a in authorized_agents {
         seq += 1;

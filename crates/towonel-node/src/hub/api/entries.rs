@@ -23,6 +23,174 @@ struct PostEntryResponse {
     sequence: u64,
 }
 
+/// Service names are operator-chosen opaque labels — only reject what would
+/// break wire format or logs.
+fn validate_tcp_service_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("must not be empty");
+    }
+    if name.len() > 64 {
+        return Err("must be 64 bytes or fewer");
+    }
+    if name.chars().any(char::is_control) {
+        return Err("must not contain control characters");
+    }
+    Ok(())
+}
+
+/// Set `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS=true` to let tenants claim ports
+/// below 1024. Default off — protects against a tenant accidentally claiming
+/// 22, 80, 443 etc. and breaking other services on the edge box.
+const ALLOW_PRIVILEGED_PORTS_ENV: &str = "TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS";
+
+fn allow_privileged_ports() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var(ALLOW_PRIVILEGED_PORTS_ENV)
+            .ok()
+            .is_some_and(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+    })
+}
+
+fn validate_tcp_listen_port(port: u16) -> Result<(), &'static str> {
+    if port == 0 {
+        return Err("must not be 0");
+    }
+    if port < 1024 && !allow_privileged_ports() {
+        return Err(
+            "privileged ports (<1024) are blocked; set TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS=true to override",
+        );
+    }
+    Ok(())
+}
+
+/// Reason the requested `(tenant, service, listen_port)` triple can't be
+/// inserted. Re-publishing the same `(service, port)` for the same tenant
+/// is allowed and returns no conflict.
+enum PortConflict {
+    OtherTenant { tenant: TenantId },
+    SameTenantOtherService { service: String },
+}
+
+/// Replay all stored entries to find whether `listen_port` is already claimed.
+/// Skips ML-DSA re-verification — entries in the DB were already verified at
+/// insert time, and re-checking on every `UpsertTcpService` was O(N×crypto)
+/// under the global `tcp_port_lock`.
+///
+/// `policy` still gates the scan: entries from removed tenants are ignored,
+/// matching the behavior of `RouteTable::from_entries`.
+async fn find_port_conflict(
+    db: &super::super::db::Db,
+    listen_port: u16,
+    requesting_tenant: &TenantId,
+    requesting_service: &str,
+    policy: &towonel_common::ownership::OwnershipPolicy,
+) -> Option<PortConflict> {
+    let entries = db.get_all_entries().await.ok()?;
+    let mut per_tenant: std::collections::HashMap<
+        TenantId,
+        std::collections::HashMap<String, u16>,
+    > = std::collections::HashMap::new();
+    for entry in &entries {
+        if policy.pq_public_key(&entry.tenant_id).is_none() {
+            continue;
+        }
+        let Ok(payload) = entry.payload_unverified() else {
+            continue;
+        };
+        let map = per_tenant.entry(payload.tenant_id).or_default();
+        match payload.op {
+            ConfigOp::UpsertTcpService {
+                service,
+                listen_port: port,
+            } => {
+                map.insert(service, port);
+            }
+            ConfigOp::DeleteTcpService { service } => {
+                map.remove(&service);
+            }
+            _ => {}
+        }
+    }
+    for (tenant_id, bindings) in &per_tenant {
+        for (service, port) in bindings {
+            if *port != listen_port {
+                continue;
+            }
+            if tenant_id != requesting_tenant {
+                return Some(PortConflict::OtherTenant { tenant: *tenant_id });
+            }
+            if service != requesting_service {
+                return Some(PortConflict::SameTenantOtherService {
+                    service: service.clone(),
+                });
+            }
+        }
+    }
+    None
+}
+
+async fn validate_tcp_service_op(
+    state: &Arc<AppState>,
+    payload: &ConfigPayload,
+) -> Result<(), Response> {
+    let service_name = match &payload.op {
+        ConfigOp::UpsertTcpService { service, .. } | ConfigOp::DeleteTcpService { service } => {
+            Some(service)
+        }
+        _ => None,
+    };
+    if let Some(service) = service_name
+        && let Err(e) = validate_tcp_service_name(service)
+    {
+        state
+            .metrics
+            .record_reject(reject_reason::INVALID_TCP_SERVICE);
+        return Err(invalid_request(format!(
+            "invalid tcp service name `{service}`: {e}"
+        )));
+    }
+
+    if let ConfigOp::UpsertTcpService {
+        service,
+        listen_port,
+    } = &payload.op
+    {
+        if let Err(e) = validate_tcp_listen_port(*listen_port) {
+            state.metrics.record_reject(reject_reason::INVALID_TCP_PORT);
+            return Err(invalid_request(format!(
+                "invalid tcp listen_port {listen_port}: {e}"
+            )));
+        }
+        match find_port_conflict(
+            &state.db,
+            *listen_port,
+            &payload.tenant_id,
+            service,
+            state.policy.load().as_ref(),
+        )
+        .await
+        {
+            None => {}
+            Some(PortConflict::OtherTenant { tenant }) => {
+                state.metrics.record_reject(reject_reason::TCP_PORT_CLAIMED);
+                return Err(invalid_request(format!(
+                    "tcp listen_port {listen_port} is already claimed by tenant {tenant}"
+                )));
+            }
+            Some(PortConflict::SameTenantOtherService {
+                service: other_service,
+            }) => {
+                state.metrics.record_reject(reject_reason::TCP_PORT_CLAIMED);
+                return Err(invalid_request(format!(
+                    "tcp listen_port {listen_port} is already bound to service `{other_service}` for this tenant"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `POST /v1/entries`
 ///
 /// Validation pipeline per protocol section 4.3:
@@ -42,64 +210,70 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         }
     };
 
-    // Snapshot the policy once; ArcSwap makes this a pointer-bump. Any
-    // concurrent register/remove races like last-writer-wins, which is
-    // fine since the tenant allowlist check and signature verify are both
-    // against the same snapshot.
-    let payload: ConfigPayload = {
-        let policy = state.policy.load();
+    let policy = state.policy.load_full();
 
-        let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
+    let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
+        state
+            .metrics
+            .record_reject(reject_reason::TENANT_NOT_ALLOWED);
+        return tenant_not_allowed("tenant is not on the operator's allowlist");
+    };
+
+    let payload: ConfigPayload = match entry.verify(pq_pubkey) {
+        Ok(p) => p,
+        Err(e) => {
             state
                 .metrics
-                .record_reject(reject_reason::TENANT_NOT_ALLOWED);
-            return tenant_not_allowed("tenant is not on the operator's allowlist");
-        };
+                .record_reject(reject_reason::INVALID_SIGNATURE);
+            warn!(error = %e, "rejected entry: signature or tenant_id mismatch");
+            return invalid_signature(format!("signature verification failed: {e}"));
+        }
+    };
 
-        let payload: ConfigPayload = match entry.verify(pq_pubkey) {
-            Ok(p) => p,
-            Err(e) => {
-                state
-                    .metrics
-                    .record_reject(reject_reason::INVALID_SIGNATURE);
-                warn!(error = %e, "rejected entry: signature or tenant_id mismatch");
-                return invalid_signature(format!("signature verification failed: {e}"));
-            }
-        };
+    if payload.version != PROTOCOL_VERSION {
+        state
+            .metrics
+            .record_reject(reject_reason::UNSUPPORTED_VERSION);
+        return unsupported_version(format!(
+            "payload version {} is not supported by this hub (expected {PROTOCOL_VERSION})",
+            payload.version
+        ));
+    }
 
-        if payload.version != PROTOCOL_VERSION {
+    let hostname_for_check = match &payload.op {
+        ConfigOp::UpsertHostname { hostname }
+        | ConfigOp::DeleteHostname { hostname }
+        | ConfigOp::SetHostnameTls { hostname, .. } => Some(hostname),
+        ConfigOp::UpsertAgent { .. }
+        | ConfigOp::RevokeAgent { .. }
+        | ConfigOp::UpsertTcpService { .. }
+        | ConfigOp::DeleteTcpService { .. } => None,
+    };
+    if let Some(hostname) = hostname_for_check {
+        if let Err(e) = towonel_common::hostname::validate_hostname(hostname) {
+            state.metrics.record_reject(reject_reason::INVALID_HOSTNAME);
+            return invalid_request(format!("invalid hostname `{hostname}`: {e}"));
+        }
+        if !policy.is_hostname_allowed(&payload.tenant_id, hostname) {
             state
                 .metrics
-                .record_reject(reject_reason::UNSUPPORTED_VERSION);
-            return unsupported_version(format!(
-                "payload version {} is not supported by this hub (expected {PROTOCOL_VERSION})",
-                payload.version
+                .record_reject(reject_reason::HOSTNAME_NOT_OWNED);
+            return hostname_not_owned(format!(
+                "tenant is not authorized for hostname: {hostname}"
             ));
         }
+    }
 
-        let hostname_for_check = match &payload.op {
-            ConfigOp::UpsertHostname { hostname }
-            | ConfigOp::DeleteHostname { hostname }
-            | ConfigOp::SetHostnameTls { hostname, .. } => Some(hostname),
-            ConfigOp::UpsertAgent { .. } | ConfigOp::RevokeAgent { .. } => None,
-        };
-        if let Some(hostname) = hostname_for_check {
-            if let Err(e) = towonel_common::hostname::validate_hostname(hostname) {
-                state.metrics.record_reject(reject_reason::INVALID_HOSTNAME);
-                return invalid_request(format!("invalid hostname `{hostname}`: {e}"));
-            }
-            if !policy.is_hostname_allowed(&payload.tenant_id, hostname) {
-                state
-                    .metrics
-                    .record_reject(reject_reason::HOSTNAME_NOT_OWNED);
-                return hostname_not_owned(format!(
-                    "tenant is not authorized for hostname: {hostname}"
-                ));
-            }
-        }
-
-        payload
+    // Serialize cross-tenant uniqueness check + insert for TCP-service ops.
+    let _tcp_guard = if matches!(payload.op, ConfigOp::UpsertTcpService { .. }) {
+        Some(state.tcp_port_lock.lock().await)
+    } else {
+        None
     };
+
+    if let Err(resp) = validate_tcp_service_op(&state, &payload).await {
+        return resp;
+    }
 
     let sequence = payload.sequence;
 

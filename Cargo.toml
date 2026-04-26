@@ -129,6 +129,7 @@ instant-acme = "0.8"
 rcgen = "0.14"
 webpki-roots = "1.0"
 arc-swap = "1.7"
+socket2 = { version = "0.6", features = ["all"] }
 moka = { version = "0.12", features = ["future"] }
 backon = "1"
 ppp = "2"

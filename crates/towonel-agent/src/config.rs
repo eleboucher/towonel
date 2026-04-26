@@ -7,6 +7,20 @@ use towonel_common::tls_policy::TlsMode;
 pub struct AgentConfig {
     #[serde(default)]
     pub services: Vec<ServiceConfig>,
+    #[serde(default)]
+    pub tcp_services: Vec<TcpServiceConfig>,
+}
+
+/// `listen_port` is the public port the edge will bind on the agent's behalf
+/// (the agent self-publishes the binding so the VPS admin doesn't configure
+/// anything). The edge tags forwarded streams with `tcp:<name>` in the
+/// PROXY v2 Authority TLV; this agent dispatches on that prefix.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TcpServiceConfig {
+    pub name: String,
+    pub origin: String,
+    pub listen_port: u16,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -66,16 +80,64 @@ impl Default for ProxyProtocol {
 }
 
 impl AgentConfig {
-    /// Load `services` from `TOWONEL_AGENT_SERVICES` (JSON-encoded array).
-    /// Empty when the env var is unset — the agent runs, it just won't
-    /// publish any TLS-termination hints.
+    /// Load `services` from `TOWONEL_AGENT_SERVICES` and `tcp_services` from
+    /// `TOWONEL_AGENT_TCP_SERVICES` (each JSON-encoded array). Empty when the
+    /// env var is unset.
     pub fn load() -> anyhow::Result<Self> {
         let services = std::env::var("TOWONEL_AGENT_SERVICES")
             .ok()
             .map(|v| serde_json::from_str::<Vec<ServiceConfig>>(&v))
             .transpose()?
             .unwrap_or_default();
-        Ok(Self { services })
+        let tcp_services = std::env::var("TOWONEL_AGENT_TCP_SERVICES")
+            .ok()
+            .map(|v| serde_json::from_str::<Vec<TcpServiceConfig>>(&v))
+            .transpose()?
+            .unwrap_or_default();
+
+        let cfg = Self {
+            services,
+            tcp_services,
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// Reject configs where two TCP services would map to the same port (the
+    /// hub would accept only one), or where a TCP service name collides with a
+    /// hostname (the agent's stream dispatcher would pick one arbitrarily).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let mut seen_tcp = std::collections::HashSet::new();
+        let mut seen_port = std::collections::HashSet::new();
+        for svc in &self.tcp_services {
+            if svc.name.is_empty() {
+                anyhow::bail!("tcp_service name must not be empty");
+            }
+            if svc.listen_port == 0 {
+                anyhow::bail!("tcp_service `{}` listen_port must not be 0", svc.name);
+            }
+            if !seen_tcp.insert(svc.name.as_str()) {
+                anyhow::bail!("duplicate tcp_service name `{}`", svc.name);
+            }
+            if !seen_port.insert(svc.listen_port) {
+                anyhow::bail!(
+                    "duplicate tcp_service listen_port {} (used by `{}`)",
+                    svc.listen_port,
+                    svc.name
+                );
+            }
+        }
+        let hostnames: std::collections::HashSet<&str> =
+            self.services.iter().map(|s| s.hostname.as_str()).collect();
+        for svc in &self.tcp_services {
+            if hostnames.contains(svc.name.as_str()) {
+                anyhow::bail!(
+                    "tcp_service name `{}` collides with a configured hostname",
+                    svc.name
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -121,5 +183,107 @@ mod tests {
         )
         .unwrap();
         assert_eq!(svc_terminate.resolved_proxy_protocol(), ProxyProtocol::None);
+    }
+
+    #[test]
+    fn tcp_services_json_parses() {
+        let json = r#"[
+            {"name":"forgejo-ssh","origin":"forgejo:22","listen_port":2222},
+            {"name":"prom-write","origin":"victoriametrics:8428","listen_port":9090}
+        ]"#;
+        let svcs: Vec<TcpServiceConfig> = serde_json::from_str(json).unwrap();
+        assert_eq!(svcs.len(), 2);
+        assert_eq!(svcs[0].name, "forgejo-ssh");
+        assert_eq!(svcs[0].origin, "forgejo:22");
+        assert_eq!(svcs[0].listen_port, 2222);
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_tcp_service_names() {
+        let cfg = AgentConfig {
+            services: Vec::new(),
+            tcp_services: vec![
+                TcpServiceConfig {
+                    name: "ssh".into(),
+                    origin: "127.0.0.1:22".into(),
+                    listen_port: 2222,
+                },
+                TcpServiceConfig {
+                    name: "ssh".into(),
+                    origin: "127.0.0.1:23".into(),
+                    listen_port: 2223,
+                },
+            ],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_listen_ports() {
+        let cfg = AgentConfig {
+            services: Vec::new(),
+            tcp_services: vec![
+                TcpServiceConfig {
+                    name: "ssh".into(),
+                    origin: "127.0.0.1:22".into(),
+                    listen_port: 2222,
+                },
+                TcpServiceConfig {
+                    name: "metrics".into(),
+                    origin: "127.0.0.1:9000".into(),
+                    listen_port: 2222,
+                },
+            ],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+        assert!(err.contains("listen_port"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_empty_tcp_service_name() {
+        let cfg = AgentConfig {
+            services: Vec::new(),
+            tcp_services: vec![TcpServiceConfig {
+                name: String::new(),
+                origin: "127.0.0.1:22".into(),
+                listen_port: 2222,
+            }],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_listen_port() {
+        let cfg = AgentConfig {
+            services: Vec::new(),
+            tcp_services: vec![TcpServiceConfig {
+                name: "ssh".into(),
+                origin: "127.0.0.1:22".into(),
+                listen_port: 0,
+            }],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_hostname_collision() {
+        let cfg = AgentConfig {
+            services: vec![ServiceConfig {
+                hostname: "ssh".into(),
+                origin: "127.0.0.1:8080".into(),
+                origin_server_name: None,
+                tls_mode: TlsMode::default(),
+                proxy_protocol: None,
+            }],
+            tcp_services: vec![TcpServiceConfig {
+                name: "ssh".into(),
+                origin: "127.0.0.1:22".into(),
+                listen_port: 2222,
+            }],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("collides"), "got: {err}");
     }
 }

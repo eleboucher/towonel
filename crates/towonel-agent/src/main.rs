@@ -79,7 +79,9 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
 
     let agent_config = config::AgentConfig::load()?;
 
-    let service_map = Arc::new(tunnel::ServiceMap::from_config(&agent_config.services).await?);
+    let service_map = Arc::new(
+        tunnel::ServiceMap::from_config(&agent_config.services, &agent_config.tcp_services).await?,
+    );
     service_map.spawn_dns_refresher();
 
     let endpoint = Endpoint::builder(N0)
@@ -120,6 +122,12 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
 
     stateless::register(&ctx).await?;
     stateless::publish_hostnames(&ctx).await?;
+    let desired_tcp_bindings: Vec<(String, u16)> = agent_config
+        .tcp_services
+        .iter()
+        .map(|s| (s.name.clone(), s.listen_port))
+        .collect();
+    stateless::publish_tcp_services(&ctx, &desired_tcp_bindings).await?;
     let heartbeat = stateless::spawn_heartbeat(ctx.clone(), metrics.clone());
 
     if !agent_config.services.is_empty() {

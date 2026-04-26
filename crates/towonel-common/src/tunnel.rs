@@ -8,6 +8,12 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// bulk transfers.
 pub const COPY_BUF_SIZE: usize = 64 * 1024;
 
+/// Marks a stream's AUTHORITY TLV as a raw TCP service rather than a hostname.
+///
+/// The edge writes this prefix; the agent strips it to dispatch to its TCP
+/// origin map. Wire constant — must match exactly on both ends.
+pub const TCP_ROUTE_PREFIX: &str = "tcp:";
+
 /// Zero-copy forward from an iroh `RecvStream` to any `AsyncWrite` via
 /// `read_chunk` (bypasses an intermediate `BufReader` memcpy).
 ///

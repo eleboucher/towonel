@@ -188,6 +188,7 @@ impl Hub {
             invite_hash_key: Arc::clone(&self.p.invite_hash_key),
             heartbeat_nonces: api::new_nonce_cache(),
             edge_sub_nonces: api::new_nonce_cache(),
+            tcp_port_lock: tokio::sync::Mutex::new(()),
         });
 
         spawn_background_loops(&state);

@@ -224,21 +224,7 @@ pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
 
 /// Replay the tenant's entries to find which hostnames are already active.
 async fn fetch_existing_hostnames(ctx: &BootstrapContext) -> anyhow::Result<HashSet<String>> {
-    let url = format!(
-        "{}/v1/tenants/{}/entries",
-        ctx.hub_url.trim_end_matches('/'),
-        ctx.tenant_kp.id(),
-    );
-    let resp = ctx
-        .client
-        .get(&url)
-        .send()
-        .await
-        .with_context(|| format!("failed to GET {url}"))?;
-    let bytes = check_response(resp).await?;
-    let entries: Vec<SignedConfigEntry> =
-        ciborium::from_reader(bytes.as_slice()).context("malformed entries CBOR")?;
-
+    let entries = fetch_tenant_entries(ctx).await?;
     let pk = ctx.tenant_kp.public_key();
     let mut hostnames = HashSet::new();
     for entry in &entries {
@@ -255,6 +241,118 @@ async fn fetch_existing_hostnames(ctx: &BootstrapContext) -> anyhow::Result<Hash
         }
     }
     Ok(hostnames)
+}
+
+/// Replay the tenant's entries to find which TCP service bindings are active.
+async fn fetch_existing_tcp_service_bindings(
+    ctx: &BootstrapContext,
+) -> anyhow::Result<std::collections::HashMap<String, u16>> {
+    let entries = fetch_tenant_entries(ctx).await?;
+    let pk = ctx.tenant_kp.public_key();
+    let mut bindings: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+    for entry in &entries {
+        if let Ok(payload) = entry.verify(pk) {
+            match payload.op {
+                ConfigOp::UpsertTcpService {
+                    service,
+                    listen_port,
+                } => {
+                    bindings.insert(service, listen_port);
+                }
+                ConfigOp::DeleteTcpService { service } => {
+                    bindings.remove(&service);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(bindings)
+}
+
+async fn fetch_tenant_entries(ctx: &BootstrapContext) -> anyhow::Result<Vec<SignedConfigEntry>> {
+    let url = format!(
+        "{}/v1/tenants/{}/entries",
+        ctx.hub_url.trim_end_matches('/'),
+        ctx.tenant_kp.id(),
+    );
+    let resp = ctx
+        .client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("failed to GET {url}"))?;
+    let bytes = check_response(resp).await?;
+    ciborium::from_reader(bytes.as_slice()).context("malformed entries CBOR")
+}
+
+/// Append-only publish of `(service → listen_port)` bindings for this tenant.
+/// Mirrors [`publish_hostnames`]: missing bindings are upserted; bindings the
+/// agent no longer declares are **left alone** so a second agent under the
+/// same tenant doesn't clobber the first agent's declarations on restart.
+/// Removal is via `towonel admin tenant leave`, not by editing env vars.
+///
+/// A change of `listen_port` for an already-published `service` is still
+/// applied (re-upsert).
+pub async fn publish_tcp_services(
+    ctx: &BootstrapContext,
+    desired: &[(String, u16)],
+) -> anyhow::Result<()> {
+    if desired.is_empty() {
+        return Ok(());
+    }
+
+    let existing = fetch_existing_tcp_service_bindings(ctx).await?;
+    let to_upsert: Vec<&(String, u16)> = desired
+        .iter()
+        .filter(|(name, port)| existing.get(name) != Some(port))
+        .collect();
+
+    if to_upsert.is_empty() {
+        info!(
+            count = desired.len(),
+            "tcp service bindings already up to date"
+        );
+        return Ok(());
+    }
+
+    let mut next_seq = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+    let policy = retry_policy();
+
+    for (service, listen_port) in to_upsert {
+        let mut backoff_iter = policy.build();
+        loop {
+            let payload = ConfigPayload {
+                version: 1,
+                tenant_id: ctx.tenant_id,
+                sequence: next_seq,
+                timestamp: towonel_common::time::now_ms(),
+                op: ConfigOp::UpsertTcpService {
+                    service: service.clone(),
+                    listen_port: *listen_port,
+                },
+            };
+            match submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await {
+                Ok(()) => {
+                    info!(%service, listen_port, sequence = next_seq, "published tcp service");
+                    next_seq += 1;
+                    break;
+                }
+                Err(e) if is_sequence_conflict(&e) => {
+                    let Some(delay) = backoff_iter.next() else {
+                        return Err(e);
+                    };
+                    #[allow(clippy::cast_possible_truncation)]
+                    let backoff_ms = delay.as_millis() as u64;
+                    warn!(backoff_ms, %service, "sequence conflict on UpsertTcpService, retrying");
+                    tokio::time::sleep(delay).await;
+                    next_seq =
+                        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Spawn the heartbeat task. Returns the `JoinHandle` so the caller can

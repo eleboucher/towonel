@@ -144,3 +144,99 @@ async fn tunnel_echo_roundtrip() {
     edge_ep.close().await;
     agent_ep.close().await;
 }
+
+/// Asserts the wire contract between edge and agent for TCP-service routes:
+/// the Authority TLV carries `tcp:<service>`, raw bytes round-trip verbatim.
+#[tokio::test]
+async fn tcp_service_handshake_carries_tcp_prefix() {
+    let origin_addr = start_echo_server().await;
+
+    let agent_ep = Endpoint::builder(N0DisableRelay)
+        .alpns(vec![ALPN_TUNNEL.to_vec()])
+        .bind()
+        .await
+        .expect("agent endpoint bind");
+    let agent_id = agent_ep.id();
+    let agent_sockets = agent_ep.bound_sockets();
+    let edge_ep = Endpoint::builder(N0DisableRelay)
+        .bind()
+        .await
+        .expect("edge endpoint bind");
+
+    let mut agent_addr = EndpointAddr::new(agent_id);
+    for sock in &agent_sockets {
+        agent_addr = agent_addr.with_ip_addr(*sock);
+    }
+
+    let (agent_done_tx, agent_done_rx) = oneshot::channel::<Connection>();
+    let agent_handle = {
+        let agent_ep = agent_ep.clone();
+        tokio::spawn(async move {
+            let incoming = agent_ep.accept().await.expect("agent accept incoming");
+            let conn = incoming.await.expect("agent accept connection");
+            let (mut send, mut recv) = conn.accept_bi().await.expect("agent accept bi stream");
+
+            let (route_key, _addrs) = read_handshake(&mut recv)
+                .await
+                .expect("agent read handshake");
+
+            assert!(
+                route_key.starts_with("tcp:"),
+                "TCP-routed streams must carry a `tcp:` prefix in the Authority TLV"
+            );
+            let service_name = route_key.strip_prefix("tcp:").unwrap();
+            assert_eq!(service_name, "forgejo-ssh");
+
+            let origin_stream = tokio::net::TcpStream::connect(origin_addr)
+                .await
+                .expect("agent connect to origin");
+            let (mut origin_read, mut origin_write) = origin_stream.into_split();
+            io::copy(&mut recv, &mut origin_write)
+                .await
+                .expect("quic->origin copy");
+            drop(origin_write);
+            io::copy(&mut origin_read, &mut send)
+                .await
+                .expect("origin->quic copy");
+            let _ = send.finish();
+
+            let _ = agent_done_tx.send(conn);
+        })
+    };
+
+    let test_payload = b"SSH-2.0-towonel-test\r\n";
+    let conn = edge_ep
+        .connect(agent_addr, ALPN_TUNNEL)
+        .await
+        .expect("edge connect to agent");
+    let (mut send, mut recv) = conn.open_bi().await.expect("edge open bi stream");
+
+    let fake_addrs = ClientAddrs {
+        src: "203.0.113.7:54321".parse().unwrap(),
+        dst: "192.0.2.1:2222".parse().unwrap(),
+    };
+    write_handshake(&mut send, "tcp:forgejo-ssh", fake_addrs)
+        .await
+        .expect("edge write tcp handshake");
+
+    send.write_all(test_payload)
+        .await
+        .expect("edge write payload");
+    send.finish().expect("edge finish send");
+
+    let echoed = recv
+        .read_to_end(test_payload.len() + 64)
+        .await
+        .expect("edge read echoed data");
+    assert_eq!(
+        echoed, test_payload,
+        "TCP service must round-trip bytes verbatim"
+    );
+
+    let _agent_conn = agent_done_rx.await.expect("agent done channel");
+    agent_handle.await.expect("agent handler");
+
+    conn.close(0u8.into(), b"done");
+    edge_ep.close().await;
+    agent_ep.close().await;
+}

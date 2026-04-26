@@ -13,6 +13,9 @@ pub mod reject_reason {
     pub const UNSUPPORTED_VERSION: &str = "unsupported_version";
     pub const INVALID_HOSTNAME: &str = "invalid_hostname";
     pub const HOSTNAME_NOT_OWNED: &str = "hostname_not_owned";
+    pub const INVALID_TCP_SERVICE: &str = "invalid_tcp_service";
+    pub const INVALID_TCP_PORT: &str = "invalid_tcp_port";
+    pub const TCP_PORT_CLAIMED: &str = "tcp_port_claimed";
     pub const SEQUENCE_CONFLICT: &str = "sequence_conflict";
     pub const INTERNAL: &str = "internal";
 }

@@ -18,7 +18,9 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use towonel_common::protocol::ALPN_TUNNEL;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
-use towonel_common::tunnel::{COPY_BUF_SIZE, ClientAddrs, forward_quic_to_writer, write_handshake};
+use towonel_common::tunnel::{
+    COPY_BUF_SIZE, ClientAddrs, TCP_ROUTE_PREFIX, forward_quic_to_writer, write_handshake,
+};
 
 use self::acme::AcmeCoordinator;
 use self::health::EdgeMetrics;
@@ -163,11 +165,17 @@ impl Edge {
             "edge listening"
         );
 
-        let mut tasks = Vec::with_capacity(listeners.len());
+        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(listeners.len());
         for listener in listeners {
             let ctx = Arc::clone(&ctx);
             tasks.push(tokio::spawn(accept_loop(listener, ctx)));
         }
+
+        {
+            let ctx = Arc::clone(&ctx);
+            tasks.push(tokio::spawn(tcp_listener_reconciler(ctx)));
+        }
+
         for task in tasks {
             // Accept loops never return `Ok`; only observe task panics.
             if let Err(e) = task.await {
@@ -612,4 +620,254 @@ async fn open_agent_stream(
     let pair = conn.open_bi().await?;
     pool.pin().insert(agent_id, conn);
     Ok(pair)
+}
+
+async fn tcp_listener_reconciler(ctx: Arc<ConnCtx>) {
+    let mut active: std::collections::HashMap<u16, ActiveTcpListener> =
+        std::collections::HashMap::new();
+    let mut rx = ctx.router.subscribe_tcp_listener_changes();
+
+    // Reconcile once at boot so existing bindings come up before we wait on changes.
+    reconcile_tcp_listeners(&ctx, &mut active);
+
+    loop {
+        if rx.changed().await.is_err() {
+            return;
+        }
+        reconcile_tcp_listeners(&ctx, &mut active);
+    }
+}
+
+fn reconcile_tcp_listeners(
+    ctx: &Arc<ConnCtx>,
+    active: &mut std::collections::HashMap<u16, ActiveTcpListener>,
+) {
+    let desired = ctx.router.desired_tcp_listeners();
+
+    let stale_ports: Vec<u16> = active
+        .iter()
+        .filter(|(port, current)| desired.get(port) != Some(&current.binding))
+        .map(|(port, _)| *port)
+        .collect();
+    for port in stale_ports {
+        if let Some(existing) = active.remove(&port) {
+            info!(
+                port,
+                tenant = %existing.binding.tenant,
+                service = %existing.binding.service,
+                "unbinding tcp listener"
+            );
+            existing.handle.abort();
+        }
+    }
+
+    for (port, binding) in &desired {
+        if active.contains_key(port) {
+            continue;
+        }
+        let Some(listener) = bind_tcp_port(*port, binding) else {
+            continue;
+        };
+        info!(
+            port,
+            tenant = %binding.tenant,
+            service = %binding.service,
+            "edge tcp listener bound"
+        );
+        let handle = tokio::spawn(tcp_accept_loop(listener, binding.clone(), Arc::clone(ctx)));
+        active.insert(
+            *port,
+            ActiveTcpListener {
+                binding: binding.clone(),
+                handle,
+            },
+        );
+    }
+}
+
+struct ActiveTcpListener {
+    binding: towonel_common::routing::TcpListenerBinding,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+/// Try IPv6 dual-stack (`IPV6_V6ONLY=0`) first so a single socket accepts both
+/// families; fall back to v4 on hosts without an IPv6 stack. Setting
+/// `set_only_v6(false)` explicitly avoids depending on the `bindv6only`
+/// sysctl default, which differs between Linux and *BSD. Returns `None` on
+/// bind failure — the reconciler retries on the next route table push.
+fn bind_tcp_port(
+    port: u16,
+    binding: &towonel_common::routing::TcpListenerBinding,
+) -> Option<TcpListener> {
+    let v6 = std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port);
+    if let Some(listener) = bind_dual_stack_v6(v6) {
+        return Some(listener);
+    }
+    let v4 = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port);
+    let listener = bind_v4(v4);
+    if listener.is_none() {
+        warn!(
+            port,
+            tenant = %binding.tenant,
+            service = %binding.service,
+            "failed to bind tcp listener on both v6 and v4",
+        );
+    }
+    listener
+}
+
+fn bind_dual_stack_v6(addr: std::net::SocketAddr) -> Option<TcpListener> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .ok()?;
+    let _ = sock.set_only_v6(false);
+    sock.set_nonblocking(true).ok()?;
+    let _ = sock.set_reuse_address(true);
+    sock.bind(&addr.into()).ok()?;
+    sock.listen(1024).ok()?;
+    TcpListener::from_std(sock.into()).ok()
+}
+
+fn bind_v4(addr: std::net::SocketAddr) -> Option<TcpListener> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )
+    .ok()?;
+    sock.set_nonblocking(true).ok()?;
+    let _ = sock.set_reuse_address(true);
+    sock.bind(&addr.into()).ok()?;
+    sock.listen(1024).ok()?;
+    TcpListener::from_std(sock.into()).ok()
+}
+
+async fn tcp_accept_loop(
+    listener: TcpListener,
+    binding: towonel_common::routing::TcpListenerBinding,
+    ctx: Arc<ConnCtx>,
+) {
+    let binding = Arc::new(binding);
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!(service = %binding.service, "tcp accept error: {e}");
+                continue;
+            }
+        };
+        if let Err(e) = tcp_stream.set_nodelay(true) {
+            debug!(%peer_addr, error = %e, "failed to set TCP_NODELAY on tcp service client");
+        }
+        debug!(%peer_addr, service = %binding.service, "accepted tcp service connection");
+
+        let ctx = Arc::clone(&ctx);
+        let binding = Arc::clone(&binding);
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp_connection(tcp_stream, peer_addr, &binding, &ctx).await {
+                debug!(%peer_addr, service = %binding.service, error = %e, "tcp service connection handling failed");
+            }
+        });
+    }
+}
+
+async fn handle_tcp_connection(
+    tcp_stream: TcpStream,
+    peer_addr: std::net::SocketAddr,
+    binding: &towonel_common::routing::TcpListenerBinding,
+    ctx: &ConnCtx,
+) -> anyhow::Result<()> {
+    ctx.metrics.total_connections.inc();
+    ctx.metrics.active_connections.inc();
+    let span = info_span!("tcp", peer = %peer_addr, service = %binding.service);
+    let result = async move {
+        let start = Instant::now();
+
+        let candidates = ctx
+            .router
+            .route_tcp_service(&binding.tenant, &binding.service)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no agents serving tcp service `{}` for tenant `{}`",
+                    binding.service,
+                    binding.tenant
+                )
+            })?;
+        debug!(
+            tenant = %binding.tenant,
+            service = %binding.service,
+            candidates = candidates.len(),
+            "tcp route matched"
+        );
+
+        let (agent_addr, send_stream, recv_stream) =
+            pick_agent_and_open_stream(ctx, candidates).await?;
+        let agent_short = agent_addr.id.fmt_short();
+        debug!(agent = %agent_short, "tcp agent selected, stream opened");
+
+        let client_addrs = ClientAddrs {
+            src: peer_addr,
+            dst: tcp_stream.local_addr()?,
+        };
+
+        let route_key = format!("{TCP_ROUTE_PREFIX}{}", binding.service);
+        let (bytes_in, bytes_out) = pipe_tcp(
+            tcp_stream,
+            &route_key,
+            client_addrs,
+            send_stream,
+            recv_stream,
+        )
+        .await?;
+
+        ctx.metrics.total_bytes_in.inc_by(bytes_in);
+        ctx.metrics.total_bytes_out.inc_by(bytes_out);
+
+        #[allow(clippy::cast_possible_truncation)]
+        let duration_ms = start.elapsed().as_millis() as u64;
+        debug!(
+            service = %binding.service,
+            agent = %agent_short,
+            bytes_in,
+            bytes_out,
+            duration_ms,
+            "tcp connection closed"
+        );
+        Ok(())
+    }
+    .instrument(span)
+    .await;
+
+    ctx.metrics.active_connections.dec();
+    result
+}
+
+async fn pipe_tcp(
+    tcp_stream: TcpStream,
+    route_key: &str,
+    client_addrs: ClientAddrs,
+    mut send_stream: iroh::endpoint::SendStream,
+    mut recv_stream: iroh::endpoint::RecvStream,
+) -> anyhow::Result<(u64, u64)> {
+    write_handshake(&mut send_stream, route_key, client_addrs).await?;
+
+    let (tcp_read, mut tcp_write) = tcp_stream.into_split();
+    let mut tcp_read = tokio::io::BufReader::with_capacity(COPY_BUF_SIZE, tcp_read);
+
+    let c2a = async {
+        let res = tokio::io::copy_buf(&mut tcp_read, &mut send_stream).await;
+        let _ = send_stream.finish();
+        res.unwrap_or(0)
+    };
+    let a2c = async {
+        let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
+        let _ = tcp_write.shutdown().await;
+        res.unwrap_or(0)
+    };
+
+    let (c2a, a2c) = tokio::join!(c2a, a2c);
+    Ok((c2a, a2c))
 }

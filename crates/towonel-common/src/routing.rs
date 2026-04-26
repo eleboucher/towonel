@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +21,27 @@ pub struct RouteTable {
     routes: HashMap<String, HashSet<AgentId>>,
     #[serde(default, skip_serializing_if = "TlsPolicyTable::is_empty")]
     tls_policies: TlsPolicyTable,
+    /// `#[serde(default)]` keeps the wire format compatible with edges and
+    /// hubs that predate TCP service forwarding.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    tcp_routes: HashMap<TcpRouteKey, HashSet<AgentId>>,
+    /// `BTreeMap` so the edge reconciler iterates in deterministic port order.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    tcp_listeners: BTreeMap<u16, TcpListenerBinding>,
+}
+
+/// Struct rather than a `(TenantId, String)` tuple so the CBOR wire form has
+/// stable named fields.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TcpRouteKey {
+    pub tenant: TenantId,
+    pub service: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TcpListenerBinding {
+    pub tenant: TenantId,
+    pub service: String,
 }
 
 impl RouteTable {
@@ -104,38 +125,46 @@ impl RouteTable {
                         );
                     }
                 }
+                ConfigOp::UpsertTcpService {
+                    service,
+                    listen_port,
+                } => {
+                    state.tcp_services.insert(service.clone(), *listen_port);
+                }
+                ConfigOp::DeleteTcpService { service } => {
+                    state.tcp_services.remove(service);
+                }
             }
         }
 
         let mut routes: HashMap<String, HashSet<AgentId>> = HashMap::new();
         let mut tls_policies = TlsPolicyTable::new();
-        for (tenant_id, state) in &tenant_state {
-            // Only allocate a new set when filtering; the `None` path reuses
-            // the existing set by reference. `agents_ref` points at whichever.
-            let filtered: Option<HashSet<AgentId>> = live_agents.map(|live| {
-                state
-                    .agents
-                    .iter()
-                    .filter(|a| live.contains(&(*tenant_id, (*a).clone())))
-                    .cloned()
-                    .collect()
-            });
-            let agents_ref: &HashSet<AgentId> = filtered.as_ref().unwrap_or(&state.agents);
+        let mut tcp_routes: HashMap<TcpRouteKey, HashSet<AgentId>> = HashMap::new();
+        let mut tcp_listeners: BTreeMap<u16, TcpListenerBinding> = BTreeMap::new();
 
-            if agents_ref.is_empty() {
-                continue;
-            }
-            for hostname in &state.hostnames {
-                routes.insert(hostname.clone(), agents_ref.clone());
-                if let Some(mode) = state.tls.get(hostname) {
-                    tls_policies.insert(hostname.clone(), *mode);
-                }
-            }
+        // Sort tenants so cross-tenant port collisions resolve deterministically
+        // (lowest `tenant_id` wins). HashMap iteration is randomized.
+        let mut sorted_tenants: Vec<&TenantId> = tenant_state.keys().collect();
+        sorted_tenants.sort_by_key(|t| *t.as_bytes());
+
+        for tenant_id in sorted_tenants {
+            let state = &tenant_state[tenant_id];
+            materialize_tenant(
+                tenant_id,
+                state,
+                live_agents,
+                &mut routes,
+                &mut tls_policies,
+                &mut tcp_routes,
+                &mut tcp_listeners,
+            );
         }
 
         Self {
             routes,
             tls_policies,
+            tcp_routes,
+            tcp_listeners,
         }
     }
 
@@ -188,7 +217,28 @@ impl RouteTable {
         Self {
             routes,
             tls_policies: TlsPolicyTable::new(),
+            tcp_routes: HashMap::new(),
+            tcp_listeners: BTreeMap::new(),
         }
+    }
+
+    /// Service names are exact-match — no wildcards (unlike `lookup`).
+    #[must_use]
+    pub fn lookup_tcp_service(
+        &self,
+        tenant: &TenantId,
+        service: &str,
+    ) -> Option<&HashSet<AgentId>> {
+        let key = TcpRouteKey {
+            tenant: *tenant,
+            service: service.to_string(),
+        };
+        self.tcp_routes.get(&key).filter(|a| !a.is_empty())
+    }
+
+    #[must_use]
+    pub const fn tcp_listeners(&self) -> &BTreeMap<u16, TcpListenerBinding> {
+        &self.tcp_listeners
     }
 
     /// Check if the table is empty.
@@ -213,12 +263,64 @@ impl RouteTable {
             .collect()
     }
 
-    /// Every unique agent that serves at least one hostname. Intended for
-    /// callers (e.g. the edge's address cache) that need to enumerate the
-    /// active set once per table swap.
+    /// Every unique agent that serves at least one hostname or TCP service.
     #[must_use]
     pub fn unique_agents(&self) -> HashSet<&AgentId> {
-        self.routes.values().flatten().collect()
+        self.routes
+            .values()
+            .flatten()
+            .chain(self.tcp_routes.values().flatten())
+            .collect()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_tenant(
+    tenant_id: &TenantId,
+    state: &TenantState,
+    live_agents: Option<&HashSet<(TenantId, AgentId)>>,
+    routes: &mut HashMap<String, HashSet<AgentId>>,
+    tls_policies: &mut TlsPolicyTable,
+    tcp_routes: &mut HashMap<TcpRouteKey, HashSet<AgentId>>,
+    tcp_listeners: &mut BTreeMap<u16, TcpListenerBinding>,
+) {
+    // Only allocate a new set when filtering; the `None` path reuses the
+    // existing set by reference. `agents_ref` points at whichever.
+    let filtered: Option<HashSet<AgentId>> = live_agents.map(|live| {
+        state
+            .agents
+            .iter()
+            .filter(|a| live.contains(&(*tenant_id, (*a).clone())))
+            .cloned()
+            .collect()
+    });
+    let agents_ref: &HashSet<AgentId> = filtered.as_ref().unwrap_or(&state.agents);
+
+    if agents_ref.is_empty() {
+        return;
+    }
+    for hostname in &state.hostnames {
+        routes.insert(hostname.clone(), agents_ref.clone());
+        if let Some(mode) = state.tls.get(hostname) {
+            tls_policies.insert(hostname.clone(), *mode);
+        }
+    }
+    for (service, listen_port) in &state.tcp_services {
+        tcp_routes.insert(
+            TcpRouteKey {
+                tenant: *tenant_id,
+                service: service.clone(),
+            },
+            agents_ref.clone(),
+        );
+        // First-claim-wins is a backstop: the hub already enforces port
+        // uniqueness at insert time.
+        tcp_listeners
+            .entry(*listen_port)
+            .or_insert_with(|| TcpListenerBinding {
+                tenant: *tenant_id,
+                service: service.clone(),
+            });
     }
 }
 
@@ -228,6 +330,8 @@ struct TenantState {
     hostnames: HashSet<String>,
     agents: HashSet<AgentId>,
     tls: HashMap<String, TlsMode>,
+    /// `service_name -> listen_port`, last-write-wins per service.
+    tcp_services: HashMap<String, u16>,
 }
 
 #[cfg(test)]

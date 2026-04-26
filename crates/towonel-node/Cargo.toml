@@ -48,6 +48,7 @@ rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 instant-acme = { workspace = true }
 arc-swap = { workspace = true }
+socket2 = { workspace = true }
 moka = { workspace = true }
 zeroize = { workspace = true }
 backon = { workspace = true }
