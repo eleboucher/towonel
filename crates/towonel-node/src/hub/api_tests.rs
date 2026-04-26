@@ -2,9 +2,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+use serde::Serialize;
 use serde_json::{Value, json};
 use towonel_common::config_entry::{ConfigOp, ConfigPayload, SignedConfigEntry};
-use towonel_common::identity::{AgentKeypair, TenantKeypair};
+use towonel_common::identity::{AgentKeypair, TenantId, TenantKeypair};
 use towonel_common::invite::{INVITE_ID_LEN, InviteToken};
 
 use super::test_helpers::{
@@ -572,11 +573,19 @@ async fn bootstrap_sources_trusted_edges_from_edge_invites() {
     )
     .await;
     assert_eq!(status, 200, "bootstrap: {body}");
-    let trusted = body["trusted_edges"]
+    let self_edge = hub
+        .state
+        .identity
+        .edge_node_id
+        .expect("test hub has edge_node_id")
+        .to_string();
+    let trusted: Vec<String> = body["trusted_edges"]
         .as_array()
-        .expect("trusted_edges array");
-    assert_eq!(trusted.len(), 1, "expected 1 trusted edge, got {trusted:?}");
-    assert_eq!(trusted[0].as_str().expect("hex"), edge_node_id);
+        .expect("trusted_edges array")
+        .iter()
+        .map(|v| v.as_str().expect("hex").to_string())
+        .collect();
+    assert_eq!(trusted, vec![edge_node_id.clone(), self_edge.clone()]);
     assert_eq!(body["edge_node_id"].as_str().expect("hex"), edge_node_id);
 
     let (status, body) = delete_json(
@@ -597,8 +606,14 @@ async fn bootstrap_sources_trusted_edges_from_edge_invites() {
         None,
     )
     .await;
-    assert!(body["trusted_edges"].as_array().expect("array").is_empty());
-    assert!(body["edge_node_id"].is_null());
+    let trusted: Vec<String> = body["trusted_edges"]
+        .as_array()
+        .expect("trusted_edges array")
+        .iter()
+        .map(|v| v.as_str().expect("hex").to_string())
+        .collect();
+    assert_eq!(trusted, vec![self_edge.clone()]);
+    assert_eq!(body["edge_node_id"].as_str().expect("hex"), self_edge);
 }
 
 #[tokio::test]
@@ -1032,4 +1047,58 @@ async fn upsert_tcp_service_same_tenant_different_service_same_port_rejected() {
         msg.contains("already bound to service `ssh`"),
         "got body: {body}"
     );
+}
+
+#[tokio::test]
+async fn unknown_op_variant_returns_unsupported_op() {
+    #[derive(Serialize)]
+    #[serde(rename_all = "snake_case")]
+    enum FutureOp {
+        SomethingNew { foo: String },
+    }
+    #[derive(Serialize)]
+    struct FuturePayload {
+        version: u16,
+        tenant_id: TenantId,
+        sequence: u64,
+        timestamp: u64,
+        op: FutureOp,
+    }
+
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let payload = FuturePayload {
+        version: 1,
+        tenant_id: tenant.id(),
+        sequence: 1,
+        timestamp: 1_700_000_000_000,
+        op: FutureOp::SomethingNew { foo: "bar".into() },
+    };
+    let mut payload_cbor = Vec::new();
+    ciborium::into_writer(&payload, &mut payload_cbor).unwrap();
+    let signature = Box::new(tenant.sign(&payload_cbor));
+    let entry = SignedConfigEntry {
+        payload_cbor,
+        signature,
+        tenant_id: tenant.id(),
+    };
+    let mut body = Vec::new();
+    ciborium::into_writer(&entry, &mut body).unwrap();
+
+    let resp = client
+        .post(hub.url("/v1/entries"))
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+
+    assert_eq!(status, 400, "got body: {body}");
+    assert_eq!(body["error"]["code"], "unsupported_op", "got body: {body}");
 }
