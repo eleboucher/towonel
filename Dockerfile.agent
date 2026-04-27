@@ -26,13 +26,20 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 ARG ENABLE_SCCACHE
+ARG BUILDARCH
+ARG TARGETARCH
+RUN if [ "$ENABLE_SCCACHE" = "1" ] && [ "$BUILDARCH" != "$TARGETARCH" ]; then \
+        echo "Disabling sccache for emulated build (BUILDARCH=$BUILDARCH TARGETARCH=$TARGETARCH)"; \
+        ENABLE_SCCACHE=0; \
+    fi; echo "$ENABLE_SCCACHE" > /tmp/.sccache_enabled
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/root/.cache/sccache \
     --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
     --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then \
+    SCCACHE_ON="$(cat /tmp/.sccache_enabled)" && \
+    if [ "$SCCACHE_ON" = "1" ]; then \
         export RUSTC_WRAPPER=sccache \
                SCCACHE_BUCKET=sccache \
                SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
@@ -42,7 +49,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
                AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
     fi && \
     cargo chef cook --release --workspace --recipe-path recipe.json && \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats; fi
+    if [ "$SCCACHE_ON" = "1" ]; then sccache --show-stats; fi
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY src/ src/
@@ -51,7 +58,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/root/.cache/sccache \
     --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
     --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then \
+    SCCACHE_ON="$(cat /tmp/.sccache_enabled)" && \
+    if [ "$SCCACHE_ON" = "1" ]; then \
         export RUSTC_WRAPPER=sccache \
                SCCACHE_BUCKET=sccache \
                SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
@@ -62,7 +70,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     fi && \
     cargo build --release -p towonel-agent \
     && cp target/release/towonel-agent /towonel-agent \
-    && { [ "$ENABLE_SCCACHE" = "1" ] && sccache --show-stats || true; }
+    && { [ "$SCCACHE_ON" = "1" ] && sccache --show-stats || true; }
 
 FROM debian:bookworm-slim AS runtime-prep
 RUN groupadd -g 10001 nonroot \
