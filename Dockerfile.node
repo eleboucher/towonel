@@ -1,77 +1,45 @@
 # syntax=docker/dockerfile:1.23
-ARG ENABLE_SCCACHE=0
 
-FROM rust:1.95-bookworm AS chef
-ARG TARGETARCH
-ARG CARGO_CHEF_VERSION=0.1.77
-ARG SCCACHE_VERSION=0.10.0
-RUN case "${TARGETARCH}" in \
-        amd64) RUST_TARGET=x86_64-unknown-linux-musl ;; \
-        arm64) RUST_TARGET=aarch64-unknown-linux-musl ;; \
-        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac \
-    && curl -fsSL "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/cargo-chef-${RUST_TARGET}.tar.xz" \
-       | tar -xJO "cargo-chef-${RUST_TARGET}/cargo-chef" > /usr/local/bin/cargo-chef \
-    && chmod +x /usr/local/bin/cargo-chef \
-    && curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${RUST_TARGET}.tar.gz" \
-       | tar -xzO "sccache-v${SCCACHE_VERSION}-${RUST_TARGET}/sccache" > /usr/local/bin/sccache \
-    && chmod +x /usr/local/bin/sccache
-WORKDIR /app
-
-FROM chef AS planner
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
-COPY crates/ crates/
-COPY src/ src/
-RUN cargo chef prepare --recipe-path recipe.json
-
-FROM chef AS builder
-ARG ENABLE_SCCACHE
+FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS builder
 ARG BUILDARCH
 ARG TARGETARCH
-RUN if [ "$ENABLE_SCCACHE" = "1" ] && [ "$BUILDARCH" != "$TARGETARCH" ]; then \
-        echo "Disabling sccache for emulated build (BUILDARCH=$BUILDARCH TARGETARCH=$TARGETARCH)"; \
-        ENABLE_SCCACHE=0; \
-    fi; echo "$ENABLE_SCCACHE" > /tmp/.sccache_enabled
-COPY --from=planner /app/recipe.json recipe.json
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/root/.cache/sccache \
-    --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
-    --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
-    SCCACHE_ON="$(cat /tmp/.sccache_enabled)" && \
-    if [ "$SCCACHE_ON" = "1" ]; then \
-        export RUSTC_WRAPPER=sccache \
-               SCCACHE_BUCKET=sccache \
-               SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
-               SCCACHE_REGION=us-east-1 \
-               SCCACHE_S3_USE_SSL=true \
-               AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
-               AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
-    fi && \
-    cargo chef cook --release --workspace --recipe-path recipe.json && \
-    if [ "$SCCACHE_ON" = "1" ]; then sccache --show-stats; fi
-COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+ARG ZIG_VERSION=0.16.0
+ARG CARGO_ZIGBUILD_VERSION=0.22.3
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libclang-dev clang \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN case "${BUILDARCH}" in \
+        amd64) HOST_TARGET=x86_64-unknown-linux-musl; ZIG_ARCH=x86_64 ;; \
+        arm64) HOST_TARGET=aarch64-unknown-linux-musl; ZIG_ARCH=aarch64 ;; \
+        *) echo "Unsupported BUILDARCH: ${BUILDARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
+       | tar -xJ -C /opt \
+    && ln -s "/opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
+    && curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/cargo-zigbuild-${HOST_TARGET}.tar.xz" \
+       | tar -xJO "cargo-zigbuild-${HOST_TARGET}/cargo-zigbuild" > /usr/local/bin/cargo-zigbuild \
+    && chmod +x /usr/local/bin/cargo-zigbuild
+
+WORKDIR /app
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY src/ src/
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/root/.cache/sccache \
-    --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
-    --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
-    SCCACHE_ON="$(cat /tmp/.sccache_enabled)" && \
-    if [ "$SCCACHE_ON" = "1" ]; then \
-        export RUSTC_WRAPPER=sccache \
-               SCCACHE_BUCKET=sccache \
-               SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
-               SCCACHE_REGION=us-east-1 \
-               SCCACHE_S3_USE_SSL=true \
-               AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
-               AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
-    fi && \
-    cargo build --release -p towonel-node \
-    && mkdir -p /out \
-    && cp target/release/towonel /out/ \
-    && { [ "$SCCACHE_ON" = "1" ] && sccache --show-stats || true; }
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,id=target-${TARGETARCH} \
+    set -eux && \
+    case "${TARGETARCH}" in \
+        amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+        arm64) RUST_TARGET=aarch64-unknown-linux-gnu ;; \
+        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
+    rustup target add "$RUST_TARGET" && \
+    cargo zigbuild --release --target "$RUST_TARGET" -p towonel-node && \
+    mkdir -p /out && \
+    cp "target/${RUST_TARGET}/release/towonel" /out/
 
 FROM debian:bookworm-slim AS runtime-prep
 RUN apt-get update \
