@@ -58,6 +58,8 @@ normpath = { workspace = true }
 fastrand = { workspace = true }
 envy = { workspace = true }
 tabled = { workspace = true }
+ppp = { workspace = true }
+ipnet = { workspace = true }
 
 [dev-dependencies]
 

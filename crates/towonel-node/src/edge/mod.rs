@@ -1,5 +1,6 @@
 pub mod acme;
 pub mod health;
+pub mod proxy_protocol;
 pub mod router;
 pub mod subscribe;
 pub mod tls;
@@ -26,6 +27,7 @@ use self::acme::AcmeCoordinator;
 use self::health::EdgeMetrics;
 use self::router::Router;
 use self::tls::CertStore;
+use crate::config::ProxyProtocolConfig;
 
 /// Maximum bytes to peek from a TCP connection to extract the TLS `ClientHello`.
 /// 16 KiB is more than enough for any realistic `ClientHello`.
@@ -37,6 +39,12 @@ const PEEK_BUF_SIZE: usize = 16_384;
 /// handshakes even across a congested link.
 const PEEK_MAX_ATTEMPTS: u32 = 20;
 const PEEK_RETRY_DELAY: Duration = Duration::from_millis(5);
+
+/// Bound on how long we'll wait for a trusted peer to deliver its PROXY v2
+/// header. Without this, a misconfigured Caddy or a noisy port-scanner inside
+/// the docker bridge could pin one accept task per stalled connection and
+/// exhaust FDs. Caddy's own listener wrapper defaults to 2s.
+const PROXY_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Pool of iroh QUIC connections, keyed by agent `EndpointId`.
 ///
@@ -74,6 +82,7 @@ pub struct Edge {
     listen_workers: usize,
     tls: Option<TlsState>,
     hub_self_route: Option<Arc<HubSelfRoute>>,
+    proxy_protocol: Arc<ProxyProtocolConfig>,
     metrics: EdgeMetrics,
 }
 
@@ -105,8 +114,15 @@ impl Edge {
             listen_workers: 1,
             tls: None,
             hub_self_route: None,
+            proxy_protocol: Arc::default(),
             metrics: EdgeMetrics::new(),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn with_proxy_protocol(mut self, cfg: ProxyProtocolConfig) -> Self {
+        self.proxy_protocol = Arc::new(cfg);
+        self
     }
 
     #[must_use]
@@ -155,6 +171,7 @@ impl Edge {
             cert_store: self.tls.as_ref().map(|t| t.cert_store.clone()),
             acme: self.tls.as_ref().and_then(|t| t.acme.clone()),
             hub_self_route: self.hub_self_route.clone(),
+            proxy_protocol: Arc::clone(&self.proxy_protocol),
         });
 
         let listeners = bind_listeners(&self.listen_addr, self.listen_workers).await?;
@@ -266,6 +283,7 @@ struct ConnCtx {
     cert_store: Option<CertStore>,
     acme: Option<Arc<AcmeCoordinator>>,
     hub_self_route: Option<Arc<HubSelfRoute>>,
+    proxy_protocol: Arc<ProxyProtocolConfig>,
 }
 
 /// Dispatch a single incoming TCP connection. Peek the SNI, look up the
@@ -372,12 +390,44 @@ fn tls_record_complete(buf: &[u8]) -> bool {
     buf.len() >= 5 && buf.len() >= 5 + usize::from(u16::from_be_bytes([buf[3], buf[4]]))
 }
 
+/// Recover the real client address before TLS peek/handshake. Trusted-CIDR
+/// peers must prepend a PROXY v2 header; untrusted peers are passed through.
+///
+/// While the feature is on, every connection from a trusted CIDR is required
+/// to carry the header — dropping the upstream PROXY config without also
+/// flipping `TOWONEL_EDGE_PROXY_PROTOCOL` off hard-fails every connection.
+async fn resolve_peer_addr(
+    tcp_stream: &mut TcpStream,
+    immediate_peer: std::net::SocketAddr,
+    ctx: &ConnCtx,
+) -> anyhow::Result<std::net::SocketAddr> {
+    if !ctx.proxy_protocol.is_trusted(immediate_peer.ip()) {
+        return Ok(immediate_peer);
+    }
+    let read =
+        tokio::time::timeout(PROXY_PROTOCOL_TIMEOUT, proxy_protocol::read_v2(tcp_stream)).await;
+    match read {
+        Ok(Ok(addr)) => {
+            debug!(advertised = %addr, immediate = %immediate_peer, "PROXY v2 header consumed");
+            Ok(addr)
+        }
+        Ok(Err(e)) => Err(anyhow::anyhow!(
+            "trusted peer {immediate_peer} sent invalid PROXY v2 header: {e}"
+        )),
+        Err(_) => Err(anyhow::anyhow!(
+            "trusted peer {immediate_peer} did not send PROXY v2 header within {PROXY_PROTOCOL_TIMEOUT:?}"
+        )),
+    }
+}
+
 #[allow(clippy::large_futures)]
 async fn handle_connection_inner(
-    tcp_stream: TcpStream,
-    peer_addr: std::net::SocketAddr,
+    mut tcp_stream: TcpStream,
+    immediate_peer: std::net::SocketAddr,
     ctx: &ConnCtx,
 ) -> anyhow::Result<()> {
+    let peer_addr = resolve_peer_addr(&mut tcp_stream, immediate_peer, ctx).await?;
+
     let span = info_span!("conn", peer = %peer_addr);
     async move {
         let start = Instant::now();

@@ -567,7 +567,8 @@ async fn build_edge(
         edge_config.listen_addr.clone(),
         edge_config.health_listen_addr.clone(),
     )
-    .with_listen_workers(edge_config.listen_workers);
+    .with_listen_workers(edge_config.listen_workers)
+    .with_proxy_protocol(edge_config.proxy_protocol.clone());
 
     if let Some(tls) = &edge_config.tls {
         let cert_store = edge::tls::CertStore::new(&tls.cert_dir)?;
