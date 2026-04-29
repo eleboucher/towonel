@@ -1,6 +1,8 @@
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use anyhow::Context;
+use ipnet::IpNet;
 use serde::Deserialize;
 use towonel_common::invite::EdgeInviteToken;
 
@@ -157,6 +159,62 @@ pub struct EdgeConfig {
     /// Number of TCP accept workers sharing `listen_addr` via `SO_REUSEPORT`
     /// on Unix. Raise to scale accept across cores under bursty load.
     pub listen_workers: usize,
+    /// PROXY protocol v2 ingress. Configured via `TOWONEL_EDGE_PROXY_PROTOCOL`
+    /// (bool) and `TOWONEL_EDGE_PROXY_PROTOCOL_TRUSTED` (CSV CIDRs).
+    pub proxy_protocol: ProxyProtocolConfig,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProxyProtocolConfig {
+    pub enabled: bool,
+    pub trusted: Vec<IpNet>,
+}
+
+impl Default for ProxyProtocolConfig {
+    // Seed `trusted` so `..Default::default()` callers don't end up with an
+    // empty allowlist and a silently no-op feature.
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            trusted: default_trusted_cidrs(),
+        }
+    }
+}
+
+impl ProxyProtocolConfig {
+    pub fn is_trusted(&self, ip: IpAddr) -> bool {
+        self.enabled && self.trusted.iter().any(|net| net.contains(&ip))
+    }
+}
+
+/// RFC1918 private ranges + loopback + link-local + unique-local IPv6,
+/// matching what a co-located reverse proxy (Caddy in the same docker network)
+/// would normally come from.
+fn default_trusted_cidrs() -> Vec<IpNet> {
+    [
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "169.254.0.0/16",
+        "::1/128",
+        "fc00::/7",
+        "fe80::/10",
+    ]
+    .iter()
+    .filter_map(|s| s.parse().ok())
+    .collect()
+}
+
+fn parse_cidr_list(raw: &str) -> anyhow::Result<Vec<IpNet>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<IpNet>()
+                .map_err(|e| anyhow::anyhow!("invalid CIDR {s:?}: {e}"))
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -211,6 +269,8 @@ struct RawEnv {
     edge_hub_urls: Option<String>,
     edge_public_addresses: Vec<String>,
     edge_listen_workers: Option<usize>,
+    edge_proxy_protocol: Option<bool>,
+    edge_proxy_protocol_trusted: Option<String>,
     edge_tls_cert_dir: Option<PathBuf>,
     edge_tls_acme_email: Option<String>,
     edge_tls_acme_staging: Option<bool>,
@@ -276,6 +336,16 @@ impl NodeConfig {
                 .map(|t| t.hub_url.trim_end_matches('/').to_string())
         });
 
+        let proxy_protocol = ProxyProtocolConfig {
+            enabled: r.edge_proxy_protocol.unwrap_or(false),
+            trusted: r
+                .edge_proxy_protocol_trusted
+                .as_deref()
+                .map(parse_cidr_list)
+                .transpose()?
+                .unwrap_or_else(default_trusted_cidrs),
+        };
+
         let edge = EdgeConfig {
             enabled: r.edge_enabled.unwrap_or(true),
             listen_addr: r
@@ -288,6 +358,7 @@ impl NodeConfig {
             public_addresses: trim_entries(r.edge_public_addresses),
             tls,
             listen_workers: r.edge_listen_workers.unwrap_or(1),
+            proxy_protocol,
         };
 
         let hub_enabled = r.hub_enabled.unwrap_or(true);
@@ -386,6 +457,55 @@ fn require_https(url: &str, context: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_protocol_disabled_is_never_trusted() {
+        let cfg = ProxyProtocolConfig {
+            enabled: false,
+            trusted: default_trusted_cidrs(),
+        };
+        assert!(!cfg.is_trusted("127.0.0.1".parse().unwrap()));
+        assert!(!cfg.is_trusted("172.21.0.5".parse().unwrap()));
+    }
+
+    #[test]
+    fn proxy_protocol_default_trusts_private_and_loopback() {
+        let cfg = ProxyProtocolConfig {
+            enabled: true,
+            trusted: default_trusted_cidrs(),
+        };
+        assert!(cfg.is_trusted("127.0.0.1".parse().unwrap()));
+        assert!(cfg.is_trusted("10.0.0.5".parse().unwrap()));
+        assert!(cfg.is_trusted("172.21.0.5".parse().unwrap()));
+        assert!(cfg.is_trusted("192.168.1.1".parse().unwrap()));
+        assert!(cfg.is_trusted("::1".parse().unwrap()));
+        assert!(!cfg.is_trusted("8.8.8.8".parse().unwrap()));
+        assert!(!cfg.is_trusted("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn proxy_protocol_custom_cidr_list_overrides_default() {
+        let cfg = ProxyProtocolConfig {
+            enabled: true,
+            trusted: parse_cidr_list("10.0.0.0/24, 192.0.2.5/32").unwrap(),
+        };
+        assert!(cfg.is_trusted("10.0.0.7".parse().unwrap()));
+        assert!(cfg.is_trusted("192.0.2.5".parse().unwrap()));
+        assert!(!cfg.is_trusted("10.0.1.1".parse().unwrap()));
+        assert!(!cfg.is_trusted("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn parse_cidr_list_rejects_garbage() {
+        assert!(parse_cidr_list("not-a-cidr").is_err());
+    }
+
+    // `default_trusted_cidrs` filter_maps `.parse().ok()`, which would silently
+    // drop a typo'd literal. Pinning the count guards against that.
+    #[test]
+    fn default_trusted_cidrs_parses_every_literal() {
+        assert_eq!(default_trusted_cidrs().len(), 8);
+    }
 
     #[test]
     fn trim_entries_normalizes_csv() {
