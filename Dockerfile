@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.23
+# syntax=docker/dockerfile:1.24
 ARG ENABLE_SCCACHE=0
 
 FROM rust:1.95-bookworm AS chef
