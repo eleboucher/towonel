@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.23
+# syntax=docker/dockerfile:1.24
 
 FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS builder
 ARG BUILDARCH
