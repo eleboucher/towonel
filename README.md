@@ -160,6 +160,25 @@ rejected at submission time. Privileged ports (`< 1024`) are blocked by
 default — set `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS=true` on the hub to
 allow them.
 
+## Raw UDP services
+
+The same model works for UDP — DNS, WireGuard, QUIC-over-UDP origins,
+game traffic. Datagrams are framed onto the agent↔edge QUIC tunnel
+(length-prefixed, up to 64 KiB each) and dispatched to a per-client
+session on the agent side. TCP and UDP live in independent port
+namespaces, so `2222/tcp` and `2222/udp` can coexist.
+
+```bash
+TOWONEL_AGENT_UDP_SERVICES='[
+  {"name":"dns",        "origin":"127.0.0.1:5353",   "listen_port":5353},
+  {"name":"wireguard",  "origin":"10.0.0.1:51820",   "listen_port":51820}
+]'
+```
+
+Bindings publish, retire, and respect the privileged-port gate exactly
+like TCP services. Sessions are reaped after 60 s of inactivity on
+either side.
+
 ## Managing tenants and invites
 
 Each invite is a tenant. Revoking an invite removes the tenant.
@@ -234,7 +253,7 @@ and [`examples/node.env.example`](examples/node.env.example).
 | `TOWONEL_HUB_DB_DRIVER`             | `sqlite`       | `sqlite` or `postgres`                                    |
 | `TOWONEL_HUB_DB_DSN`                | `hub.db`       | Connection string                                         |
 | `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`     | Pool size                                                 |
-| `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS`| `false`        | Allow tenants to claim TCP ports below 1024               |
+| `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS`| `false`        | Allow tenants to claim TCP/UDP ports below 1024           |
 
 ### Edge
 
@@ -257,6 +276,7 @@ and [`examples/node.env.example`](examples/node.env.example).
 | `TOWONEL_INVITE_TOKEN`         | **Required.** `tt_inv_2_...` token from the hub   |
 | `TOWONEL_AGENT_SERVICES`       | JSON array of HTTPS services                      |
 | `TOWONEL_AGENT_TCP_SERVICES`   | JSON array of raw TCP services (see above)        |
+| `TOWONEL_AGENT_UDP_SERVICES`   | JSON array of raw UDP services (see above)        |
 | `TOWONEL_AGENT_TRUSTED_EDGES`  | Optional override for trusted edge IDs            |
 
 Service shape:

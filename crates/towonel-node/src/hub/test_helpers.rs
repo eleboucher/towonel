@@ -50,6 +50,7 @@ impl TestHub {
             heartbeat_nonces: new_nonce_cache(),
             edge_sub_nonces: new_nonce_cache(),
             tcp_port_lock: tokio::sync::Mutex::new(()),
+            udp_port_lock: tokio::sync::Mutex::new(()),
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

@@ -23,9 +23,44 @@ struct PostEntryResponse {
     sequence: u64,
 }
 
+/// Discriminator for the two protocol-flavored service ops. Lets the
+/// service-name + port validation share one code path across TCP and UDP.
+#[derive(Clone, Copy)]
+enum ServiceKind {
+    Tcp,
+    Udp,
+}
+
+/// Per-protocol labels + reject reasons, picked once via [`ServiceKind::reasons`].
+struct Reasons {
+    label: &'static str,
+    invalid_service: &'static str,
+    invalid_port: &'static str,
+    port_claimed: &'static str,
+}
+
+impl ServiceKind {
+    const fn reasons(self) -> Reasons {
+        match self {
+            Self::Tcp => Reasons {
+                label: "tcp",
+                invalid_service: reject_reason::INVALID_TCP_SERVICE,
+                invalid_port: reject_reason::INVALID_TCP_PORT,
+                port_claimed: reject_reason::TCP_PORT_CLAIMED,
+            },
+            Self::Udp => Reasons {
+                label: "udp",
+                invalid_service: reject_reason::INVALID_UDP_SERVICE,
+                invalid_port: reject_reason::INVALID_UDP_PORT,
+                port_claimed: reject_reason::UDP_PORT_CLAIMED,
+            },
+        }
+    }
+}
+
 /// Service names are operator-chosen opaque labels — only reject what would
 /// break wire format or logs.
-fn validate_tcp_service_name(name: &str) -> Result<(), &'static str> {
+fn validate_service_name(name: &str) -> Result<(), &'static str> {
     if name.is_empty() {
         return Err("must not be empty");
     }
@@ -52,7 +87,7 @@ fn allow_privileged_ports() -> bool {
     })
 }
 
-fn validate_tcp_listen_port(port: u16) -> Result<(), &'static str> {
+fn validate_listen_port(port: u16) -> Result<(), &'static str> {
     if port == 0 {
         return Err("must not be 0");
     }
@@ -72,15 +107,19 @@ enum PortConflict {
     SameTenantOtherService { service: String },
 }
 
-/// Replay all stored entries to find whether `listen_port` is already claimed.
+/// Replay all stored entries to find whether `listen_port` is already claimed
+/// within `kind`'s port namespace. TCP and UDP are scanned separately because
+/// they live in distinct port namespaces at the OS level.
+///
 /// Skips ML-DSA re-verification — entries in the DB were already verified at
-/// insert time, and re-checking on every `UpsertTcpService` was O(N×crypto)
-/// under the global `tcp_port_lock`.
+/// insert time, and re-checking on every UpsertTcpService/UpsertUdpService
+/// would be O(N×crypto) under the global per-protocol port lock.
 ///
 /// `policy` still gates the scan: entries from removed tenants are ignored,
 /// matching the behavior of `RouteTable::from_entries`.
 async fn find_port_conflict(
     db: &super::super::db::Db,
+    kind: ServiceKind,
     listen_port: u16,
     requesting_tenant: &TenantId,
     requesting_service: &str,
@@ -99,14 +138,25 @@ async fn find_port_conflict(
             continue;
         };
         let map = per_tenant.entry(payload.tenant_id).or_default();
-        match payload.op {
-            ConfigOp::UpsertTcpService {
-                service,
-                listen_port: port,
-            } => {
+        match (kind, payload.op) {
+            (
+                ServiceKind::Tcp,
+                ConfigOp::UpsertTcpService {
+                    service,
+                    listen_port: port,
+                },
+            )
+            | (
+                ServiceKind::Udp,
+                ConfigOp::UpsertUdpService {
+                    service,
+                    listen_port: port,
+                },
+            ) => {
                 map.insert(service, port);
             }
-            ConfigOp::DeleteTcpService { service } => {
+            (ServiceKind::Tcp, ConfigOp::DeleteTcpService { service })
+            | (ServiceKind::Udp, ConfigOp::DeleteUdpService { service }) => {
                 map.remove(&service);
             }
             _ => {}
@@ -130,41 +180,54 @@ async fn find_port_conflict(
     None
 }
 
-async fn validate_tcp_service_op(
+async fn validate_service_op(
     state: &Arc<AppState>,
     payload: &ConfigPayload,
 ) -> Result<(), Response> {
-    let service_name = match &payload.op {
+    let service_op = match &payload.op {
         ConfigOp::UpsertTcpService { service, .. } | ConfigOp::DeleteTcpService { service } => {
-            Some(service)
+            Some((ServiceKind::Tcp, service.as_str()))
+        }
+        ConfigOp::UpsertUdpService { service, .. } | ConfigOp::DeleteUdpService { service } => {
+            Some((ServiceKind::Udp, service.as_str()))
         }
         _ => None,
     };
-    if let Some(service) = service_name
-        && let Err(e) = validate_tcp_service_name(service)
+    if let Some((kind, service)) = service_op
+        && let Err(e) = validate_service_name(service)
     {
-        state
-            .metrics
-            .record_reject(reject_reason::INVALID_TCP_SERVICE);
+        let r = kind.reasons();
+        state.metrics.record_reject(r.invalid_service);
         return Err(invalid_request(format!(
-            "invalid tcp service name `{service}`: {e}"
+            "invalid {} service name `{service}`: {e}",
+            r.label
         )));
     }
 
-    if let ConfigOp::UpsertTcpService {
-        service,
-        listen_port,
-    } = &payload.op
-    {
-        if let Err(e) = validate_tcp_listen_port(*listen_port) {
-            state.metrics.record_reject(reject_reason::INVALID_TCP_PORT);
+    let upsert = match &payload.op {
+        ConfigOp::UpsertTcpService {
+            service,
+            listen_port,
+        } => Some((ServiceKind::Tcp, service.as_str(), *listen_port)),
+        ConfigOp::UpsertUdpService {
+            service,
+            listen_port,
+        } => Some((ServiceKind::Udp, service.as_str(), *listen_port)),
+        _ => None,
+    };
+    if let Some((kind, service, listen_port)) = upsert {
+        let r = kind.reasons();
+        if let Err(e) = validate_listen_port(listen_port) {
+            state.metrics.record_reject(r.invalid_port);
             return Err(invalid_request(format!(
-                "invalid tcp listen_port {listen_port}: {e}"
+                "invalid {} listen_port {listen_port}: {e}",
+                r.label
             )));
         }
         match find_port_conflict(
             &state.db,
-            *listen_port,
+            kind,
+            listen_port,
             &payload.tenant_id,
             service,
             state.policy.load().as_ref(),
@@ -173,17 +236,19 @@ async fn validate_tcp_service_op(
         {
             None => {}
             Some(PortConflict::OtherTenant { tenant }) => {
-                state.metrics.record_reject(reject_reason::TCP_PORT_CLAIMED);
+                state.metrics.record_reject(r.port_claimed);
                 return Err(invalid_request(format!(
-                    "tcp listen_port {listen_port} is already claimed by tenant {tenant}"
+                    "{} listen_port {listen_port} is already claimed by tenant {tenant}",
+                    r.label
                 )));
             }
             Some(PortConflict::SameTenantOtherService {
                 service: other_service,
             }) => {
-                state.metrics.record_reject(reject_reason::TCP_PORT_CLAIMED);
+                state.metrics.record_reject(r.port_claimed);
                 return Err(invalid_request(format!(
-                    "tcp listen_port {listen_port} is already bound to service `{other_service}` for this tenant"
+                    "{} listen_port {listen_port} is already bound to service `{other_service}` for this tenant",
+                    r.label
                 )));
             }
         }
@@ -256,7 +321,9 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         ConfigOp::UpsertAgent { .. }
         | ConfigOp::RevokeAgent { .. }
         | ConfigOp::UpsertTcpService { .. }
-        | ConfigOp::DeleteTcpService { .. } => None,
+        | ConfigOp::DeleteTcpService { .. }
+        | ConfigOp::UpsertUdpService { .. }
+        | ConfigOp::DeleteUdpService { .. } => None,
     };
     if let Some(hostname) = hostname_for_check {
         if let Err(e) = towonel_common::hostname::validate_hostname(hostname) {
@@ -273,14 +340,16 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         }
     }
 
-    // Serialize cross-tenant uniqueness check + insert for TCP-service ops.
-    let _tcp_guard = if matches!(payload.op, ConfigOp::UpsertTcpService { .. }) {
-        Some(state.tcp_port_lock.lock().await)
-    } else {
-        None
+    // Serialize cross-tenant uniqueness check + insert for service-port ops.
+    // TCP and UDP have separate locks because they share no port namespace at
+    // the OS level — there's no point making them contend.
+    let _port_guard = match &payload.op {
+        ConfigOp::UpsertTcpService { .. } => Some(state.tcp_port_lock.lock().await),
+        ConfigOp::UpsertUdpService { .. } => Some(state.udp_port_lock.lock().await),
+        _ => None,
     };
 
-    if let Err(resp) = validate_tcp_service_op(&state, &payload).await {
+    if let Err(resp) = validate_service_op(&state, &payload).await {
         return resp;
     }
 

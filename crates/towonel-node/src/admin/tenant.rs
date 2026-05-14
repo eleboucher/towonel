@@ -77,6 +77,11 @@ pub async fn cmd_keypair_init(key_path: &std::path::Path, kind: KeypairKind) -> 
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "single linear CLI flow: collect owned resources, prompt, submit deletes. \
+              Splitting fragments the user-facing output and the sequence numbering."
+)]
 pub async fn cmd_tenant_leave(
     key_path: Option<PathBuf>,
     hub_url: Option<String>,
@@ -94,6 +99,8 @@ pub async fn cmd_tenant_leave(
     let mut authorized_agents: std::collections::HashSet<AgentId> =
         std::collections::HashSet::default();
     let mut owned_tcp_services: std::collections::HashSet<String> =
+        std::collections::HashSet::default();
+    let mut owned_udp_services: std::collections::HashSet<String> =
         std::collections::HashSet::default();
 
     for entry in &entries {
@@ -121,11 +128,21 @@ pub async fn cmd_tenant_leave(
             ConfigOp::DeleteTcpService { service } => {
                 owned_tcp_services.remove(&service);
             }
+            ConfigOp::UpsertUdpService { service, .. } => {
+                owned_udp_services.insert(service);
+            }
+            ConfigOp::DeleteUdpService { service } => {
+                owned_udp_services.remove(&service);
+            }
         }
     }
 
-    if owned_hostnames.is_empty() && authorized_agents.is_empty() && owned_tcp_services.is_empty() {
-        println!("No hostnames, TCP services, or agents to release for tenant {tenant_id}.");
+    if owned_hostnames.is_empty()
+        && authorized_agents.is_empty()
+        && owned_tcp_services.is_empty()
+        && owned_udp_services.is_empty()
+    {
+        println!("No hostnames, TCP/UDP services, or agents to release for tenant {tenant_id}.");
         return Ok(());
     }
 
@@ -135,6 +152,9 @@ pub async fn cmd_tenant_leave(
     }
     for s in &owned_tcp_services {
         println!("  - DeleteTcpService {s}");
+    }
+    for s in &owned_udp_services {
+        println!("  - DeleteUdpService {s}");
     }
     for a in &authorized_agents {
         println!("  - RevokeAgent {a}");
@@ -164,6 +184,17 @@ pub async fn cmd_tenant_leave(
         )
         .await?;
         println!("- DeleteTcpService {s} (seq {seq})");
+    }
+    for s in owned_udp_services {
+        seq += 1;
+        submit_payload(
+            &hub_url,
+            &keypair,
+            seq,
+            ConfigOp::DeleteUdpService { service: s.clone() },
+        )
+        .await?;
+        println!("- DeleteUdpService {s} (seq {seq})");
     }
     for a in authorized_agents {
         seq += 1;

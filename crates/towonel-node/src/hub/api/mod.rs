@@ -105,6 +105,10 @@ pub struct AppState {
     pub edge_sub_nonces: NonceCache,
     /// Serializes the check+insert window for `UpsertTcpService`.
     pub tcp_port_lock: Mutex<()>,
+    /// Same role as `tcp_port_lock` but for `UpsertUdpService`. UDP ports
+    /// live in their own namespace at the OS so a separate lock keeps the
+    /// fast path independent of TCP claims.
+    pub udp_port_lock: Mutex<()>,
 }
 
 impl AppState {

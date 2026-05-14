@@ -1030,3 +1030,104 @@ fn tcp_service_unique_agents_includes_tcp_only_agents() {
     let agents = table.unique_agents();
     assert!(agents.contains(&agent.id()));
 }
+
+#[test]
+fn udp_service_produces_route_and_listener() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertUdpService {
+                service: "dns".into(),
+                listen_port: 5353,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    let agents = table.lookup_udp_service(&kp.id(), "dns").unwrap();
+    assert!(agents.contains(&agent.id()));
+    let binding = table.udp_listeners().get(&5353).expect("port 5353 bound");
+    assert_eq!(binding.service, "dns");
+    assert_eq!(binding.tenant, kp.id());
+}
+
+#[test]
+fn udp_service_delete_releases_route_and_listener() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertUdpService {
+                service: "dns".into(),
+                listen_port: 5353,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+        sign_entry(
+            &kp,
+            3,
+            ConfigOp::DeleteUdpService {
+                service: "dns".into(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    assert!(table.lookup_udp_service(&kp.id(), "dns").is_none());
+    assert!(table.udp_listeners().is_empty());
+}
+
+#[test]
+fn tcp_and_udp_share_no_port_namespace() {
+    // Same listen_port for distinct protocols must both be valid bindings,
+    // since TCP and UDP are separate at the OS level.
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertTcpService {
+                service: "x-tcp".into(),
+                listen_port: 9000,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertUdpService {
+                service: "x-udp".into(),
+                listen_port: 9000,
+            },
+        ),
+        sign_entry(
+            &kp,
+            3,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    assert!(table.tcp_listeners().get(&9000).is_some());
+    assert!(table.udp_listeners().get(&9000).is_some());
+}

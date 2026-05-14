@@ -14,6 +14,14 @@ pub const COPY_BUF_SIZE: usize = 64 * 1024;
 /// origin map. Wire constant — must match exactly on both ends.
 pub const TCP_ROUTE_PREFIX: &str = "tcp:";
 
+/// UDP equivalent of [`TCP_ROUTE_PREFIX`]. The payload on a `udp:` stream
+/// is a sequence of [`write_datagram_frame`] frames.
+pub const UDP_ROUTE_PREFIX: &str = "udp:";
+
+/// Cap on individual UDP datagram length carried over the QUIC pipe. Matches
+/// the IPv4 datagram limit; anything larger is a sender configuration error.
+pub const MAX_UDP_DATAGRAM: usize = 65_535;
+
 /// Zero-copy forward from an iroh `RecvStream` to any `AsyncWrite` via
 /// `read_chunk` (bypasses an intermediate `BufReader` memcpy).
 ///
@@ -186,6 +194,52 @@ fn unmap_v4(addr: SocketAddr) -> SocketAddr {
             .map_or(addr, |v4| SocketAddr::new(IpAddr::V4(v4), v6.port())),
         SocketAddr::V4(_) => addr,
     }
+}
+
+/// Write one length-prefixed UDP datagram (`u16` big-endian length + bytes).
+pub async fn write_datagram_frame<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    datagram: &[u8],
+) -> std::io::Result<()> {
+    if datagram.len() > MAX_UDP_DATAGRAM {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "udp datagram of {} bytes exceeds {MAX_UDP_DATAGRAM}-byte cap",
+                datagram.len()
+            ),
+        ));
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "length is already bounded to MAX_UDP_DATAGRAM (65_535)"
+    )]
+    let len = datagram.len() as u16;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(datagram).await
+}
+
+/// Read one length-prefixed datagram into `buf`, returning bytes written.
+/// `UnexpectedEof` here signals a clean half-close between frames.
+pub async fn read_datagram_frame<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    let mut len_bytes = [0u8; 2];
+    reader.read_exact(&mut len_bytes).await?;
+    let len = usize::from(u16::from_be_bytes(len_bytes));
+    if len > buf.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("udp frame length {len} exceeds buffer ({})", buf.len()),
+        ));
+    }
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "len was just checked against buf.len() above"
+    )]
+    reader.read_exact(&mut buf[..len]).await?;
+    Ok(len)
 }
 
 #[cfg(test)]

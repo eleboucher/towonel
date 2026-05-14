@@ -17,6 +17,9 @@ pub mod reject_reason {
     pub const INVALID_TCP_SERVICE: &str = "invalid_tcp_service";
     pub const INVALID_TCP_PORT: &str = "invalid_tcp_port";
     pub const TCP_PORT_CLAIMED: &str = "tcp_port_claimed";
+    pub const INVALID_UDP_SERVICE: &str = "invalid_udp_service";
+    pub const INVALID_UDP_PORT: &str = "invalid_udp_port";
+    pub const UDP_PORT_CLAIMED: &str = "udp_port_claimed";
     pub const SEQUENCE_CONFLICT: &str = "sequence_conflict";
     pub const INTERNAL: &str = "internal";
 }

@@ -22,12 +22,16 @@ pub struct RouteTable {
     #[serde(default, skip_serializing_if = "TlsPolicyTable::is_empty")]
     tls_policies: TlsPolicyTable,
     /// `#[serde(default)]` keeps the wire format compatible with edges and
-    /// hubs that predate TCP service forwarding.
+    /// hubs that predate TCP/UDP service forwarding.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     tcp_routes: HashMap<TcpRouteKey, HashSet<AgentId>>,
     /// `BTreeMap` so the edge reconciler iterates in deterministic port order.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     tcp_listeners: BTreeMap<u16, TcpListenerBinding>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    udp_routes: HashMap<UdpRouteKey, HashSet<AgentId>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    udp_listeners: BTreeMap<u16, UdpListenerBinding>,
 }
 
 /// Struct rather than a `(TenantId, String)` tuple so the CBOR wire form has
@@ -43,6 +47,11 @@ pub struct TcpListenerBinding {
     pub tenant: TenantId,
     pub service: String,
 }
+
+/// UDP routing reuses the TCP key/binding shapes (`{tenant, service}`); the
+/// protocol is implicit in which map the entry lives in.
+pub type UdpRouteKey = TcpRouteKey;
+pub type UdpListenerBinding = TcpListenerBinding;
 
 impl RouteTable {
     /// Materialize a route table by replaying signed config entries in order.
@@ -90,57 +99,15 @@ impl RouteTable {
             };
 
             let state = tenant_state.entry(payload.tenant_id).or_default();
-
-            match &payload.op {
-                ConfigOp::UpsertHostname { hostname } => {
-                    if policy.is_hostname_allowed(&payload.tenant_id, hostname) {
-                        state.hostnames.insert(hostname.to_lowercase());
-                    } else {
-                        tracing::warn!(
-                            tenant = %payload.tenant_id,
-                            %hostname,
-                            "skipping unauthorized hostname claim"
-                        );
-                    }
-                }
-                ConfigOp::DeleteHostname { hostname } => {
-                    let key = hostname.to_lowercase();
-                    state.hostnames.remove(&key);
-                    state.tls.remove(&key);
-                }
-                ConfigOp::UpsertAgent { agent_id } => {
-                    state.agents.insert(agent_id.clone());
-                }
-                ConfigOp::RevokeAgent { agent_id } => {
-                    state.agents.remove(agent_id);
-                }
-                ConfigOp::SetHostnameTls { hostname, mode } => {
-                    if policy.is_hostname_allowed(&payload.tenant_id, hostname) {
-                        state.tls.insert(hostname.to_lowercase(), *mode);
-                    } else {
-                        tracing::warn!(
-                            tenant = %payload.tenant_id,
-                            %hostname,
-                            "skipping unauthorized TLS policy"
-                        );
-                    }
-                }
-                ConfigOp::UpsertTcpService {
-                    service,
-                    listen_port,
-                } => {
-                    state.tcp_services.insert(service.clone(), *listen_port);
-                }
-                ConfigOp::DeleteTcpService { service } => {
-                    state.tcp_services.remove(service);
-                }
-            }
+            apply_op(state, &payload.op, &payload.tenant_id, policy);
         }
 
         let mut routes: HashMap<String, HashSet<AgentId>> = HashMap::new();
         let mut tls_policies = TlsPolicyTable::new();
         let mut tcp_routes: HashMap<TcpRouteKey, HashSet<AgentId>> = HashMap::new();
         let mut tcp_listeners: BTreeMap<u16, TcpListenerBinding> = BTreeMap::new();
+        let mut udp_routes: HashMap<UdpRouteKey, HashSet<AgentId>> = HashMap::new();
+        let mut udp_listeners: BTreeMap<u16, UdpListenerBinding> = BTreeMap::new();
 
         // Sort tenants so cross-tenant port collisions resolve deterministically
         // (lowest `tenant_id` wins). HashMap iteration is randomized.
@@ -159,6 +126,8 @@ impl RouteTable {
                 &mut tls_policies,
                 &mut tcp_routes,
                 &mut tcp_listeners,
+                &mut udp_routes,
+                &mut udp_listeners,
             );
         }
 
@@ -167,6 +136,8 @@ impl RouteTable {
             tls_policies,
             tcp_routes,
             tcp_listeners,
+            udp_routes,
+            udp_listeners,
         }
     }
 
@@ -221,6 +192,8 @@ impl RouteTable {
             tls_policies: TlsPolicyTable::new(),
             tcp_routes: HashMap::new(),
             tcp_listeners: BTreeMap::new(),
+            udp_routes: HashMap::new(),
+            udp_listeners: BTreeMap::new(),
         }
     }
 
@@ -241,6 +214,24 @@ impl RouteTable {
     #[must_use]
     pub const fn tcp_listeners(&self) -> &BTreeMap<u16, TcpListenerBinding> {
         &self.tcp_listeners
+    }
+
+    #[must_use]
+    pub fn lookup_udp_service(
+        &self,
+        tenant: &TenantId,
+        service: &str,
+    ) -> Option<&HashSet<AgentId>> {
+        let key = UdpRouteKey {
+            tenant: *tenant,
+            service: service.to_string(),
+        };
+        self.udp_routes.get(&key).filter(|a| !a.is_empty())
+    }
+
+    #[must_use]
+    pub const fn udp_listeners(&self) -> &BTreeMap<u16, UdpListenerBinding> {
+        &self.udp_listeners
     }
 
     /// Check if the table is empty.
@@ -265,17 +256,87 @@ impl RouteTable {
             .collect()
     }
 
-    /// Every unique agent that serves at least one hostname or TCP service.
+    /// Every unique agent that serves at least one hostname or TCP/UDP service.
     #[must_use]
     pub fn unique_agents(&self) -> HashSet<&AgentId> {
         self.routes
             .values()
             .flatten()
             .chain(self.tcp_routes.values().flatten())
+            .chain(self.udp_routes.values().flatten())
             .collect()
     }
 }
 
+/// Fold one signed-op into the per-tenant accumulator. Ownership-policy
+/// gates apply here so unauthorized hostname/TLS claims don't reach the
+/// materialized table.
+fn apply_op(
+    state: &mut TenantState,
+    op: &ConfigOp,
+    tenant_id: &TenantId,
+    policy: &OwnershipPolicy,
+) {
+    match op {
+        ConfigOp::UpsertHostname { hostname } => {
+            if policy.is_hostname_allowed(tenant_id, hostname) {
+                state.hostnames.insert(hostname.to_lowercase());
+            } else {
+                tracing::warn!(
+                    tenant = %tenant_id,
+                    %hostname,
+                    "skipping unauthorized hostname claim"
+                );
+            }
+        }
+        ConfigOp::DeleteHostname { hostname } => {
+            let key = hostname.to_lowercase();
+            state.hostnames.remove(&key);
+            state.tls.remove(&key);
+        }
+        ConfigOp::UpsertAgent { agent_id } => {
+            state.agents.insert(agent_id.clone());
+        }
+        ConfigOp::RevokeAgent { agent_id } => {
+            state.agents.remove(agent_id);
+        }
+        ConfigOp::SetHostnameTls { hostname, mode } => {
+            if policy.is_hostname_allowed(tenant_id, hostname) {
+                state.tls.insert(hostname.to_lowercase(), *mode);
+            } else {
+                tracing::warn!(
+                    tenant = %tenant_id,
+                    %hostname,
+                    "skipping unauthorized TLS policy"
+                );
+            }
+        }
+        ConfigOp::UpsertTcpService {
+            service,
+            listen_port,
+        } => {
+            state.tcp_services.insert(service.clone(), *listen_port);
+        }
+        ConfigOp::DeleteTcpService { service } => {
+            state.tcp_services.remove(service);
+        }
+        ConfigOp::UpsertUdpService {
+            service,
+            listen_port,
+        } => {
+            state.udp_services.insert(service.clone(), *listen_port);
+        }
+        ConfigOp::DeleteUdpService { service } => {
+            state.udp_services.remove(service);
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "materializing every route surface for one tenant is naturally wide; \
+              wrapping these into a struct just shifts the noise without simplifying"
+)]
 fn materialize_tenant(
     tenant_id: &TenantId,
     state: &TenantState,
@@ -284,6 +345,8 @@ fn materialize_tenant(
     tls_policies: &mut TlsPolicyTable,
     tcp_routes: &mut HashMap<TcpRouteKey, HashSet<AgentId>>,
     tcp_listeners: &mut BTreeMap<u16, TcpListenerBinding>,
+    udp_routes: &mut HashMap<UdpRouteKey, HashSet<AgentId>>,
+    udp_listeners: &mut BTreeMap<u16, UdpListenerBinding>,
 ) {
     // Only allocate a new set when filtering; the `None` path reuses the
     // existing set by reference. `agents_ref` points at whichever.
@@ -323,6 +386,21 @@ fn materialize_tenant(
                 service: service.clone(),
             });
     }
+    for (service, listen_port) in &state.udp_services {
+        udp_routes.insert(
+            UdpRouteKey {
+                tenant: *tenant_id,
+                service: service.clone(),
+            },
+            agents_ref.clone(),
+        );
+        udp_listeners
+            .entry(*listen_port)
+            .or_insert_with(|| UdpListenerBinding {
+                tenant: *tenant_id,
+                service: service.clone(),
+            });
+    }
 }
 
 /// Per-tenant state accumulated while replaying config entries.
@@ -333,6 +411,8 @@ struct TenantState {
     tls: HashMap<String, TlsMode>,
     /// `service_name -> listen_port`, last-write-wins per service.
     tcp_services: HashMap<String, u16>,
+    /// Same shape as `tcp_services` but for UDP listeners.
+    udp_services: HashMap<String, u16>,
 }
 
 #[cfg(test)]
