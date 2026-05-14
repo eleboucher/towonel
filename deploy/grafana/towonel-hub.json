@@ -19,7 +19,7 @@
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "query": {
-          "query": "label_values(towonel_edge_active_connections, instance)",
+          "query": "label_values(process_resident_memory_bytes, instance)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -482,7 +482,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "process_resident_memory_bytes{job=~\"towonel-hub|$instance\"}", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "process_resident_memory_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
       ]
     },
     {
@@ -503,7 +503,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "rate(process_cpu_seconds_total[5m])", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}"}
       ]
     },
     {
@@ -525,8 +525,8 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "process_open_fds", "legendFormat": "{{instance}} open"},
-        {"refId": "B", "expr": "process_max_fds", "legendFormat": "{{instance}} max"}
+        {"refId": "A", "expr": "process_open_fds{instance=~\"$instance\"}", "legendFormat": "{{instance}} open"},
+        {"refId": "B", "expr": "process_max_fds{instance=~\"$instance\"}", "legendFormat": "{{instance}} max"}
       ]
     },
     {
@@ -547,7 +547,7 @@
         "textMode": "auto"
       },
       "targets": [
-        {"refId": "A", "expr": "time() - process_start_time_seconds", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "time() - process_start_time_seconds{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
       ]
     }
   ]
