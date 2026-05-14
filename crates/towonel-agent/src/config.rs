@@ -9,12 +9,14 @@ pub struct AgentConfig {
     pub services: Vec<ServiceConfig>,
     #[serde(default)]
     pub tcp_services: Vec<TcpServiceConfig>,
+    #[serde(default)]
+    pub udp_services: Vec<UdpServiceConfig>,
 }
 
 /// `listen_port` is the public port the edge will bind on the agent's behalf
 /// (the agent self-publishes the binding so the VPS admin doesn't configure
-/// anything). The edge tags forwarded streams with `tcp:<name>` in the
-/// PROXY v2 Authority TLV; this agent dispatches on that prefix.
+/// anything). The edge tags forwarded streams with `tcp:<name>` / `udp:<name>`
+/// in the PROXY v2 Authority TLV; this agent dispatches on that prefix.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcpServiceConfig {
@@ -22,6 +24,8 @@ pub struct TcpServiceConfig {
     pub origin: String,
     pub listen_port: u16,
 }
+
+pub type UdpServiceConfig = TcpServiceConfig;
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -79,8 +83,9 @@ impl Default for ProxyProtocol {
 }
 
 impl AgentConfig {
-    /// Load `services` from `TOWONEL_AGENT_SERVICES` and `tcp_services` from
-    /// `TOWONEL_AGENT_TCP_SERVICES` (each JSON-encoded array). Empty when the
+    /// Load `services` from `TOWONEL_AGENT_SERVICES`, `tcp_services` from
+    /// `TOWONEL_AGENT_TCP_SERVICES`, and `udp_services` from
+    /// `TOWONEL_AGENT_UDP_SERVICES` (each JSON-encoded array). Empty when the
     /// env var is unset.
     pub fn load() -> anyhow::Result<Self> {
         let services = std::env::var("TOWONEL_AGENT_SERVICES")
@@ -93,51 +98,75 @@ impl AgentConfig {
             .map(|v| serde_json::from_str::<Vec<TcpServiceConfig>>(&v))
             .transpose()?
             .unwrap_or_default();
+        let udp_services = std::env::var("TOWONEL_AGENT_UDP_SERVICES")
+            .ok()
+            .map(|v| serde_json::from_str::<Vec<UdpServiceConfig>>(&v))
+            .transpose()?
+            .unwrap_or_default();
 
         let cfg = Self {
             services,
             tcp_services,
+            udp_services,
         };
         cfg.validate()?;
         Ok(cfg)
     }
 
-    /// Reject configs where two TCP services would map to the same port (the
-    /// hub would accept only one), or where a TCP service name collides with a
-    /// hostname (the agent's stream dispatcher would pick one arbitrarily).
+    /// Reject configs where two services in the same protocol would map to the
+    /// same `listen_port` (the hub would accept only one), or where a service
+    /// name collides with a hostname (the agent's stream dispatcher would pick
+    /// one arbitrarily). TCP and UDP have independent port namespaces.
     pub fn validate(&self) -> anyhow::Result<()> {
-        let mut seen_tcp = std::collections::HashSet::new();
-        let mut seen_port = std::collections::HashSet::new();
-        for svc in &self.tcp_services {
-            if svc.name.is_empty() {
-                anyhow::bail!("tcp_service name must not be empty");
-            }
-            if svc.listen_port == 0 {
-                anyhow::bail!("tcp_service `{}` listen_port must not be 0", svc.name);
-            }
-            if !seen_tcp.insert(svc.name.as_str()) {
-                anyhow::bail!("duplicate tcp_service name `{}`", svc.name);
-            }
-            if !seen_port.insert(svc.listen_port) {
-                anyhow::bail!(
-                    "duplicate tcp_service listen_port {} (used by `{}`)",
-                    svc.listen_port,
-                    svc.name
-                );
-            }
-        }
         let hostnames: std::collections::HashSet<&str> =
             self.services.iter().map(|s| s.hostname.as_str()).collect();
-        for svc in &self.tcp_services {
-            if hostnames.contains(svc.name.as_str()) {
+        let tcp_names = validate_raw_services("tcp_service", &self.tcp_services, &hostnames)?;
+        let udp_names = validate_raw_services("udp_service", &self.udp_services, &hostnames)?;
+        for name in &udp_names {
+            if tcp_names.contains(name) {
                 anyhow::bail!(
-                    "tcp_service name `{}` collides with a configured hostname",
-                    svc.name
+                    "udp_service name `{name}` collides with a tcp_service of the same name"
                 );
             }
         }
         Ok(())
     }
+}
+
+/// Returns the set of declared names so the caller can cross-check against
+/// the other protocol's set (TCP vs UDP name collisions).
+fn validate_raw_services<'a>(
+    label: &str,
+    services: &'a [TcpServiceConfig],
+    hostnames: &std::collections::HashSet<&str>,
+) -> anyhow::Result<std::collections::HashSet<&'a str>> {
+    let mut names = std::collections::HashSet::new();
+    let mut ports = std::collections::HashSet::new();
+    for svc in services {
+        if svc.name.is_empty() {
+            anyhow::bail!("{label} name must not be empty");
+        }
+        if svc.listen_port == 0 {
+            anyhow::bail!("{label} `{}` listen_port must not be 0", svc.name);
+        }
+        if !names.insert(svc.name.as_str()) {
+            anyhow::bail!("duplicate {label} name `{}`", svc.name);
+        }
+        if !ports.insert(svc.listen_port) {
+            anyhow::bail!(
+                "duplicate {label} listen_port {} (used by `{}`)",
+                svc.listen_port,
+                svc.name
+            );
+        }
+        if hostnames.contains(svc.name.as_str()) {
+            anyhow::bail!(
+                "{label} name `{}` collides with a configured hostname",
+                svc.name
+            );
+        }
+    }
+    Ok(names)
 }
 
 #[cfg(test)]
@@ -201,6 +230,7 @@ mod tests {
     fn validate_rejects_duplicate_tcp_service_names() {
         let cfg = AgentConfig {
             services: Vec::new(),
+            udp_services: Vec::new(),
             tcp_services: vec![
                 TcpServiceConfig {
                     name: "ssh".into(),
@@ -222,6 +252,7 @@ mod tests {
     fn validate_rejects_duplicate_listen_ports() {
         let cfg = AgentConfig {
             services: Vec::new(),
+            udp_services: Vec::new(),
             tcp_services: vec![
                 TcpServiceConfig {
                     name: "ssh".into(),
@@ -244,6 +275,7 @@ mod tests {
     fn validate_rejects_empty_tcp_service_name() {
         let cfg = AgentConfig {
             services: Vec::new(),
+            udp_services: Vec::new(),
             tcp_services: vec![TcpServiceConfig {
                 name: String::new(),
                 origin: "127.0.0.1:22".into(),
@@ -257,6 +289,7 @@ mod tests {
     fn validate_rejects_zero_listen_port() {
         let cfg = AgentConfig {
             services: Vec::new(),
+            udp_services: Vec::new(),
             tcp_services: vec![TcpServiceConfig {
                 name: "ssh".into(),
                 origin: "127.0.0.1:22".into(),
@@ -264,6 +297,51 @@ mod tests {
             }],
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_udp_service_colliding_with_tcp_service() {
+        let cfg = AgentConfig {
+            services: Vec::new(),
+            tcp_services: vec![TcpServiceConfig {
+                name: "wg".into(),
+                origin: "127.0.0.1:51820".into(),
+                listen_port: 51820,
+            }],
+            udp_services: vec![UdpServiceConfig {
+                name: "wg".into(),
+                origin: "127.0.0.1:51820".into(),
+                listen_port: 51820,
+            }],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("collides"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_distinct_udp_service() {
+        let cfg = AgentConfig {
+            services: Vec::new(),
+            tcp_services: Vec::new(),
+            udp_services: vec![UdpServiceConfig {
+                name: "dns".into(),
+                origin: "127.0.0.1:5353".into(),
+                listen_port: 5353,
+            }],
+        };
+        cfg.validate().expect("valid udp_service should pass");
+    }
+
+    #[test]
+    fn udp_services_json_parses() {
+        let json = r#"[
+            {"name":"dns","origin":"127.0.0.1:5353","listen_port":5353},
+            {"name":"wg","origin":"10.0.0.1:51820","listen_port":51820}
+        ]"#;
+        let svcs: Vec<UdpServiceConfig> = serde_json::from_str(json).unwrap();
+        assert_eq!(svcs.len(), 2);
+        assert_eq!(svcs[0].name, "dns");
+        assert_eq!(svcs[1].listen_port, 51820);
     }
 
     #[test]
@@ -281,6 +359,7 @@ mod tests {
                 origin: "127.0.0.1:22".into(),
                 listen_port: 2222,
             }],
+            udp_services: Vec::new(),
         };
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("collides"), "got: {err}");

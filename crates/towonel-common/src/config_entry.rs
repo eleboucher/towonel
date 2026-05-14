@@ -39,6 +39,16 @@ pub enum ConfigOp {
     DeleteTcpService {
         service: String,
     },
+    /// Same semantics as [`Self::UpsertTcpService`] but on a UDP listener.
+    /// TCP/UDP share the same port-namespace at the hub so a port can't be
+    /// both — clearer error than letting two flows clobber each other.
+    UpsertUdpService {
+        service: String,
+        listen_port: u16,
+    },
+    DeleteUdpService {
+        service: String,
+    },
 }
 
 /// The payload of a config entry, before signing.
@@ -316,6 +326,13 @@ mod tests {
             },
             ConfigOp::DeleteTcpService {
                 service: "forgejo-ssh".into(),
+            },
+            ConfigOp::UpsertUdpService {
+                service: "dns".into(),
+                listen_port: 5353,
+            },
+            ConfigOp::DeleteUdpService {
+                service: "dns".into(),
             },
         ];
 

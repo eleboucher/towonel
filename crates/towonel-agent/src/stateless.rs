@@ -246,26 +246,89 @@ async fn fetch_existing_hostnames(ctx: &BootstrapContext) -> anyhow::Result<Hash
     Ok(hostnames)
 }
 
-/// Replay the tenant's entries to find which TCP service bindings are active.
-async fn fetch_existing_tcp_service_bindings(
+#[derive(Clone, Copy)]
+enum ServiceProtocol {
+    Tcp,
+    Udp,
+}
+
+impl ServiceProtocol {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+
+    const fn upsert(self, service: String, listen_port: u16) -> ConfigOp {
+        match self {
+            Self::Tcp => ConfigOp::UpsertTcpService {
+                service,
+                listen_port,
+            },
+            Self::Udp => ConfigOp::UpsertUdpService {
+                service,
+                listen_port,
+            },
+        }
+    }
+
+    /// Pull `(service, port)` out of an Upsert, or `service` out of a Delete,
+    /// for this protocol. Returns `None` for any other op so the entry replay
+    /// can skip it cleanly.
+    fn classify(self, op: ConfigOp) -> Option<ServiceMutation> {
+        match (self, op) {
+            (
+                Self::Tcp,
+                ConfigOp::UpsertTcpService {
+                    service,
+                    listen_port,
+                },
+            )
+            | (
+                Self::Udp,
+                ConfigOp::UpsertUdpService {
+                    service,
+                    listen_port,
+                },
+            ) => Some(ServiceMutation::Upsert {
+                service,
+                listen_port,
+            }),
+            (Self::Tcp, ConfigOp::DeleteTcpService { service })
+            | (Self::Udp, ConfigOp::DeleteUdpService { service }) => {
+                Some(ServiceMutation::Delete { service })
+            }
+            _ => None,
+        }
+    }
+}
+
+enum ServiceMutation {
+    Upsert { service: String, listen_port: u16 },
+    Delete { service: String },
+}
+
+async fn fetch_existing_service_bindings(
     ctx: &BootstrapContext,
+    proto: ServiceProtocol,
 ) -> anyhow::Result<std::collections::HashMap<String, u16>> {
     let entries = fetch_tenant_entries(ctx).await?;
     let pk = ctx.tenant_kp.public_key();
     let mut bindings: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
     for entry in &entries {
         if let Ok(payload) = entry.verify(pk) {
-            match payload.op {
-                ConfigOp::UpsertTcpService {
+            match proto.classify(payload.op) {
+                Some(ServiceMutation::Upsert {
                     service,
                     listen_port,
-                } => {
+                }) => {
                     bindings.insert(service, listen_port);
                 }
-                ConfigOp::DeleteTcpService { service } => {
+                Some(ServiceMutation::Delete { service }) => {
                     bindings.remove(&service);
                 }
-                _ => {}
+                None => {}
             }
         }
     }
@@ -295,16 +358,19 @@ async fn fetch_tenant_entries(ctx: &BootstrapContext) -> anyhow::Result<Vec<Sign
 /// Removal is via `towonel admin tenant leave`, not by editing env vars.
 ///
 /// A change of `listen_port` for an already-published `service` is still
-/// applied (re-upsert).
-pub async fn publish_tcp_services(
+/// applied (re-upsert). On an old hub that doesn't recognize the protocol
+/// variant, the publish is skipped (warning logged) so mixed-protocol agents
+/// keep working against legacy hubs.
+async fn publish_services(
     ctx: &BootstrapContext,
     desired: &[(String, u16)],
+    proto: ServiceProtocol,
 ) -> anyhow::Result<()> {
     if desired.is_empty() {
         return Ok(());
     }
 
-    let existing = fetch_existing_tcp_service_bindings(ctx).await?;
+    let existing = fetch_existing_service_bindings(ctx, proto).await?;
     let to_upsert: Vec<&(String, u16)> = desired
         .iter()
         .filter(|(name, port)| existing.get(name) != Some(port))
@@ -312,8 +378,9 @@ pub async fn publish_tcp_services(
 
     if to_upsert.is_empty() {
         info!(
+            proto = proto.label(),
             count = desired.len(),
-            "tcp service bindings already up to date"
+            "service bindings already up to date"
         );
         return Ok(());
     }
@@ -329,14 +396,11 @@ pub async fn publish_tcp_services(
                 tenant_id: ctx.tenant_id,
                 sequence: next_seq,
                 timestamp: towonel_common::time::now_ms(),
-                op: ConfigOp::UpsertTcpService {
-                    service: service.clone(),
-                    listen_port: *listen_port,
-                },
+                op: proto.upsert(service.clone(), *listen_port),
             };
             match submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await {
                 Ok(()) => {
-                    info!(%service, listen_port, sequence = next_seq, "published tcp service");
+                    info!(proto = proto.label(), %service, listen_port, sequence = next_seq, "published service");
                     next_seq += 1;
                     break;
                 }
@@ -349,18 +413,17 @@ pub async fn publish_tcp_services(
                         reason = "backoff delay is bounded well under u64::MAX millis"
                     )]
                     let backoff_ms = delay.as_millis() as u64;
-                    warn!(backoff_ms, %service, "sequence conflict on UpsertTcpService, retrying");
+                    warn!(backoff_ms, proto = proto.label(), %service, "sequence conflict on Upsert, retrying");
                     tokio::time::sleep(delay).await;
                     next_seq =
                         fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
                 }
-                // Hub predates TCP service support. Skip rather than abort
-                // so HTTP-only agents keep working against an older hub.
                 Err(e) if is_unsupported_op(&e) => {
                     warn!(
                         hub_url = %ctx.hub_url,
+                        proto = proto.label(),
                         error = %e,
-                        "hub does not support TCP service forwarding; skipping",
+                        "hub does not support this service protocol; skipping",
                     );
                     return Ok(());
                 }
@@ -369,6 +432,20 @@ pub async fn publish_tcp_services(
         }
     }
     Ok(())
+}
+
+pub async fn publish_tcp_services(
+    ctx: &BootstrapContext,
+    desired: &[(String, u16)],
+) -> anyhow::Result<()> {
+    publish_services(ctx, desired, ServiceProtocol::Tcp).await
+}
+
+pub async fn publish_udp_services(
+    ctx: &BootstrapContext,
+    desired: &[(String, u16)],
+) -> anyhow::Result<()> {
+    publish_services(ctx, desired, ServiceProtocol::Udp).await
 }
 
 /// Spawn the heartbeat task. Returns the `JoinHandle` so the caller can

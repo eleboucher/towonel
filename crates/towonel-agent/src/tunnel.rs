@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -8,16 +8,17 @@ use arc_swap::ArcSwap;
 use iroh::EndpointId;
 use rustls::pki_types::ServerName;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpStream, lookup_host};
+use tokio::net::{TcpStream, UdpSocket, lookup_host};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::hostname::wildcard_lookup;
 use towonel_common::metrics::GaugeGuard;
 use towonel_common::tunnel::{
-    COPY_BUF_SIZE, ClientAddrs, TCP_ROUTE_PREFIX, forward_quic_to_writer, read_handshake,
+    COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX,
+    forward_quic_to_writer, read_datagram_frame, read_handshake, write_datagram_frame,
 };
 
-use crate::config::{ProxyProtocol, ServiceConfig, TcpServiceConfig};
+use crate::config::{ProxyProtocol, ServiceConfig, TcpServiceConfig, UdpServiceConfig};
 use crate::metrics::{self, AgentMetrics};
 
 mod proxy_protocol;
@@ -64,22 +65,7 @@ struct OriginTarget {
 
 impl OriginTarget {
     async fn connect(&self) -> anyhow::Result<TcpStream> {
-        let cached = self.resolved.load();
-        if !cached.is_empty() {
-            let mut last_err: Option<std::io::Error> = None;
-            for addr in cached.iter() {
-                match TcpStream::connect(addr).await {
-                    Ok(s) => return Ok(s),
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            if let Some(e) = last_err {
-                debug!(origin = %self.address, error = %e, "cached addrs exhausted, re-resolving");
-            }
-        }
-        TcpStream::connect(&self.address)
-            .await
-            .with_context(|| format!("failed to connect to origin {}", self.address))
+        connect_tcp_origin(&self.address, &self.resolved).await
     }
 }
 
@@ -93,28 +79,81 @@ struct TcpOriginTarget {
 
 impl TcpOriginTarget {
     async fn connect(&self) -> anyhow::Result<TcpStream> {
-        let cached = self.resolved.load();
-        if !cached.is_empty() {
-            let mut last_err: Option<std::io::Error> = None;
-            for addr in cached.iter() {
-                match TcpStream::connect(addr).await {
-                    Ok(s) => return Ok(s),
-                    Err(e) => last_err = Some(e),
-                }
-            }
-            if let Some(e) = last_err {
-                debug!(origin = %self.address, error = %e, "tcp cached addrs exhausted, re-resolving");
+        connect_tcp_origin(&self.address, &self.resolved).await
+    }
+}
+
+/// Fall back to a fresh `TcpStream::connect(address)` when the cached addrs
+/// are empty or all fail, so a startup DNS miss doesn't permanently brick the
+/// service.
+async fn connect_tcp_origin(
+    address: &str,
+    resolved: &ArcSwap<Vec<SocketAddr>>,
+) -> anyhow::Result<TcpStream> {
+    let cached = resolved.load();
+    if !cached.is_empty() {
+        let mut last_err: Option<std::io::Error> = None;
+        for addr in cached.iter() {
+            match TcpStream::connect(addr).await {
+                Ok(s) => return Ok(s),
+                Err(e) => last_err = Some(e),
             }
         }
-        TcpStream::connect(&self.address)
+        if let Some(e) = last_err {
+            debug!(origin = %address, error = %e, "cached addrs exhausted, re-resolving");
+        }
+    }
+    TcpStream::connect(address)
+        .await
+        .with_context(|| format!("failed to connect to origin {address}"))
+}
+
+/// One ephemeral UDP socket is opened per session, giving each remote client
+/// its own source port at the origin — the same isolation classic NAT gives.
+struct UdpOriginTarget {
+    address: String,
+    resolved: ArcSwap<Vec<SocketAddr>>,
+    is_literal: bool,
+}
+
+impl UdpOriginTarget {
+    async fn connect(&self) -> anyhow::Result<UdpSocket> {
+        let cached = self.resolved.load();
+        let chosen: SocketAddr = if let Some(addr) = cached.first().copied() {
+            addr
+        } else {
+            // Fall back to a fresh resolve so a transient startup DNS miss
+            // doesn't permanently brick this service.
+            lookup_host(&self.address)
+                .await
+                .with_context(|| format!("failed to resolve udp origin {}", self.address))?
+                .next()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("udp origin {} resolved to no addresses", self.address)
+                })?
+        };
+        let bind_addr: SocketAddr = match chosen {
+            SocketAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::V6(_) => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
+        };
+        let socket = UdpSocket::bind(bind_addr).await.with_context(|| {
+            format!(
+                "failed to bind ephemeral udp socket for origin {}",
+                self.address
+            )
+        })?;
+        socket
+            .connect(chosen)
             .await
-            .with_context(|| format!("failed to connect to tcp origin {}", self.address))
+            .with_context(|| format!("failed to connect udp socket to origin {chosen}"))?;
+        Ok(socket)
     }
 }
 
 pub struct ServiceMap {
     services: HashMap<String, Arc<OriginTarget>>,
     tcp_services: HashMap<String, Arc<TcpOriginTarget>>,
+    udp_services: HashMap<String, Arc<UdpOriginTarget>>,
     /// Shared rustls client config for TLS-wrapped origin connections. Built
     /// once at startup from the webpki roots and reused for every stream.
     tls_config: Arc<rustls::ClientConfig>,
@@ -124,6 +163,7 @@ impl ServiceMap {
     pub async fn from_config(
         services: &[ServiceConfig],
         tcp_services: &[TcpServiceConfig],
+        udp_services: &[UdpServiceConfig],
     ) -> anyhow::Result<Self> {
         let mut map: HashMap<String, Arc<OriginTarget>> = HashMap::new();
         for svc in services {
@@ -161,6 +201,17 @@ impl ServiceMap {
             tcp_map.insert(svc.name.clone(), target);
         }
 
+        let mut udp_map: HashMap<String, Arc<UdpOriginTarget>> = HashMap::new();
+        for svc in udp_services {
+            let (initial, is_literal) = resolve_origin(&svc.origin).await;
+            let target = Arc::new(UdpOriginTarget {
+                address: svc.origin.clone(),
+                resolved: ArcSwap::from_pointee(initial),
+                is_literal,
+            });
+            udp_map.insert(svc.name.clone(), target);
+        }
+
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let mut config = rustls::ClientConfig::builder()
@@ -172,6 +223,7 @@ impl ServiceMap {
         Ok(Self {
             services: map,
             tcp_services: tcp_map,
+            udp_services: udp_map,
             tls_config,
         })
     }
@@ -191,7 +243,13 @@ impl ServiceMap {
             .filter(|t| !t.is_literal)
             .cloned()
             .collect();
-        if hostname_targets.is_empty() && tcp_targets.is_empty() {
+        let udp_targets: Vec<Arc<UdpOriginTarget>> = self
+            .udp_services
+            .values()
+            .filter(|t| !t.is_literal)
+            .cloned()
+            .collect();
+        if hostname_targets.is_empty() && tcp_targets.is_empty() && udp_targets.is_empty() {
             return;
         }
         tokio::spawn(async move {
@@ -206,6 +264,9 @@ impl ServiceMap {
                 for target in &tcp_targets {
                     refresh_addr(&target.address, &target.resolved).await;
                 }
+                for target in &udp_targets {
+                    refresh_addr(&target.address, &target.resolved).await;
+                }
             }
         });
     }
@@ -216,6 +277,10 @@ impl ServiceMap {
 
     fn lookup_tcp(&self, name: &str) -> Option<&Arc<TcpOriginTarget>> {
         self.tcp_services.get(name)
+    }
+
+    fn lookup_udp(&self, name: &str) -> Option<&Arc<UdpOriginTarget>> {
+        self.udp_services.get(name)
     }
 }
 
@@ -361,6 +426,20 @@ async fn handle_stream(
 
     if let Some(service_name) = route_key.strip_prefix(TCP_ROUTE_PREFIX) {
         return handle_tcp_stream(
+            service_name,
+            client_addrs,
+            quic_send,
+            quic_recv,
+            service_map,
+            edge_id,
+            metrics,
+            start,
+        )
+        .await;
+    }
+
+    if let Some(service_name) = route_key.strip_prefix(UDP_ROUTE_PREFIX) {
+        return handle_udp_stream(
             service_name,
             client_addrs,
             quic_send,
@@ -556,6 +635,105 @@ async fn handle_tcp_stream(
         )]
         let duration_ms = start.elapsed().as_millis() as u64;
         debug!(duration_ms, "tcp stream closed");
+        Ok(())
+    }
+    .instrument(span)
+    .await
+}
+
+/// UDP sibling of [`handle_tcp_stream`]; payload framing per [`write_datagram_frame`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "matches the shape of handle_tcp_stream; bundling these adds noise without benefit"
+)]
+async fn handle_udp_stream(
+    service_name: &str,
+    client_addrs: ClientAddrs,
+    mut quic_send: iroh::endpoint::SendStream,
+    mut quic_recv: iroh::endpoint::RecvStream,
+    service_map: &ServiceMap,
+    edge_id: iroh::EndpointId,
+    metrics: &AgentMetrics,
+    start: Instant,
+) -> anyhow::Result<()> {
+    let Some(target) = service_map.lookup_udp(service_name) else {
+        metrics.record_stream_error(metrics::stream_error::NO_SERVICE);
+        return Err(anyhow::anyhow!(
+            "no udp service configured for `{service_name}`"
+        ));
+    };
+
+    let span = info_span!("udp_stream",
+        service = %service_name,
+        origin = %target.address,
+        edge = %edge_id.fmt_short(),
+        client = ?client_addrs.src,
+    );
+
+    async {
+        debug!("forwarding udp service to origin");
+        let socket = match target.connect().await {
+            Ok(s) => s,
+            Err(e) => {
+                metrics.record_stream_error(metrics::stream_error::ORIGIN_CONNECT);
+                return Err(e);
+            }
+        };
+
+        let mut buf_in = vec![0u8; MAX_UDP_DATAGRAM];
+        let mut buf_out = vec![0u8; MAX_UDP_DATAGRAM];
+        let mut bytes_e2o: u64 = 0;
+        let mut bytes_o2e: u64 = 0;
+        let result: anyhow::Result<()> = loop {
+            tokio::select! {
+                read = read_datagram_frame(&mut quic_recv, &mut buf_in) => match read {
+                    Ok(n) => {
+                        #[expect(
+                            clippy::indexing_slicing,
+                            reason = "read_datagram_frame bounds n <= buf_in.len()"
+                        )]
+                        let payload = &buf_in[..n];
+                        if let Err(e) = socket.send(payload).await {
+                            break Err(e.into());
+                        }
+                        bytes_e2o = bytes_e2o.saturating_add(n as u64);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break Ok(()),
+                    Err(e) => break Err(e.into()),
+                },
+                recv = socket.recv(&mut buf_out) => match recv {
+                    Ok(n) => {
+                        #[expect(
+                            clippy::indexing_slicing,
+                            reason = "UdpSocket::recv guarantees n <= buf_out.len()"
+                        )]
+                        let payload = &buf_out[..n];
+                        if let Err(e) = write_datagram_frame(&mut quic_send, payload).await {
+                            break Err(e.into());
+                        }
+                        bytes_o2e = bytes_o2e.saturating_add(n as u64);
+                    }
+                    Err(e) => break Err(e.into()),
+                },
+            }
+        };
+        drop(quic_send.finish());
+
+        metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, bytes_e2o);
+        metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, bytes_o2e);
+        if let Err(e) = result {
+            // Best-effort: ICMP unreachable surfaces here too, so log at debug
+            // rather than warn to avoid noisy alerts on transient origin loss.
+            debug!(error = %e, "udp forwarding ended");
+        }
+
+        metrics.streams_completed.inc();
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "udp streams won't last 584 million years"
+        )]
+        let duration_ms = start.elapsed().as_millis() as u64;
+        debug!(duration_ms, "udp stream closed");
         Ok(())
     }
     .instrument(span)

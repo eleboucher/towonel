@@ -13,14 +13,16 @@ use iroh::EndpointAddr;
 use iroh::endpoint::{Connection, Endpoint};
 use smallvec::SmallVec;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::protocol::ALPN_TUNNEL;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
-    COPY_BUF_SIZE, ClientAddrs, TCP_ROUTE_PREFIX, forward_quic_to_writer, write_handshake,
+    COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX,
+    forward_quic_to_writer, read_datagram_frame, write_datagram_frame, write_handshake,
 };
 
 use self::acme::AcmeCoordinator;
@@ -191,6 +193,11 @@ impl Edge {
         {
             let ctx = Arc::clone(&ctx);
             tasks.push(tokio::spawn(tcp_listener_reconciler(ctx)));
+        }
+
+        {
+            let ctx = Arc::clone(&ctx);
+            tasks.push(tokio::spawn(udp_listener_reconciler(ctx)));
         }
 
         for task in tasks {
@@ -695,7 +702,7 @@ async fn open_agent_stream(
 }
 
 async fn tcp_listener_reconciler(ctx: Arc<ConnCtx>) {
-    let mut active: std::collections::HashMap<u16, ActiveTcpListener> =
+    let mut active: std::collections::HashMap<u16, ActiveListener> =
         std::collections::HashMap::new();
     let mut rx = ctx.router.subscribe_tcp_listener_changes();
 
@@ -712,7 +719,7 @@ async fn tcp_listener_reconciler(ctx: Arc<ConnCtx>) {
 
 fn reconcile_tcp_listeners(
     ctx: &Arc<ConnCtx>,
-    active: &mut std::collections::HashMap<u16, ActiveTcpListener>,
+    active: &mut std::collections::HashMap<u16, ActiveListener>,
 ) {
     let desired = ctx.router.desired_tcp_listeners();
 
@@ -749,7 +756,7 @@ fn reconcile_tcp_listeners(
         let handle = tokio::spawn(tcp_accept_loop(listener, binding.clone(), Arc::clone(ctx)));
         active.insert(
             *port,
-            ActiveTcpListener {
+            ActiveListener {
                 binding: binding.clone(),
                 handle,
             },
@@ -757,26 +764,58 @@ fn reconcile_tcp_listeners(
     }
 }
 
-struct ActiveTcpListener {
+struct ActiveListener {
     binding: towonel_common::routing::TcpListenerBinding,
     handle: tokio::task::JoinHandle<()>,
 }
 
-/// Try IPv6 dual-stack (`IPV6_V6ONLY=0`) first so a single socket accepts both
-/// families; fall back to v4 on hosts without an IPv6 stack. Setting
-/// `set_only_v6(false)` explicitly avoids depending on the `bindv6only`
-/// sysctl default, which differs between Linux and *BSD. Returns `None` on
-/// bind failure — the reconciler retries on the next route table push.
+/// Try a dual-stack v6 bind first (single FD serving both families), fall back
+/// to v4. `set_only_v6(false)` is explicit because the `bindv6only` sysctl
+/// default differs between Linux and *BSD.
+fn bind_dual_stack_socket<L>(
+    port: u16,
+    ty: socket2::Type,
+    proto: socket2::Protocol,
+    finalize: impl Fn(socket2::Socket) -> Option<L>,
+) -> Option<L> {
+    let v6 = std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port);
+    if let Some(listener) = make_bound_socket(v6, ty, proto, true).and_then(&finalize) {
+        return Some(listener);
+    }
+    let v4 = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port);
+    make_bound_socket(v4, ty, proto, false).and_then(&finalize)
+}
+
+fn make_bound_socket(
+    addr: std::net::SocketAddr,
+    ty: socket2::Type,
+    proto: socket2::Protocol,
+    dual_stack: bool,
+) -> Option<socket2::Socket> {
+    let domain = if addr.is_ipv6() {
+        socket2::Domain::IPV6
+    } else {
+        socket2::Domain::IPV4
+    };
+    let sock = socket2::Socket::new(domain, ty, Some(proto)).ok()?;
+    if dual_stack {
+        drop(sock.set_only_v6(false));
+    }
+    sock.set_nonblocking(true).ok()?;
+    drop(sock.set_reuse_address(true));
+    sock.bind(&addr.into()).ok()?;
+    Some(sock)
+}
+
 fn bind_tcp_port(
     port: u16,
     binding: &towonel_common::routing::TcpListenerBinding,
 ) -> Option<TcpListener> {
-    let v6 = std::net::SocketAddr::new(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED), port);
-    if let Some(listener) = bind_dual_stack_v6(v6) {
-        return Some(listener);
-    }
-    let v4 = std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), port);
-    let listener = bind_v4(v4);
+    let listener =
+        bind_dual_stack_socket(port, socket2::Type::STREAM, socket2::Protocol::TCP, |s| {
+            s.listen(1024).ok()?;
+            TcpListener::from_std(s.into()).ok()
+        });
     if listener.is_none() {
         warn!(
             port,
@@ -786,35 +825,6 @@ fn bind_tcp_port(
         );
     }
     listener
-}
-
-fn bind_dual_stack_v6(addr: std::net::SocketAddr) -> Option<TcpListener> {
-    let sock = socket2::Socket::new(
-        socket2::Domain::IPV6,
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )
-    .ok()?;
-    drop(sock.set_only_v6(false));
-    sock.set_nonblocking(true).ok()?;
-    drop(sock.set_reuse_address(true));
-    sock.bind(&addr.into()).ok()?;
-    sock.listen(1024).ok()?;
-    TcpListener::from_std(sock.into()).ok()
-}
-
-fn bind_v4(addr: std::net::SocketAddr) -> Option<TcpListener> {
-    let sock = socket2::Socket::new(
-        socket2::Domain::IPV4,
-        socket2::Type::STREAM,
-        Some(socket2::Protocol::TCP),
-    )
-    .ok()?;
-    sock.set_nonblocking(true).ok()?;
-    drop(sock.set_reuse_address(true));
-    sock.bind(&addr.into()).ok()?;
-    sock.listen(1024).ok()?;
-    TcpListener::from_std(sock.into()).ok()
 }
 
 async fn tcp_accept_loop(
@@ -945,4 +955,276 @@ async fn pipe_tcp(
 
     let (c2a, a2c) = tokio::join!(c2a, a2c);
     Ok((c2a, a2c))
+}
+
+/// Idle window before an inactive UDP session is reaped. Picked to match
+/// common NAT keepalive defaults so a quiet flow doesn't get torn down out
+/// from under a client that was just being polite.
+const UDP_SESSION_IDLE: Duration = Duration::from_mins(1);
+
+/// Bound on how many datagrams we buffer per session in the channel from
+/// the public UDP socket to the per-session QUIC pump. Drops the oldest on
+/// overflow rather than blocking the listener and stalling other sessions.
+const UDP_SESSION_QUEUE: usize = 64;
+
+async fn udp_listener_reconciler(ctx: Arc<ConnCtx>) {
+    let mut active: std::collections::HashMap<u16, ActiveListener> =
+        std::collections::HashMap::new();
+    let mut rx = ctx.router.subscribe_udp_listener_changes();
+
+    reconcile_udp_listeners(&ctx, &mut active);
+
+    loop {
+        if rx.changed().await.is_err() {
+            return;
+        }
+        reconcile_udp_listeners(&ctx, &mut active);
+    }
+}
+
+fn reconcile_udp_listeners(
+    ctx: &Arc<ConnCtx>,
+    active: &mut std::collections::HashMap<u16, ActiveListener>,
+) {
+    let desired = ctx.router.desired_udp_listeners();
+
+    let stale_ports: Vec<u16> = active
+        .iter()
+        .filter(|(port, current)| desired.get(port) != Some(&current.binding))
+        .map(|(port, _)| *port)
+        .collect();
+    for port in stale_ports {
+        if let Some(existing) = active.remove(&port) {
+            info!(
+                port,
+                tenant = %existing.binding.tenant,
+                service = %existing.binding.service,
+                "unbinding udp listener"
+            );
+            existing.handle.abort();
+        }
+    }
+
+    for (port, binding) in &desired {
+        if active.contains_key(port) {
+            continue;
+        }
+        let Some(socket) = bind_udp_port(*port, binding) else {
+            continue;
+        };
+        info!(
+            port,
+            tenant = %binding.tenant,
+            service = %binding.service,
+            "edge udp listener bound"
+        );
+        let tokio_socket = match UdpSocket::from_std(socket) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(port, error = %e, "failed to register udp socket with tokio");
+                continue;
+            }
+        };
+        let handle = tokio::spawn(udp_listen_loop(
+            Arc::new(tokio_socket),
+            binding.clone(),
+            Arc::clone(ctx),
+        ));
+        active.insert(
+            *port,
+            ActiveListener {
+                binding: binding.clone(),
+                handle,
+            },
+        );
+    }
+}
+
+fn bind_udp_port(
+    port: u16,
+    binding: &towonel_common::routing::UdpListenerBinding,
+) -> Option<std::net::UdpSocket> {
+    let sock = bind_dual_stack_socket(port, socket2::Type::DGRAM, socket2::Protocol::UDP, |s| {
+        Some(s.into())
+    });
+    if sock.is_none() {
+        warn!(
+            port,
+            tenant = %binding.tenant,
+            service = %binding.service,
+            "failed to bind udp listener on both v6 and v4",
+        );
+    }
+    sock
+}
+
+/// One UDP-socket-per-listener accept loop. Multiplexes incoming datagrams
+/// across per-client-address sessions; each session owns a fresh QUIC stream
+/// tagged `udp:<service>`.
+type UdpSessions = std::collections::HashMap<std::net::SocketAddr, mpsc::Sender<Vec<u8>>>;
+
+async fn udp_listen_loop(
+    socket: Arc<UdpSocket>,
+    binding: towonel_common::routing::UdpListenerBinding,
+    ctx: Arc<ConnCtx>,
+) {
+    let binding = Arc::new(binding);
+    let sessions: Arc<tokio::sync::Mutex<UdpSessions>> =
+        Arc::new(tokio::sync::Mutex::new(UdpSessions::new()));
+
+    let mut buf = vec![0u8; MAX_UDP_DATAGRAM];
+    loop {
+        let (n, peer_addr) = match socket.recv_from(&mut buf).await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(service = %binding.service, "udp recv error: {e}");
+                continue;
+            }
+        };
+        ctx.metrics.total_bytes_in.inc_by(n as u64);
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "UdpSocket::recv_from bounds n <= buf.len()"
+        )]
+        let datagram = buf[..n].to_vec();
+
+        // Single critical section: get-or-create the session sender, then
+        // release the lock before `try_send`. A stale entry (closed channel,
+        // pump exited) is recreated in place.
+        let tx = {
+            let mut map = sessions.lock().await;
+            match map.get(&peer_addr) {
+                Some(tx) if !tx.is_closed() => tx.clone(),
+                _ => {
+                    let (tx, rx) = mpsc::channel::<Vec<u8>>(UDP_SESSION_QUEUE);
+                    map.insert(peer_addr, tx.clone());
+                    drop(map);
+                    let socket_for_session = Arc::clone(&socket);
+                    let binding_for_session = Arc::clone(&binding);
+                    let ctx_for_session = Arc::clone(&ctx);
+                    let sessions_for_session = Arc::clone(&sessions);
+                    tokio::spawn(async move {
+                        udp_session_pump(
+                            socket_for_session,
+                            peer_addr,
+                            binding_for_session,
+                            ctx_for_session,
+                            rx,
+                        )
+                        .await;
+                        sessions_for_session.lock().await.remove(&peer_addr);
+                    });
+                    tx
+                }
+            }
+        };
+
+        if tx.try_send(datagram).is_err() {
+            debug!(
+                service = %binding.service,
+                %peer_addr,
+                "udp session queue full, dropping datagram"
+            );
+        }
+    }
+}
+
+/// One UDP session: receive datagrams from the public socket via `rx`, ship
+/// them over a fresh QUIC stream to an agent, and write the agent's reply
+/// frames back to the public socket addressed at `peer_addr`. The session
+/// ends when either side closes or idle time hits [`UDP_SESSION_IDLE`].
+async fn udp_session_pump(
+    socket: Arc<UdpSocket>,
+    peer_addr: std::net::SocketAddr,
+    binding: Arc<towonel_common::routing::UdpListenerBinding>,
+    ctx: Arc<ConnCtx>,
+    mut rx: mpsc::Receiver<Vec<u8>>,
+) {
+    let span = info_span!("udp_session", peer = %peer_addr, service = %binding.service);
+    async move {
+        let Some(candidates) = ctx.router.route_udp_service(&binding.tenant, &binding.service)
+        else {
+            warn!(
+                tenant = %binding.tenant,
+                service = %binding.service,
+                "no agents serving udp service; dropping session",
+            );
+            return;
+        };
+
+        let (agent_addr, mut send_stream, mut recv_stream) =
+            match pick_agent_and_open_stream(&ctx, candidates).await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(error = %e, "no agent could accept udp session");
+                    return;
+                }
+            };
+
+        let route_key = format!("{UDP_ROUTE_PREFIX}{}", binding.service);
+        let local_addr = match socket.local_addr() {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(error = %e, "udp listener has no local_addr; dropping session");
+                return;
+            }
+        };
+        let client_addrs = ClientAddrs {
+            src: peer_addr,
+            dst: local_addr,
+        };
+        if let Err(e) = write_handshake(&mut send_stream, &route_key, client_addrs).await {
+            warn!(error = %e, "udp handshake to agent failed");
+            return;
+        }
+
+        debug!(agent = %agent_addr.id.fmt_short(), "udp session opened");
+
+        // `select!` (not `join!`) so an idle-timeout on the edge->agent side
+        // tears down the agent->edge side too. Otherwise a quiet origin
+        // would leak one task per session.
+        let mut buf = vec![0u8; MAX_UDP_DATAGRAM];
+        loop {
+            tokio::select! {
+                framed = tokio::time::timeout(UDP_SESSION_IDLE, rx.recv()) => {
+                    match framed {
+                        Ok(Some(datagram)) => {
+                            if let Err(e) = write_datagram_frame(&mut send_stream, &datagram).await {
+                                debug!(error = %e, "edge->agent udp frame write failed");
+                                break;
+                            }
+                        }
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+                read = read_datagram_frame(&mut recv_stream, &mut buf) => {
+                    match read {
+                        Ok(n) => {
+                            #[expect(
+                                clippy::indexing_slicing,
+                                reason = "read_datagram_frame bounds n <= buf.len()"
+                            )]
+                            let payload = &buf[..n];
+                            match socket.send_to(payload, peer_addr).await {
+                                Ok(sent) => ctx.metrics.total_bytes_out.inc_by(sent as u64),
+                                Err(e) => {
+                                    debug!(error = %e, "udp send_to client failed");
+                                    break;
+                                }
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                        Err(e) => {
+                            debug!(error = %e, "agent->edge udp frame read failed");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        drop(send_stream.finish());
+        debug!("udp session closed");
+    }
+    .instrument(span)
+    .await;
 }

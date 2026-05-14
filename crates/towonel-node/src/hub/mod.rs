@@ -187,6 +187,7 @@ impl Hub {
             heartbeat_nonces: api::new_nonce_cache(),
             edge_sub_nonces: api::new_nonce_cache(),
             tcp_port_lock: tokio::sync::Mutex::new(()),
+            udp_port_lock: tokio::sync::Mutex::new(()),
         });
 
         spawn_background_loops(&state);
