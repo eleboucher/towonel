@@ -221,7 +221,10 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<ConnCtx>) {
         let ctx = Arc::clone(&ctx);
         // Stack-allocated `PEEK_BUF_SIZE` buffer lives inside the future; the
         // tokio spawn already boxes it, so there's no extra allocation.
-        #[allow(clippy::large_futures)]
+        #[expect(
+            clippy::large_futures,
+            reason = "tokio::spawn already boxes the future"
+        )]
         tokio::spawn(async move {
             if let Err(e) = handle_connection(tcp_stream, peer_addr, &ctx).await {
                 debug!(%peer_addr, error = %e, "connection handling failed");
@@ -289,7 +292,10 @@ struct ConnCtx {
 /// Dispatch a single incoming TCP connection. Peek the SNI, look up the
 /// hostname's policy, then either terminate TLS here or pass through to the
 /// agent.
-#[allow(clippy::large_futures)]
+#[expect(
+    clippy::large_futures,
+    reason = "spawned via tokio::spawn which already boxes"
+)]
 async fn handle_connection(
     tcp_stream: TcpStream,
     peer_addr: std::net::SocketAddr,
@@ -368,7 +374,8 @@ async fn pick_agent_and_open_stream(
 async fn peek_client_hello(tcp: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
     for attempt in 0..PEEK_MAX_ATTEMPTS {
         let n = tcp.peek(buf).await?;
-        if tls_record_complete(&buf[..n]) || n >= buf.len() {
+        let peeked = buf.get(..n).unwrap_or(buf);
+        if tls_record_complete(peeked) || n >= buf.len() {
             return Ok(n);
         }
         if n == 0 {
@@ -387,7 +394,13 @@ async fn peek_client_hello(tcp: &TcpStream, buf: &mut [u8]) -> std::io::Result<u
 /// TLS record framing: `[content_type:1][version:2][length:2][fragment:length]`.
 /// Returns true once we have the full fragment.
 fn tls_record_complete(buf: &[u8]) -> bool {
-    buf.len() >= 5 && buf.len() >= 5 + usize::from(u16::from_be_bytes([buf[3], buf[4]]))
+    let Some(&len_hi) = buf.get(3) else {
+        return false;
+    };
+    let Some(&len_lo) = buf.get(4) else {
+        return false;
+    };
+    buf.len() >= 5 + usize::from(u16::from_be_bytes([len_hi, len_lo]))
 }
 
 /// Recover the real client address before TLS peek/handshake. Trusted-CIDR
@@ -420,7 +433,10 @@ async fn resolve_peer_addr(
     }
 }
 
-#[allow(clippy::large_futures)]
+#[expect(
+    clippy::large_futures,
+    reason = "spawned via tokio::spawn which already boxes"
+)]
 async fn handle_connection_inner(
     mut tcp_stream: TcpStream,
     immediate_peer: std::net::SocketAddr,
@@ -435,8 +451,9 @@ async fn handle_connection_inner(
         let mut peek_buf = [0u8; PEEK_BUF_SIZE];
         let n = peek_client_hello(&tcp_stream, &mut peek_buf).await?;
 
-        let hostname = extract_sni(&peek_buf[..n])
-            .ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?;
+        let peeked = peek_buf.get(..n).unwrap_or(&peek_buf);
+        let hostname =
+            extract_sni(peeked).ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?;
         debug!(%hostname, "SNI extracted");
 
         if let Some(self_route) = ctx.hub_self_route.as_ref()
@@ -446,7 +463,10 @@ async fn handle_connection_inner(
                 pipe_to_local_hub(tcp_stream, hostname, &self_route.local_addr, ctx).await?;
             ctx.metrics.total_bytes_in.inc_by(bytes_in);
             ctx.metrics.total_bytes_out.inc_by(bytes_out);
-            #[allow(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "connection won't last 584 million years"
+            )]
             let duration_ms = start.elapsed().as_millis() as u64;
             debug!(
                 %hostname,
@@ -500,8 +520,10 @@ async fn handle_connection_inner(
         ctx.metrics.total_bytes_in.inc_by(bytes_in);
         ctx.metrics.total_bytes_out.inc_by(bytes_out);
 
-        // truncation intentional:
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "connection won't last 584 million years"
+        )]
         let duration_ms = start.elapsed().as_millis() as u64;
         debug!(
             %hostname,
@@ -532,12 +554,12 @@ async fn pipe_passthrough(
 
     let c2a = async {
         let res = tokio::io::copy_buf(&mut tcp_read, &mut send_stream).await;
-        let _ = send_stream.finish();
+        drop(send_stream.finish());
         res.unwrap_or(0)
     };
     let a2c = async {
         let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
-        let _ = tcp_write.shutdown().await;
+        drop(tcp_write.shutdown().await);
         res.unwrap_or(0)
     };
 
@@ -578,12 +600,12 @@ async fn pipe_terminate(
 
     let c2a = async {
         let res = tokio::io::copy_buf(&mut tls_read, &mut send_stream).await;
-        let _ = send_stream.finish();
+        drop(send_stream.finish());
         res.unwrap_or(0)
     };
     let a2c = async {
         let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tls_write).await;
-        let _ = tls_write.shutdown().await;
+        drop(tls_write.shutdown().await);
         res.unwrap_or(0)
     };
 
@@ -619,7 +641,7 @@ async fn pipe_to_local_hub(
     let mut local = TcpStream::connect(local_addr).await.map_err(|e| {
         anyhow::anyhow!("hub self-route: failed to connect to local hub at {local_addr}: {e}")
     })?;
-    let _ = local.set_nodelay(true);
+    drop(local.set_nodelay(true));
 
     let (c2h, h2c) = tokio::io::copy_bidirectional(&mut tls_stream, &mut local)
         .await
@@ -773,9 +795,9 @@ fn bind_dual_stack_v6(addr: std::net::SocketAddr) -> Option<TcpListener> {
         Some(socket2::Protocol::TCP),
     )
     .ok()?;
-    let _ = sock.set_only_v6(false);
+    drop(sock.set_only_v6(false));
     sock.set_nonblocking(true).ok()?;
-    let _ = sock.set_reuse_address(true);
+    drop(sock.set_reuse_address(true));
     sock.bind(&addr.into()).ok()?;
     sock.listen(1024).ok()?;
     TcpListener::from_std(sock.into()).ok()
@@ -789,7 +811,7 @@ fn bind_v4(addr: std::net::SocketAddr) -> Option<TcpListener> {
     )
     .ok()?;
     sock.set_nonblocking(true).ok()?;
-    let _ = sock.set_reuse_address(true);
+    drop(sock.set_reuse_address(true));
     sock.bind(&addr.into()).ok()?;
     sock.listen(1024).ok()?;
     TcpListener::from_std(sock.into()).ok()
@@ -876,7 +898,10 @@ async fn handle_tcp_connection(
         ctx.metrics.total_bytes_in.inc_by(bytes_in);
         ctx.metrics.total_bytes_out.inc_by(bytes_out);
 
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "tcp connection won't last 584 million years"
+        )]
         let duration_ms = start.elapsed().as_millis() as u64;
         debug!(
             service = %binding.service,
@@ -909,12 +934,12 @@ async fn pipe_tcp(
 
     let c2a = async {
         let res = tokio::io::copy_buf(&mut tcp_read, &mut send_stream).await;
-        let _ = send_stream.finish();
+        drop(send_stream.finish());
         res.unwrap_or(0)
     };
     let a2c = async {
         let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
-        let _ = tcp_write.shutdown().await;
+        drop(tcp_write.shutdown().await);
         res.unwrap_or(0)
     };
 

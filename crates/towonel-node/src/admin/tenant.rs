@@ -36,8 +36,10 @@ pub enum KeypairKind {
     Agent,
 }
 
-// No await inside but matches the async interface of the other command handlers.
-#[allow(clippy::unused_async)]
+#[expect(
+    clippy::unused_async,
+    reason = "matches the async interface of the other command handlers"
+)]
 pub async fn cmd_keypair_init(key_path: &std::path::Path, kind: KeypairKind) -> anyhow::Result<()> {
     match kind {
         KeypairKind::Tenant => {
@@ -229,13 +231,10 @@ pub fn cmd_tenant_export_key(
     };
 
     let mut salt = [0u8; ARGON2_SALT_LEN];
-    // OS RNG failures are unrecoverable on any supported platform.
-    #[allow(clippy::expect_used)]
-    getrandom::fill(&mut salt).expect("OS RNG failed");
+    getrandom::fill(&mut salt).map_err(|e| anyhow!("OS RNG failed: {e}"))?;
 
     let mut nonce_bytes = [0u8; AES_GCM_NONCE_LEN];
-    #[allow(clippy::expect_used)]
-    getrandom::fill(&mut nonce_bytes).expect("OS RNG failed");
+    getrandom::fill(&mut nonce_bytes).map_err(|e| anyhow!("OS RNG failed: {e}"))?;
 
     let enc_key = derive_key(passphrase.as_bytes(), &salt)?;
     let cipher = Aes256Gcm::new_from_slice(enc_key.as_slice())
@@ -260,12 +259,15 @@ pub fn cmd_tenant_export_key(
     Ok(())
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "called once at the CLI boundary; ownership keeps the call sites clean"
+)]
 pub fn cmd_tenant_import_key(
     key_path: PathBuf,
     backup: String,
     passphrase: Option<String>,
 ) -> anyhow::Result<()> {
-    #![allow(clippy::needless_pass_by_value)]
     use aes_gcm::{
         Aes256Gcm, Nonce,
         aead::{Aead, KeyInit},
@@ -296,9 +298,8 @@ pub fn cmd_tenant_import_key(
         ));
     }
 
-    let salt = &blob[..ARGON2_SALT_LEN];
-    let nonce_bytes = &blob[ARGON2_SALT_LEN..ARGON2_SALT_LEN + AES_GCM_NONCE_LEN];
-    let ciphertext = &blob[ARGON2_SALT_LEN + AES_GCM_NONCE_LEN..];
+    let (salt, rest) = blob.split_at(ARGON2_SALT_LEN);
+    let (nonce_bytes, ciphertext) = rest.split_at(AES_GCM_NONCE_LEN);
 
     let passphrase = match passphrase {
         Some(p) => p,
@@ -311,21 +312,18 @@ pub fn cmd_tenant_import_key(
     let nonce = Nonce::from_slice(nonce_bytes);
     let seed_bytes = cipher
         .decrypt(nonce, ciphertext)
-        .map_err(|_| anyhow!("decryption failed -- wrong passphrase?"))?;
+        .map_err(|_e| anyhow!("decryption failed -- wrong passphrase?"))?;
 
-    if seed_bytes.len() != 32 {
-        return Err(anyhow!(
+    let seed: [u8; 32] = seed_bytes.as_slice().try_into().map_err(|_e| {
+        anyhow!(
             "decrypted seed has wrong length ({}, expected 32)",
             seed_bytes.len()
-        ));
-    }
+        )
+    })?;
 
-    write_key_file(&key_path, &seed_bytes)
+    write_key_file(&key_path, &seed)
         .with_context(|| format!("failed to write key to {}", key_path.display()))?;
 
-    // SAFETY: we verified seed_bytes.len() == 32 above, so try_into() is infallible.
-    #[allow(clippy::unwrap_used)]
-    let seed: [u8; 32] = seed_bytes.try_into().unwrap();
     let kp = towonel_common::identity::TenantKeypair::from_seed(seed);
     println!("Restored tenant key to {}", key_path.display());
     println!("  Tenant ID:     {}", kp.id());

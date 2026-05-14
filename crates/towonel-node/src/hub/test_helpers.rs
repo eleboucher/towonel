@@ -1,5 +1,4 @@
 //! Shared scaffolding for `hub` integration tests.
-#![allow(clippy::expect_used)]
 
 use std::net::SocketAddr;
 use std::sync::Arc;

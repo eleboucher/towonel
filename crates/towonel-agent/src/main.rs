@@ -48,12 +48,18 @@ struct Cli {
     health_port: u16,
 }
 
-#[allow(clippy::large_futures)]
+#[expect(
+    clippy::large_futures,
+    reason = "top-level main future is large; boxing it provides no benefit"
+)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // ring provider install only fails if another provider is already installed,
     // which is a programming error and should panic at startup.
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "duplicate CryptoProvider install is a startup-time programmer error"
+    )]
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install ring CryptoProvider");
@@ -69,7 +75,10 @@ async fn main() -> anyhow::Result<()> {
     run_agent(cli).await
 }
 
-#[allow(clippy::large_futures)]
+#[expect(
+    clippy::large_futures,
+    reason = "top-level orchestration future is large; boxing it provides no benefit"
+)]
 async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let metrics = Arc::new(AgentMetrics::new());
     metrics.set_info(env!("CARGO_PKG_VERSION"));

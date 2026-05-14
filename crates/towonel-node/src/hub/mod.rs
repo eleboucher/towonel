@@ -34,7 +34,7 @@ pub const INVITE_HASH_KEY_ENV: &str = "TOWONEL_INVITE_HASH_KEY";
 /// Read the invite-hash key from `TOWONEL_INVITE_HASH_KEY` or fail with a
 /// message that tells the operator how to generate one.
 pub fn load_invite_hash_key() -> anyhow::Result<InviteHashKey> {
-    let hex = std::env::var(INVITE_HASH_KEY_ENV).map_err(|_| {
+    let hex = std::env::var(INVITE_HASH_KEY_ENV).map_err(|_e| {
         anyhow::anyhow!(
             "{INVITE_HASH_KEY_ENV} is not set — generate one with \
              `openssl rand -hex 32` and export it before starting the hub"
@@ -67,9 +67,7 @@ fn load_or_generate_operator_key_blocking(
         Ok(zeroize::Zeroizing::new(trimmed))
     } else {
         let mut bytes = [0u8; OPERATOR_KEY_BYTES];
-        // OS RNG failures are unrecoverable on any supported platform.
-        #[allow(clippy::expect_used)]
-        getrandom::fill(&mut bytes).expect("OS RNG failed");
+        getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("OS RNG failed: {e}"))?;
         let key = B64.encode(bytes);
         write_key_file(path, key.as_bytes())?;
         info!(

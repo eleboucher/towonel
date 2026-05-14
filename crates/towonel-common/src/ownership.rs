@@ -72,11 +72,10 @@ impl OwnershipPolicy {
             if let Some(suffix) = pattern.strip_prefix("*.")
                 && lower.ends_with(suffix)
                 && lower.len() > suffix.len() + 1
+                && let Some(prefix) = lower.get(..lower.len() - suffix.len() - 1)
+                && !prefix.is_empty()
             {
-                let prefix = &lower[..lower.len() - suffix.len() - 1];
-                if !prefix.is_empty() {
-                    return true;
-                }
+                return true;
             }
         }
         false
@@ -84,7 +83,10 @@ impl OwnershipPolicy {
 }
 
 #[cfg(test)]
-#[allow(clippy::redundant_closure_for_method_calls)]
+#[expect(
+    clippy::redundant_closure_for_method_calls,
+    reason = "test code uses explicit closures for readability"
+)]
 mod tests {
     use super::*;
     use crate::identity::TenantKeypair;

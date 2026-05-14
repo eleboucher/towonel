@@ -62,6 +62,6 @@ mod tests {
             src: "203.0.113.7:54321".parse().unwrap(),
             dst: "[2001:db8::1]:443".parse().unwrap(),
         };
-        assert!(encode_v2(addrs).is_err());
+        encode_v2(addrs).unwrap_err();
     }
 }

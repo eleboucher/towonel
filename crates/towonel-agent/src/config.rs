@@ -69,7 +69,6 @@ impl ServiceConfig {
     }
 }
 
-#[allow(clippy::derivable_impls)]
 impl Default for ProxyProtocol {
     /// Intentional manual impl: the `V2` default is a deliberate policy
     /// decision (only L4 way to convey client IP in passthrough mode), not

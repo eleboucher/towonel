@@ -1,4 +1,9 @@
-#![allow(clippy::manual_assert, clippy::unwrap_used, clippy::panic)]
+#![expect(
+    clippy::manual_assert,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "test code uses panics/unwraps freely"
+)]
 
 use std::path::{Path, PathBuf};
 

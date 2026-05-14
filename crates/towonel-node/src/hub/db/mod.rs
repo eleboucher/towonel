@@ -1,3 +1,8 @@
+#![expect(
+    clippy::map_err_ignore,
+    reason = "TryInto length-mismatch errors carry no information beyond what our custom messages convey"
+)]
+
 pub(super) mod entities;
 mod invites;
 mod liveness;

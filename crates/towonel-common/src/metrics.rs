@@ -4,13 +4,16 @@
 //! All `register_*` helpers panic on duplicate names or invalid identifiers
 //! — both would be programmer errors caught immediately in a test run.
 
+#![expect(
+    clippy::expect_used,
+    reason = "metric construction/registration failures are programmer errors caught at startup"
+)]
+
 use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry};
 
 #[must_use]
 pub fn register_counter(registry: &Registry, name: &str, help: &str) -> IntCounter {
-    #[allow(clippy::expect_used)]
     let c = IntCounter::new(name, help).expect("valid metric identifier");
-    #[allow(clippy::expect_used)]
     registry
         .register(Box::new(c.clone()))
         .expect("unique metric name");
@@ -19,9 +22,7 @@ pub fn register_counter(registry: &Registry, name: &str, help: &str) -> IntCount
 
 #[must_use]
 pub fn register_gauge(registry: &Registry, name: &str, help: &str) -> IntGauge {
-    #[allow(clippy::expect_used)]
     let g = IntGauge::new(name, help).expect("valid metric identifier");
-    #[allow(clippy::expect_used)]
     registry
         .register(Box::new(g.clone()))
         .expect("unique metric name");
@@ -35,9 +36,7 @@ pub fn register_counter_vec(
     help: &str,
     labels: &[&str],
 ) -> IntCounterVec {
-    #[allow(clippy::expect_used)]
     let v = IntCounterVec::new(Opts::new(name, help), labels).expect("valid metric identifier");
-    #[allow(clippy::expect_used)]
     registry
         .register(Box::new(v.clone()))
         .expect("unique metric name");
@@ -51,9 +50,7 @@ pub fn register_gauge_vec(
     help: &str,
     labels: &[&str],
 ) -> IntGaugeVec {
-    #[allow(clippy::expect_used)]
     let v = IntGaugeVec::new(Opts::new(name, help), labels).expect("valid metric identifier");
-    #[allow(clippy::expect_used)]
     registry
         .register(Box::new(v.clone()))
         .expect("unique metric name");
