@@ -87,9 +87,7 @@ pub fn resolve_operator_key(flag: Option<String>) -> anyhow::Result<String> {
 
 pub fn generate_and_save_agent_key(path: &Path) -> anyhow::Result<SigningKey> {
     let mut key_bytes = [0u8; 32];
-    // OS RNG failures are unrecoverable and should not happen on any supported platform.
-    #[allow(clippy::expect_used)]
-    getrandom::fill(&mut key_bytes).expect("OS RNG failed");
+    getrandom::fill(&mut key_bytes).map_err(|e| anyhow::anyhow!("OS RNG failed: {e}"))?;
     let key = SigningKey::from_bytes(&key_bytes);
     write_key_file(path, &key.to_bytes())
         .with_context(|| format!("failed to write key file: {}", path.display()))?;

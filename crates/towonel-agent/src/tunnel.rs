@@ -326,6 +326,10 @@ async fn handle_connection(
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "stream dispatch dispatches over PROXY/TLS/TCP shapes; splitting fragments the flow"
+)]
 async fn handle_stream(
     mut quic_send: iroh::endpoint::SendStream,
     mut quic_recv: iroh::endpoint::RecvStream,
@@ -432,7 +436,10 @@ async fn handle_stream(
 
         metrics.streams_completed.inc();
         // truncation is intentional: streams won't last 584 million years
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "streams won't last 584 million years"
+        )]
         let duration_ms = start.elapsed().as_millis() as u64;
         debug!(duration_ms, "stream closed");
         Ok(())
@@ -456,12 +463,12 @@ async fn forward_plain(
 
     let q2o = async {
         let res = forward_quic_to_writer(proxy_prefix, quic_recv, &mut origin_write).await;
-        let _ = origin_write.shutdown().await;
+        drop(origin_write.shutdown().await);
         res
     };
     let o2q = async {
         let res = io::copy_buf(&mut origin_read, quic_send).await;
-        let _ = quic_send.finish();
+        drop(quic_send.finish());
         res
     };
 
@@ -477,7 +484,10 @@ async fn forward_plain(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "splitting into a config struct adds plumbing churn for negligible call-site benefit"
+)]
 async fn handle_tcp_stream(
     service_name: &str,
     client_addrs: ClientAddrs,
@@ -520,12 +530,12 @@ async fn handle_tcp_stream(
 
         let q2o = async {
             let res = forward_quic_to_writer(Vec::new(), &mut quic_recv, &mut origin_write).await;
-            let _ = origin_write.shutdown().await;
+            drop(origin_write.shutdown().await);
             res
         };
         let o2q = async {
             let res = io::copy_buf(&mut origin_read, &mut quic_send).await;
-            let _ = quic_send.finish();
+            drop(quic_send.finish());
             res
         };
 
@@ -540,7 +550,10 @@ async fn handle_tcp_stream(
         }
 
         metrics.streams_completed.inc();
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "tcp streams won't last 584 million years"
+        )]
         let duration_ms = start.elapsed().as_millis() as u64;
         debug!(duration_ms, "tcp stream closed");
         Ok(())
@@ -549,7 +562,10 @@ async fn handle_tcp_stream(
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "splitting into a config struct adds plumbing churn for negligible call-site benefit"
+)]
 async fn forward_tls(
     mut origin: TcpStream,
     server_name: ServerName<'static>,
@@ -576,12 +592,12 @@ async fn forward_tls(
 
     let q2o = async {
         let res = forward_quic_to_writer(Vec::new(), quic_recv, &mut tls_write).await;
-        let _ = tls_write.shutdown().await;
+        drop(tls_write.shutdown().await);
         res
     };
     let o2q = async {
         let res = io::copy_buf(&mut tls_read, quic_send).await;
-        let _ = quic_send.finish();
+        drop(quic_send.finish());
         res
     };
 

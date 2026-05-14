@@ -208,7 +208,10 @@ pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
                     let Some(delay) = backoff_iter.next() else {
                         return Err(e);
                     };
-                    #[allow(clippy::cast_possible_truncation)]
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "backoff delay is bounded well under u64::MAX millis"
+                    )]
                     let backoff_ms = delay.as_millis() as u64;
                     warn!(backoff_ms, %hostname, "sequence conflict on UpsertHostname, retrying");
                     tokio::time::sleep(delay).await;
@@ -341,7 +344,10 @@ pub async fn publish_tcp_services(
                     let Some(delay) = backoff_iter.next() else {
                         return Err(e);
                     };
-                    #[allow(clippy::cast_possible_truncation)]
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        reason = "backoff delay is bounded well under u64::MAX millis"
+                    )]
                     let backoff_ms = delay.as_millis() as u64;
                     warn!(backoff_ms, %service, "sequence conflict on UpsertTcpService, retrying");
                     tokio::time::sleep(delay).await;
@@ -488,12 +494,12 @@ fn parse_trusted_edges_env() -> HashSet<EndpointId> {
 /// Read [`INVITE_TOKEN_ENV`] or return a helpful error.
 pub fn token_from_env() -> anyhow::Result<String> {
     std::env::var(INVITE_TOKEN_ENV)
-        .map_err(|_| anyhow!("{INVITE_TOKEN_ENV} is not set. Pass a `tt_inv_2_...` token."))
+        .map_err(|_e| anyhow!("{INVITE_TOKEN_ENV} is not set. Pass a `tt_inv_2_...` token."))
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::large_futures)]
+    #![expect(clippy::large_futures, reason = "test futures are not on the hot path")]
 
     use super::*;
 

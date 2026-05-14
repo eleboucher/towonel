@@ -1,3 +1,8 @@
+#![expect(
+    clippy::map_err_ignore,
+    reason = "TryInto length-mismatch errors carry no information beyond what our custom messages convey"
+)]
+
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;
@@ -142,6 +147,10 @@ impl Eq for PqPublicKey {}
 
 impl fmt::Debug for PqPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "PQ_PUB_KEY_LEN = 1952 > 8, so the 8-byte slice is always in bounds"
+        )]
         let short: String = B64.encode(&self.0[..8]);
         write!(f, "PqPublicKey({short}…, {PQ_PUB_KEY_LEN} bytes)")
     }
@@ -214,8 +223,10 @@ impl TenantKeypair {
     #[must_use]
     pub fn generate() -> Self {
         let mut seed = [0u8; PQ_SEED_LEN];
-        // OS RNG failure is unrecoverable at this layer.
-        #[allow(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "OS RNG failure is unrecoverable at this layer"
+        )]
         {
             getrandom::fill(&mut seed).expect("OS RNG failed");
         }
@@ -260,7 +271,10 @@ impl TenantKeypair {
     pub fn sign(&self, message: &[u8]) -> [u8; PQ_SIGNATURE_LEN] {
         // fips204's `try_sign` only fails if it can't draw OS RNG bytes or
         // if `ctx` exceeds 255 bytes — neither can happen here.
-        #[allow(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "ctx is empty and OS RNG failure is unrecoverable"
+        )]
         self.priv_key
             .try_sign(message, b"")
             .expect("ml-dsa sign should not fail with empty ctx")
@@ -273,7 +287,10 @@ impl TenantKeypair {
     #[must_use]
     pub fn sign_deterministic(&self, message: &[u8]) -> [u8; PQ_SIGNATURE_LEN] {
         // Infallible for ctx shorter than 256 bytes.
-        #[allow(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "infallible for ctx shorter than 256 bytes"
+        )]
         self.priv_key
             .try_sign_with_seed(&[0u8; 32], message, b"")
             .expect("ml-dsa deterministic sign should not fail with empty ctx")
@@ -369,8 +386,10 @@ impl AgentKeypair {
     #[must_use]
     pub fn generate() -> Self {
         let mut bytes = Zeroizing::new([0u8; 32]);
-        // OS RNG failure is unrecoverable at this layer.
-        #[allow(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "OS RNG failure is unrecoverable at this layer"
+        )]
         {
             getrandom::fill(bytes.as_mut()).expect("OS RNG failed");
         }
@@ -429,10 +448,7 @@ fn load_or_generate_key_bytes(path: &Path) -> anyhow::Result<[u8; 32]> {
     // missing. Without atomic create-or-fail we'd end up with divergent keys.
     // Try create-new first, fall back to read on AlreadyExists.
     let mut bytes = [0u8; 32];
-    #[allow(clippy::expect_used)]
-    {
-        getrandom::fill(&mut bytes).expect("OS RNG failed");
-    }
+    getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("OS RNG failed: {e}"))?;
     match write_key_file_exclusive(path, &bytes) {
         Ok(()) => Ok(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => std::fs::read(path)?
@@ -491,7 +507,10 @@ pub fn load_tenant_keypair(path: &Path) -> anyhow::Result<TenantKeypair> {
 }
 
 #[cfg(test)]
-#[allow(clippy::uninlined_format_args)]
+#[expect(
+    clippy::uninlined_format_args,
+    reason = "tests use existing pattern variables for clarity"
+)]
 mod tests {
     use super::*;
 
@@ -536,8 +555,8 @@ mod tests {
 
     #[test]
     fn tenant_id_rejects_bad_hex() {
-        assert!("not-hex".parse::<TenantId>().is_err());
-        assert!("abcd".parse::<TenantId>().is_err()); // too short
+        "not-hex".parse::<TenantId>().unwrap_err();
+        "abcd".parse::<TenantId>().unwrap_err(); // too short
     }
 
     #[test]
@@ -573,11 +592,11 @@ mod tests {
     #[test]
     fn pq_pubkey_rejects_wrong_length() {
         // Empty
-        assert!(PqPublicKey::from_slice(&[]).is_err());
+        PqPublicKey::from_slice(&[]).unwrap_err();
         // One byte short
-        assert!(PqPublicKey::from_slice(&vec![0u8; PQ_PUB_KEY_LEN - 1]).is_err());
+        PqPublicKey::from_slice(&vec![0u8; PQ_PUB_KEY_LEN - 1]).unwrap_err();
         // One byte long
-        assert!(PqPublicKey::from_slice(&vec![0u8; PQ_PUB_KEY_LEN + 1]).is_err());
+        PqPublicKey::from_slice(&vec![0u8; PQ_PUB_KEY_LEN + 1]).unwrap_err();
     }
 
     #[test]
@@ -652,8 +671,8 @@ mod tests {
     fn load_or_generate_tenant_keypair_creates_file() {
         let dir = std::env::temp_dir().join(format!("towonel-test-tkp-{}", std::process::id()));
         let path = dir.join("tenant.key");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_file(&path));
+        drop(std::fs::remove_dir_all(&dir));
 
         let kp1 = load_or_generate_tenant_keypair(&path).unwrap();
         assert!(path.exists());
@@ -665,8 +684,8 @@ mod tests {
         assert_eq!(kp1.public_key(), kp2.public_key());
         assert_eq!(kp1.id(), kp2.id());
 
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_file(&path));
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     #[test]
@@ -679,7 +698,7 @@ mod tests {
         let err = load_or_generate_tenant_keypair(&path).unwrap_err();
         assert!(err.to_string().contains("32 bytes"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_dir_all(&dir));
     }
 
     #[test]
@@ -694,14 +713,14 @@ mod tests {
     fn load_or_generate_secret_key_roundtrips() {
         let dir = std::env::temp_dir().join(format!("towonel-test-sk-{}", std::process::id()));
         let path = dir.join("secret.key");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_file(&path));
+        drop(std::fs::remove_dir_all(&dir));
 
         let k1 = load_or_generate_secret_key(&path).unwrap();
         let k2 = load_or_generate_secret_key(&path).unwrap();
         assert_eq!(k1.to_bytes(), k2.to_bytes());
 
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_file(&path));
+        drop(std::fs::remove_dir_all(&dir));
     }
 }

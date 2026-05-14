@@ -160,7 +160,6 @@ impl AcmeCoordinator {
             let mut inflight = self.inflight.lock().await;
             // map_or_else cannot be used here: the closure would need to mutate inflight,
             // which conflicts with the immutable borrow from get(). Keep if-let.
-            #[allow(clippy::option_if_let_else)]
             if let Some(existing) = inflight.get(hostname) {
                 let notify = Arc::clone(existing);
                 drop(inflight);
@@ -253,7 +252,10 @@ pub async fn run_http01_server(listen_addr: &str, tokens: ChallengeTokens) -> an
                     async move {
                         let auth = tokens.pin().get(&token).cloned();
                         // map_or_else would not be cleaner here due to the tuple construction.
-                        #[allow(clippy::option_if_let_else)]
+                        #[expect(
+                            clippy::option_if_let_else,
+                            reason = "tuple construction in branches makes if-let clearer than map_or_else"
+                        )]
                         if let Some(auth) = auth {
                             (
                                 axum::http::StatusCode::OK,
@@ -398,7 +400,7 @@ async fn ensure_cert_dir_writable(cert_dir: &Path) -> anyhow::Result<()> {
     tokio::fs::write(&probe, b"")
         .await
         .with_context(|| format!("ACME cert_dir not writable: {}", cert_dir.display()))?;
-    let _ = tokio::fs::remove_file(&probe).await;
+    drop(tokio::fs::remove_file(&probe).await);
     Ok(())
 }
 
@@ -483,11 +485,11 @@ fn load_persisted_failures(cert_dir: &Path) -> HashMap<String, u64> {
         };
         let Ok(record) = serde_json::from_slice::<FailureRecord>(&bytes) else {
             warn!(file = %path.display(), "failed to parse ACME failure sidecar; removing");
-            let _ = std::fs::remove_file(&path);
+            drop(std::fs::remove_file(&path));
             continue;
         };
         if record.retry_after_unix <= now {
-            let _ = std::fs::remove_file(&path);
+            drop(std::fs::remove_file(&path));
             continue;
         }
         out.insert(stem.to_string(), record.retry_after_unix);
@@ -507,7 +509,7 @@ mod tests {
     fn temp_cert_dir(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("towonel-acme-test-{}-{}", tag, std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(std::fs::remove_dir_all(&dir));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }

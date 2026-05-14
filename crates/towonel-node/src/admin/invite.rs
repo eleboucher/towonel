@@ -89,7 +89,6 @@ struct ListInvitesResp {
 }
 
 #[derive(serde::Deserialize)]
-#[allow(clippy::struct_field_names)]
 struct InviteItem {
     invite_id: String,
     name: String,
@@ -189,7 +188,6 @@ struct ListEdgeInvitesResp {
 }
 
 #[derive(serde::Deserialize)]
-#[allow(clippy::struct_field_names)]
 struct EdgeInviteItem {
     invite_id: String,
     name: String,

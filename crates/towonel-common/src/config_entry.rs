@@ -98,12 +98,16 @@ impl<'de> Deserialize<'de> for SignedConfigEntry {
             tenant_id: TenantId,
         }
         let w = Wire::deserialize(d)?;
-        let sig_arr: [u8; PQ_SIGNATURE_LEN] = w.signature.as_ref().try_into().map_err(|_| {
-            D::Error::custom(format!(
-                "signature must be exactly {PQ_SIGNATURE_LEN} bytes (ml-dsa-65), got {}",
-                w.signature.len()
-            ))
-        })?;
+        let sig_arr: [u8; PQ_SIGNATURE_LEN] =
+            w.signature
+                .as_ref()
+                .try_into()
+                .map_err(|_e: std::array::TryFromSliceError| {
+                    D::Error::custom(format!(
+                        "signature must be exactly {PQ_SIGNATURE_LEN} bytes (ml-dsa-65), got {}",
+                        w.signature.len()
+                    ))
+                })?;
         Ok(Self {
             payload_cbor: w.payload.into_vec(),
             signature: Box::new(sig_arr),
@@ -206,7 +210,10 @@ fn from_canonical_cbor(bytes: &[u8]) -> Result<ConfigPayload, ConfigEntryError> 
 }
 
 #[cfg(test)]
-#[allow(clippy::manual_let_else)]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "test code prefers traditional asserts for readability"
+)]
 mod tests {
     use super::*;
 

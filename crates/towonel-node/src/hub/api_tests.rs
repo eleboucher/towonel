@@ -1,5 +1,3 @@
-#![allow(clippy::doc_markdown, clippy::significant_drop_tightening)]
-
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::Serialize;
@@ -171,7 +169,7 @@ async fn create_invite_hostname_conflict_rejected() {
     assert_eq!(body["error"]["code"], "hostname_conflict");
 }
 
-/// Two sequential (not concurrent, but equivalent under the invite_lock)
+/// Two sequential (not concurrent, but equivalent under the `invite_lock`)
 /// `POST /v1/invites` with overlapping hostnames: the first creates a
 /// pending invite, the second must be rejected with `hostname_conflict`
 /// even though no tenant has redeemed yet, so the policy itself is empty.

@@ -16,8 +16,14 @@ pub async fn read_v2<R: AsyncRead + Unpin>(stream: &mut R) -> anyhow::Result<Soc
 
     let payload_len = u16::from_be_bytes([head[14], head[15]]) as usize;
     let mut buf = vec![0u8; FIXED_HEADER_LEN + payload_len];
-    buf[..FIXED_HEADER_LEN].copy_from_slice(&head);
-    stream.read_exact(&mut buf[FIXED_HEADER_LEN..]).await?;
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "buf was just sized to FIXED_HEADER_LEN + payload_len"
+    )]
+    {
+        buf[..FIXED_HEADER_LEN].copy_from_slice(&head);
+        stream.read_exact(&mut buf[FIXED_HEADER_LEN..]).await?;
+    }
 
     let header = v2::Header::try_from(buf.as_slice())
         .map_err(|e| anyhow::anyhow!("parse PROXY v2: {e:?}"))?;
@@ -75,6 +81,6 @@ mod tests {
             .await
             .unwrap();
         drop(client);
-        assert!(read_v2(&mut server).await.is_err());
+        read_v2(&mut server).await.unwrap_err();
     }
 }

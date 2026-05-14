@@ -235,11 +235,16 @@ enum EdgeInviteAction {
     },
 }
 
-#[allow(clippy::large_futures)]
+#[expect(
+    clippy::large_futures,
+    reason = "top-level main future is large; boxing it provides no benefit"
+)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // The ring provider install only fails if another provider was already installed.
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "duplicate CryptoProvider install is a startup-time programmer error"
+    )]
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install ring CryptoProvider");

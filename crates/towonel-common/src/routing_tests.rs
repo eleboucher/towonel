@@ -1,4 +1,8 @@
-#![allow(clippy::redundant_closure_for_method_calls, clippy::similar_names)]
+#![expect(
+    clippy::redundant_closure_for_method_calls,
+    clippy::similar_names,
+    reason = "test code prefers readability over minor style nits"
+)]
 
 use super::*;
 use crate::config_entry::ConfigPayload;

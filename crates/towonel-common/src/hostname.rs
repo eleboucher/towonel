@@ -32,13 +32,26 @@ pub fn wildcard_lookup_ascii_lower<'m, V>(
         return Some(v);
     }
     if let Some(dot_pos) = lower.find('.') {
+        #[expect(
+            clippy::string_slice,
+            reason = "dot_pos is a valid char boundary returned by find('.')"
+        )]
         let suffix = &lower[dot_pos + 1..];
         let mut buf = [0u8; 257];
         if suffix.len() + 2 <= buf.len() {
             buf[0] = b'*';
             buf[1] = b'.';
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "guarded by suffix.len() + 2 <= buf.len() above"
+            )]
             buf[2..2 + suffix.len()].copy_from_slice(suffix.as_bytes());
-            if let Ok(wildcard) = std::str::from_utf8(&buf[..2 + suffix.len()])
+            #[expect(
+                clippy::indexing_slicing,
+                reason = "guarded by suffix.len() + 2 <= buf.len() above"
+            )]
+            let wildcard_bytes = &buf[..2 + suffix.len()];
+            if let Ok(wildcard) = std::str::from_utf8(wildcard_bytes)
                 && let Some(v) = get(wildcard)
             {
                 return Some(v);
@@ -122,51 +135,51 @@ mod tests {
 
     #[test]
     fn accepts_valid_hostnames() {
-        assert!(validate_hostname("app.example.eu").is_ok());
-        assert!(validate_hostname("a-b.c-d.example.eu").is_ok());
-        assert!(validate_hostname("*.example.eu").is_ok());
-        assert!(validate_hostname("sub.deep.example.eu").is_ok());
-        assert!(validate_hostname("APP.EXAMPLE.EU").is_ok());
+        validate_hostname("app.example.eu").unwrap();
+        validate_hostname("a-b.c-d.example.eu").unwrap();
+        validate_hostname("*.example.eu").unwrap();
+        validate_hostname("sub.deep.example.eu").unwrap();
+        validate_hostname("APP.EXAMPLE.EU").unwrap();
     }
 
     #[test]
     fn rejects_empty() {
-        assert!(validate_hostname("").is_err());
+        validate_hostname("").unwrap_err();
     }
 
     #[test]
     fn rejects_single_label() {
-        assert!(validate_hostname("localhost").is_err());
-        assert!(validate_hostname("*").is_err());
+        validate_hostname("localhost").unwrap_err();
+        validate_hostname("*").unwrap_err();
     }
 
     #[test]
     fn rejects_leading_trailing_dot() {
-        assert!(validate_hostname(".example.eu").is_err());
-        assert!(validate_hostname("example.eu.").is_err());
+        validate_hostname(".example.eu").unwrap_err();
+        validate_hostname("example.eu.").unwrap_err();
     }
 
     #[test]
     fn rejects_leading_trailing_hyphen() {
-        assert!(validate_hostname("-bad.example.eu").is_err());
-        assert!(validate_hostname("bad-.example.eu").is_err());
+        validate_hostname("-bad.example.eu").unwrap_err();
+        validate_hostname("bad-.example.eu").unwrap_err();
     }
 
     #[test]
     fn rejects_invalid_chars() {
-        assert!(validate_hostname("sp ace.example.eu").is_err());
-        assert!(validate_hostname("under_score.example.eu").is_err());
+        validate_hostname("sp ace.example.eu").unwrap_err();
+        validate_hostname("under_score.example.eu").unwrap_err();
     }
 
     #[test]
     fn rejects_long_hostname() {
         let long = format!("{}.example.eu", "a".repeat(250));
-        assert!(validate_hostname(&long).is_err());
+        validate_hostname(&long).unwrap_err();
     }
 
     #[test]
     fn rejects_long_label() {
         let long = format!("{}.example.eu", "a".repeat(64));
-        assert!(validate_hostname(&long).is_err());
+        validate_hostname(&long).unwrap_err();
     }
 }

@@ -41,7 +41,7 @@ async fn authenticate_edge_subscriber(
         .db
         .edge_is_registered(&node_id_bytes)
         .await
-        .map_err(|_| "failed to check edge registration")?
+        .map_err(|_e| "failed to check edge registration")?
     {
         return Err("edge is not registered with this hub");
     }
@@ -64,8 +64,10 @@ pub(super) async fn build_initial_snapshot(state: &AppState) -> anyhow::Result<R
 /// wrap it in an SSE `routes` event.
 fn route_event(table: &RouteTable) -> axum::response::sse::Event {
     let mut buf = Vec::new();
-    // RouteTable only contains serializable primitives; CBOR encode into a Vec is infallible.
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "RouteTable contains only serializable primitives; CBOR encode into a Vec is infallible"
+    )]
     ciborium::into_writer(table, &mut buf).expect("RouteTable CBOR encode is infallible");
     axum::response::sse::Event::default()
         .event("routes")

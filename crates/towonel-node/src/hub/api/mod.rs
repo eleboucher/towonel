@@ -233,7 +233,10 @@ fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<A
         return router;
     }
     let governor_conf = std::sync::Arc::new(
-        #[allow(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "config builder values are constants; failure is a programmer error caught at startup"
+        )]
         tower_governor::governor::GovernorConfigBuilder::default()
             .per_second(2)
             .burst_size(20)

@@ -90,7 +90,7 @@ pub fn redact_db_url(url: &str) -> String {
         return url.to_string();
     };
     if parsed.password().is_some() {
-        let _ = parsed.set_password(Some("***"));
+        _ = parsed.set_password(Some("***"));
     }
     parsed.to_string()
 }
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn parse_cidr_list_rejects_garbage() {
-        assert!(parse_cidr_list("not-a-cidr").is_err());
+        parse_cidr_list("not-a-cidr").unwrap_err();
     }
 
     // `default_trusted_cidrs` filter_maps `.parse().ok()`, which would silently

@@ -1,3 +1,8 @@
+#![expect(
+    clippy::map_err_ignore,
+    reason = "TryInto length-mismatch errors carry no information beyond what our custom messages convey"
+)]
+
 use std::fmt;
 
 use base64::Engine;
@@ -117,28 +122,28 @@ impl InviteToken {
                 expected: TENANT_TOKEN_PREFIX,
             })?;
         let parts: Vec<&str> = body.split('.').collect();
-        if parts.len() != 4 {
+        let [hub_url_b64, id_b64, secret_b64, seed_b64] = parts.as_slice() else {
             return Err(InviteTokenError::WrongSegmentCount {
                 expected: 4,
                 got: parts.len(),
             });
-        }
+        };
 
-        let hub_url = String::from_utf8(B64.decode(parts[0])?)?;
+        let hub_url = String::from_utf8(B64.decode(hub_url_b64)?)?;
 
-        let id_bytes = B64.decode(parts[1])?;
+        let id_bytes = B64.decode(id_b64)?;
         let invite_id: [u8; INVITE_ID_LEN] = id_bytes
             .as_slice()
             .try_into()
             .map_err(|_| InviteTokenError::BadInviteIdLen(id_bytes.len()))?;
 
-        let secret_bytes = Zeroizing::new(B64.decode(parts[2])?);
+        let secret_bytes = Zeroizing::new(B64.decode(secret_b64)?);
         let invite_secret: [u8; INVITE_SECRET_LEN] = secret_bytes
             .as_slice()
             .try_into()
             .map_err(|_| InviteTokenError::BadInviteSecretLen(secret_bytes.len()))?;
 
-        let seed_bytes = Zeroizing::new(B64.decode(parts[3])?);
+        let seed_bytes = Zeroizing::new(B64.decode(seed_b64)?);
         let tenant_seed: [u8; TENANT_SEED_LEN] = seed_bytes
             .as_slice()
             .try_into()
@@ -238,28 +243,28 @@ impl EdgeInviteToken {
                 expected: EDGE_TOKEN_PREFIX,
             })?;
         let parts: Vec<&str> = body.split('.').collect();
-        if parts.len() != 4 {
+        let [hub_url_b64, id_b64, secret_b64, seed_b64] = parts.as_slice() else {
             return Err(InviteTokenError::WrongSegmentCount {
                 expected: 4,
                 got: parts.len(),
             });
-        }
+        };
 
-        let hub_url = String::from_utf8(B64.decode(parts[0])?)?;
+        let hub_url = String::from_utf8(B64.decode(hub_url_b64)?)?;
 
-        let id_bytes = B64.decode(parts[1])?;
+        let id_bytes = B64.decode(id_b64)?;
         let invite_id: [u8; INVITE_ID_LEN] = id_bytes
             .as_slice()
             .try_into()
             .map_err(|_| InviteTokenError::BadInviteIdLen(id_bytes.len()))?;
 
-        let secret_bytes = Zeroizing::new(B64.decode(parts[2])?);
+        let secret_bytes = Zeroizing::new(B64.decode(secret_b64)?);
         let invite_secret: [u8; INVITE_SECRET_LEN] = secret_bytes
             .as_slice()
             .try_into()
             .map_err(|_| InviteTokenError::BadInviteSecretLen(secret_bytes.len()))?;
 
-        let seed_bytes = Zeroizing::new(B64.decode(parts[3])?);
+        let seed_bytes = Zeroizing::new(B64.decode(seed_b64)?);
         let node_seed: [u8; EDGE_SEED_LEN] = seed_bytes
             .as_slice()
             .try_into()
@@ -302,7 +307,10 @@ impl InviteHashKey {
     #[must_use]
     pub fn generate() -> Self {
         let mut k = Zeroizing::new([0u8; 32]);
-        #[allow(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "OS RNG failure is unrecoverable at this layer"
+        )]
         getrandom::fill(k.as_mut_slice()).expect("OS RNG failed");
         Self(k)
     }
@@ -330,8 +338,10 @@ pub fn hash_invite_secret(key: &InviteHashKey, secret: &[u8]) -> [u8; 32] {
 
 fn fresh_bytes<const N: usize>() -> [u8; N] {
     let mut buf = [0u8; N];
-    // OS RNG failure is unrecoverable at this layer.
-    #[allow(clippy::expect_used)]
+    #[expect(
+        clippy::expect_used,
+        reason = "OS RNG failure is unrecoverable at this layer"
+    )]
     getrandom::fill(&mut buf).expect("OS RNG failed");
     buf
 }

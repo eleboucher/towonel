@@ -165,7 +165,6 @@ fn build_addr_cache(
 }
 
 #[cfg(test)]
-#[allow(clippy::doc_markdown)]
 mod tests {
     use super::*;
     use iroh::SecretKey;

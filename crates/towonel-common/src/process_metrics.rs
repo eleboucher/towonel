@@ -7,11 +7,20 @@
 /// Register the standard Prometheus `process_*` metrics on `registry`.
 ///
 /// No-op on non-Linux platforms.
-pub fn register(#[allow(unused_variables)] registry: &prometheus::Registry) {
+pub fn register(
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(unused_variables, reason = "unused on non-linux platforms")
+    )]
+    registry: &prometheus::Registry,
+) {
     #[cfg(target_os = "linux")]
     {
         let collector = prometheus::process_collector::ProcessCollector::for_self();
-        #[allow(clippy::expect_used)]
+        #[expect(
+            clippy::expect_used,
+            reason = "duplicate registration is a startup-time programmer error"
+        )]
         registry
             .register(Box::new(collector))
             .expect("process collector registers cleanly");

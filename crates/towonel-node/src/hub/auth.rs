@@ -1,3 +1,8 @@
+#![expect(
+    clippy::map_err_ignore,
+    reason = "this fn returns &'static str codes; original error details would be discarded by the API contract anyway"
+)]
+
 use axum::http::{HeaderMap, header};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;

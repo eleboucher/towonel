@@ -148,7 +148,9 @@ impl RouteTable {
         sorted_tenants.sort_by_key(|t| *t.as_bytes());
 
         for tenant_id in sorted_tenants {
-            let state = &tenant_state[tenant_id];
+            let Some(state) = tenant_state.get(tenant_id) else {
+                continue;
+            };
             materialize_tenant(
                 tenant_id,
                 state,
@@ -274,7 +276,6 @@ impl RouteTable {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn materialize_tenant(
     tenant_id: &TenantId,
     state: &TenantState,

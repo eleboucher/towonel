@@ -103,6 +103,10 @@ pub async fn read_handshake(
     let body_len = u16::from_be_bytes([preamble[14], preamble[15]]) as usize;
     let mut all = preamble.to_vec();
     all.resize(V2_PREAMBLE_LEN + body_len, 0);
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "all was just resized to V2_PREAMBLE_LEN + body_len"
+    )]
     stream.read_exact(&mut all[V2_PREAMBLE_LEN..]).await?;
 
     let header = v2::Header::try_from(all.as_slice()).map_err(|e| {
