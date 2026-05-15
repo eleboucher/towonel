@@ -165,7 +165,8 @@ pub fn router_unlimited(state: Arc<AppState>) -> Router {
 
 fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let operator_routes = operator_routes(&state);
-    let public_write = maybe_rate_limit(public_write_routes(), rate_limit);
+    let rate_limited_public = maybe_rate_limit(rate_limited_routes(), rate_limit);
+    let signed_public = signed_public_routes();
     let unlimited_public = Router::new()
         .route("/v1/health", get(entries::health))
         .route("/v1/edges", get(entries::list_edges));
@@ -192,7 +193,8 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         .into_inner();
 
     Router::new()
-        .merge(public_write)
+        .merge(rate_limited_public)
+        .merge(signed_public)
         .merge(unlimited_public)
         .merge(operator_routes)
         .layer(middleware::from_fn_with_state(
@@ -223,11 +225,14 @@ fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
 }
 
-fn public_write_routes() -> Router<Arc<AppState>> {
+fn rate_limited_routes() -> Router<Arc<AppState>> {
+    Router::new().route("/v1/bootstrap", post(bootstrap::post_bootstrap))
+}
+
+fn signed_public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/entries", post(entries::post_entry))
         .route("/v1/tenants/{id}/entries", get(entries::get_tenant_entries))
-        .route("/v1/bootstrap", post(bootstrap::post_bootstrap))
         .route("/v1/agent/heartbeat", post(agent_heartbeat::post_heartbeat))
         .route("/v1/routes/subscribe", get(subscribe::routes_subscribe))
 }
@@ -242,8 +247,8 @@ fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<A
             reason = "config builder values are constants; failure is a programmer error caught at startup"
         )]
         tower_governor::governor::GovernorConfigBuilder::default()
-            .per_second(10)
-            .burst_size(100)
+            .per_second(2)
+            .burst_size(20)
             .finish()
             .expect("tower_governor config is valid"),
     );
