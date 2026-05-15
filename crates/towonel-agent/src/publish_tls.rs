@@ -3,7 +3,7 @@ use towonel_common::identity::TenantKeypair;
 use tracing::{info, warn};
 
 use crate::config::ServiceConfig;
-use crate::hub_client::{fetch_latest_sequence, submit_entry};
+use crate::hub_client::{fetch_latest_sequence, retry_on_rate_limit, submit_entry};
 
 /// Publish per-service TLS policy entries so the edge knows which
 /// hostnames it should terminate vs pass-through. Sequence numbers are
@@ -20,7 +20,10 @@ pub async fn publish(
     if services.is_empty() {
         return Ok(());
     }
-    let mut seq = fetch_latest_sequence(client, hub_url, tenant_kp).await?;
+    let mut seq = retry_on_rate_limit("fetch_latest_sequence", || {
+        fetch_latest_sequence(client, hub_url, tenant_kp)
+    })
+    .await?;
 
     for svc in services {
         seq += 1;
@@ -34,7 +37,11 @@ pub async fn publish(
                 mode: svc.tls_mode,
             },
         };
-        match submit_entry(client, hub_url, tenant_kp, payload).await {
+        match retry_on_rate_limit("SetHostnameTls", || {
+            submit_entry(client, hub_url, tenant_kp, payload.clone())
+        })
+        .await
+        {
             Ok(()) => info!(
                 hostname = %svc.hostname,
                 mode = svc.tls_mode.label(),

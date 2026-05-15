@@ -17,7 +17,8 @@ use towonel_common::invite::InviteToken;
 use tracing::{info, warn};
 
 use crate::hub_client::{
-    check_response, fetch_latest_sequence, is_sequence_conflict, is_unsupported_op, submit_entry,
+    check_response, fetch_latest_sequence, is_rate_limited, is_sequence_conflict,
+    is_unsupported_op, retry_on_rate_limit, submit_entry,
 };
 use crate::metrics::{self, AgentMetrics};
 
@@ -37,7 +38,7 @@ const REGISTER_MAX_ATTEMPTS: usize = 10;
 
 /// Backoff policy for sequence-conflict retries. Jittered so N replicas
 /// booting simultaneously don't re-collide on every retry.
-fn retry_policy() -> ExponentialBuilder {
+pub fn retry_policy() -> ExponentialBuilder {
     ExponentialBuilder::default()
         .with_min_delay(Duration::from_millis(50))
         .with_max_delay(Duration::from_secs(2))
@@ -148,15 +149,16 @@ pub async fn register(ctx: &BootstrapContext) -> anyhow::Result<()> {
         Ok(())
     })
     .retry(retry_policy())
-    .when(is_sequence_conflict)
+    .when(|e| is_sequence_conflict(e) || is_rate_limited(e))
     .notify(|e, dur| {
-        warn!(error = %e, backoff_ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX), "sequence conflict on UpsertAgent, retrying");
+        warn!(error = %e, backoff_ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX), "retrying UpsertAgent");
     })
     .await
 }
 
 pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
-    let existing = fetch_existing_hostnames(ctx).await?;
+    let existing =
+        retry_on_rate_limit("fetch_existing_hostnames", || fetch_existing_hostnames(ctx)).await?;
     let desired: HashSet<String> = ctx.hostnames.iter().map(|h| h.to_lowercase()).collect();
 
     let missing: Vec<&String> = ctx
@@ -174,7 +176,11 @@ pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut next_seq = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+    let mut next_seq = retry_on_rate_limit("fetch_latest_sequence", || {
+        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp)
+    })
+    .await?
+        + 1;
 
     for hostname in stale {
         submit_with_retry(
@@ -210,8 +216,10 @@ async fn submit_with_retry(
     op: ConfigOp,
     label: &str,
 ) -> anyhow::Result<()> {
-    let policy = retry_policy();
-    let mut backoff_iter = policy.build();
+    // Independent budgets: a 429 storm shouldn't burn the conflict-retry
+    // quota and vice versa.
+    let mut conflict_backoff = retry_policy().build();
+    let mut rate_limit_backoff = retry_policy().build();
     loop {
         let payload = ConfigPayload {
             version: 1,
@@ -226,7 +234,7 @@ async fn submit_with_retry(
                 return Ok(());
             }
             Err(e) if is_sequence_conflict(&e) => {
-                let Some(delay) = backoff_iter.next() else {
+                let Some(delay) = conflict_backoff.next() else {
                     return Err(e);
                 };
                 #[expect(
@@ -236,8 +244,23 @@ async fn submit_with_retry(
                 let backoff_ms = delay.as_millis() as u64;
                 warn!(backoff_ms, op = label, "sequence conflict, retrying");
                 tokio::time::sleep(delay).await;
-                *next_seq =
-                    fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+                *next_seq = retry_on_rate_limit(label, || {
+                    fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp)
+                })
+                .await?
+                    + 1;
+            }
+            Err(e) if is_rate_limited(&e) => {
+                let Some(delay) = rate_limit_backoff.next() else {
+                    return Err(e);
+                };
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "backoff delay is bounded well under u64::MAX millis"
+                )]
+                let backoff_ms = delay.as_millis() as u64;
+                warn!(backoff_ms, op = label, "hub rate-limited, retrying");
+                tokio::time::sleep(delay).await;
             }
             Err(e) => return Err(e),
         }
@@ -382,7 +405,10 @@ async fn publish_services(
     desired: &[(String, u16)],
     proto: ServiceProtocol,
 ) -> anyhow::Result<()> {
-    let existing = fetch_existing_service_bindings(ctx, proto).await?;
+    let existing = retry_on_rate_limit("fetch_existing_service_bindings", || {
+        fetch_existing_service_bindings(ctx, proto)
+    })
+    .await?;
     let desired_names: HashSet<&str> = desired.iter().map(|(n, _)| n.as_str()).collect();
 
     let to_upsert: Vec<&(String, u16)> = desired
@@ -399,7 +425,11 @@ async fn publish_services(
         return Ok(());
     }
 
-    let mut next_seq = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+    let mut next_seq = retry_on_rate_limit("fetch_latest_sequence", || {
+        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp)
+    })
+    .await?
+        + 1;
 
     // Deletes first so a service renamed onto an in-use port can claim it.
     for service in to_delete {
@@ -467,7 +497,8 @@ pub async fn publish_udp_services(
 /// Must be called after [`register`] so the current agent is in the log
 /// before its predecessors are revoked.
 pub async fn reconcile_agents(ctx: &BootstrapContext) -> anyhow::Result<()> {
-    let existing = fetch_authorized_agents(ctx).await?;
+    let existing =
+        retry_on_rate_limit("fetch_authorized_agents", || fetch_authorized_agents(ctx)).await?;
     let current = ctx.agent_id();
     let stale: Vec<AgentId> = existing.into_iter().filter(|a| a != &current).collect();
 
@@ -475,7 +506,11 @@ pub async fn reconcile_agents(ctx: &BootstrapContext) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let mut next_seq = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+    let mut next_seq = retry_on_rate_limit("fetch_latest_sequence", || {
+        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp)
+    })
+    .await?
+        + 1;
     for agent_id in stale {
         let label = format!("RevokeAgent {agent_id}");
         submit_with_retry(
