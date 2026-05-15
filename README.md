@@ -146,13 +146,11 @@ TOWONEL_AGENT_TCP_SERVICES='[
 ]'
 ```
 
-After the agent restarts the edge binds the new ports within a few
-seconds. Re-publishing the same `name` with a different `listen_port`
-moves the binding. Removing a binding from the env does **not** retire
-it — bindings are append-only across agent restarts so a second agent
-under the same tenant can't accidentally erase the first agent's work.
-Retire a binding via `towonel admin tenant leave` (releases everything
-this tenant owns).
+Each agent boot reconciles the hub against the agent's env: added
+entries are upserted, removed entries are deleted, and stale agent IDs
+for the tenant are revoked. The env is the source of truth — run at
+most one agent per tenant. `towonel admin tenant leave` fully
+decommissions a tenant in one shot.
 
 Each port is unique per tenant and across tenants: claiming a port
 already bound to a different service — yours or somebody else's — is

@@ -148,6 +148,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         .map(|s| (s.name.clone(), s.listen_port))
         .collect();
     stateless::publish_udp_services(&ctx, &desired_udp_bindings).await?;
+    stateless::reconcile_agents(&ctx).await?;
     let heartbeat = stateless::spawn_heartbeat(ctx.clone(), metrics.clone());
 
     if !agent_config.services.is_empty() {
