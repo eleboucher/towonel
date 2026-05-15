@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1.24
 
-FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS chef
 ARG BUILDARCH
-ARG TARGETARCH
 ARG ZIG_VERSION=0.16.0
 ARG CARGO_ZIGBUILD_VERSION=0.22.3
+ARG CARGO_CHEF_VERSION=0.1.77
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libclang-dev clang \
@@ -20,16 +20,25 @@ RUN case "${BUILDARCH}" in \
     && ln -s "/opt/zig-${ZIG_ARCH}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig \
     && curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/cargo-zigbuild-${HOST_TARGET}.tar.xz" \
        | tar -xJO "cargo-zigbuild-${HOST_TARGET}/cargo-zigbuild" > /usr/local/bin/cargo-zigbuild \
-    && chmod +x /usr/local/bin/cargo-zigbuild
+    && chmod +x /usr/local/bin/cargo-zigbuild \
+    && curl -fsSL "https://github.com/LukeMathWalker/cargo-chef/releases/download/v${CARGO_CHEF_VERSION}/cargo-chef-${HOST_TARGET}.tar.xz" \
+       | tar -xJO "cargo-chef-${HOST_TARGET}/cargo-chef" > /usr/local/bin/cargo-chef \
+    && chmod +x /usr/local/bin/cargo-chef
 
 WORKDIR /app
+
+FROM chef AS planner
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY src/ src/
+RUN cargo chef prepare --recipe-path recipe.json
 
+FROM chef AS builder
+ARG TARGETARCH
+COPY rust-toolchain.toml ./
+COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/app/target,id=target-${TARGETARCH} \
     set -eux && \
     case "${TARGETARCH}" in \
         amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
@@ -37,19 +46,28 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac && \
     rustup target add "$RUST_TARGET" && \
+    cargo chef cook --release --zigbuild --target "$RUST_TARGET" --recipe-path recipe.json
+
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY src/ src/
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    set -eux && \
+    case "${TARGETARCH}" in \
+        amd64) RUST_TARGET=x86_64-unknown-linux-gnu ;; \
+        arm64) RUST_TARGET=aarch64-unknown-linux-gnu ;; \
+        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac && \
     cargo zigbuild --release --target "$RUST_TARGET" -p towonel-node && \
     mkdir -p /out && \
     cp "target/${RUST_TARGET}/release/towonel" /out/
 
 FROM debian:bookworm-slim AS runtime-prep
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libcap2-bin \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -g 10001 nonroot \
+RUN groupadd -g 10001 nonroot \
     && useradd -u 10001 -g 10001 -M -s /sbin/nologin nonroot \
     && install -d -o 10001 -g 10001 /var/lib/towonel /etc/towonel /data/certs /home/nonroot
 COPY --from=builder /out/towonel /usr/local/bin/towonel
-RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/towonel
 
 FROM debian:bookworm-slim
 RUN apt-get update \
