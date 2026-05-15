@@ -31,9 +31,6 @@ services:
       dockerfile: Dockerfile.agent
     environment:
       RUST_LOG: info
-    volumes:
-      - agent-data:/root/.towonel
     restart: unless-stopped
 volumes:
   node-data:
-  agent-data:
