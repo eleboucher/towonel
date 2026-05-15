@@ -155,74 +155,93 @@ pub async fn register(ctx: &BootstrapContext) -> anyhow::Result<()> {
     .await
 }
 
-/// Submit `UpsertHostname` entries for each hostname from the bootstrap
-/// response that isn't already present in the tenant's entry log. Idempotent
-/// across restarts.
 pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
-    if ctx.hostnames.is_empty() {
-        return Ok(());
-    }
-
     let existing = fetch_existing_hostnames(ctx).await?;
+    let desired: HashSet<String> = ctx.hostnames.iter().map(|h| h.to_lowercase()).collect();
+
     let missing: Vec<&String> = ctx
         .hostnames
         .iter()
         .filter(|h| !existing.contains(&h.to_lowercase()))
         .collect();
+    let stale: Vec<String> = existing
+        .iter()
+        .filter(|h| !desired.contains(*h))
+        .cloned()
+        .collect();
 
-    if missing.is_empty() {
-        info!(
-            count = ctx.hostnames.len(),
-            "all hostnames already published"
-        );
+    if missing.is_empty() && stale.is_empty() {
         return Ok(());
     }
 
-    // Fetch once, then increment locally. On a sequence conflict we re-fetch
-    // and retry; the happy path stays O(N) instead of O(N²) round-trips.
-    // The per-hostname retry state (mutable `next_seq` and re-fetch on
-    // conflict) doesn't fit backon's FnMut closure model cleanly, so we
-    // keep the loop manual here.
     let mut next_seq = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
-    let policy = retry_policy();
+
+    for hostname in stale {
+        submit_with_retry(
+            ctx,
+            &mut next_seq,
+            ConfigOp::DeleteHostname {
+                hostname: hostname.clone(),
+            },
+            &format!("DeleteHostname {hostname}"),
+        )
+        .await?;
+        info!(%hostname, "removed stale hostname");
+    }
 
     for hostname in missing {
-        let mut backoff_iter = policy.build();
-        loop {
-            let payload = ConfigPayload {
-                version: 1,
-                tenant_id: ctx.tenant_id,
-                sequence: next_seq,
-                timestamp: towonel_common::time::now_ms(),
-                op: ConfigOp::UpsertHostname {
-                    hostname: hostname.clone(),
-                },
-            };
-            match submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await {
-                Ok(()) => {
-                    info!(%hostname, sequence = next_seq, "published hostname");
-                    next_seq += 1;
-                    break;
-                }
-                Err(e) if is_sequence_conflict(&e) => {
-                    let Some(delay) = backoff_iter.next() else {
-                        return Err(e);
-                    };
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "backoff delay is bounded well under u64::MAX millis"
-                    )]
-                    let backoff_ms = delay.as_millis() as u64;
-                    warn!(backoff_ms, %hostname, "sequence conflict on UpsertHostname, retrying");
-                    tokio::time::sleep(delay).await;
-                    next_seq =
-                        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
-                }
-                Err(e) => return Err(e),
-            }
-        }
+        submit_with_retry(
+            ctx,
+            &mut next_seq,
+            ConfigOp::UpsertHostname {
+                hostname: hostname.clone(),
+            },
+            &format!("UpsertHostname {hostname}"),
+        )
+        .await?;
+        info!(%hostname, "published hostname");
     }
     Ok(())
+}
+
+async fn submit_with_retry(
+    ctx: &BootstrapContext,
+    next_seq: &mut u64,
+    op: ConfigOp,
+    label: &str,
+) -> anyhow::Result<()> {
+    let policy = retry_policy();
+    let mut backoff_iter = policy.build();
+    loop {
+        let payload = ConfigPayload {
+            version: 1,
+            tenant_id: ctx.tenant_id,
+            sequence: *next_seq,
+            timestamp: towonel_common::time::now_ms(),
+            op: op.clone(),
+        };
+        match submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await {
+            Ok(()) => {
+                *next_seq += 1;
+                return Ok(());
+            }
+            Err(e) if is_sequence_conflict(&e) => {
+                let Some(delay) = backoff_iter.next() else {
+                    return Err(e);
+                };
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "backoff delay is bounded well under u64::MAX millis"
+                )]
+                let backoff_ms = delay.as_millis() as u64;
+                warn!(backoff_ms, op = label, "sequence conflict, retrying");
+                tokio::time::sleep(delay).await;
+                *next_seq =
+                    fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 /// Replay the tenant's entries to find which hostnames are already active.
@@ -270,6 +289,13 @@ impl ServiceProtocol {
                 service,
                 listen_port,
             },
+        }
+    }
+
+    const fn delete(self, service: String) -> ConfigOp {
+        match self {
+            Self::Tcp => ConfigOp::DeleteTcpService { service },
+            Self::Udp => ConfigOp::DeleteUdpService { service },
         }
     }
 
@@ -351,86 +377,76 @@ async fn fetch_tenant_entries(ctx: &BootstrapContext) -> anyhow::Result<Vec<Sign
     ciborium::from_reader(bytes.as_slice()).context("malformed entries CBOR")
 }
 
-/// Append-only publish of `(service → listen_port)` bindings for this tenant.
-/// Mirrors [`publish_hostnames`]: missing bindings are upserted; bindings the
-/// agent no longer declares are **left alone** so a second agent under the
-/// same tenant doesn't clobber the first agent's declarations on restart.
-/// Removal is via `towonel admin tenant leave`, not by editing env vars.
-///
-/// A change of `listen_port` for an already-published `service` is still
-/// applied (re-upsert). On an old hub that doesn't recognize the protocol
-/// variant, the publish is skipped (warning logged) so mixed-protocol agents
-/// keep working against legacy hubs.
 async fn publish_services(
     ctx: &BootstrapContext,
     desired: &[(String, u16)],
     proto: ServiceProtocol,
 ) -> anyhow::Result<()> {
-    if desired.is_empty() {
-        return Ok(());
-    }
-
     let existing = fetch_existing_service_bindings(ctx, proto).await?;
+    let desired_names: HashSet<&str> = desired.iter().map(|(n, _)| n.as_str()).collect();
+
     let to_upsert: Vec<&(String, u16)> = desired
         .iter()
         .filter(|(name, port)| existing.get(name) != Some(port))
         .collect();
+    let to_delete: Vec<String> = existing
+        .keys()
+        .filter(|n| !desired_names.contains(n.as_str()))
+        .cloned()
+        .collect();
 
-    if to_upsert.is_empty() {
-        info!(
-            proto = proto.label(),
-            count = desired.len(),
-            "service bindings already up to date"
-        );
+    if to_upsert.is_empty() && to_delete.is_empty() {
         return Ok(());
     }
 
     let mut next_seq = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
-    let policy = retry_policy();
 
-    for (service, listen_port) in to_upsert {
-        let mut backoff_iter = policy.build();
-        loop {
-            let payload = ConfigPayload {
-                version: 1,
-                tenant_id: ctx.tenant_id,
-                sequence: next_seq,
-                timestamp: towonel_common::time::now_ms(),
-                op: proto.upsert(service.clone(), *listen_port),
-            };
-            match submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await {
-                Ok(()) => {
-                    info!(proto = proto.label(), %service, listen_port, sequence = next_seq, "published service");
-                    next_seq += 1;
-                    break;
-                }
-                Err(e) if is_sequence_conflict(&e) => {
-                    let Some(delay) = backoff_iter.next() else {
-                        return Err(e);
-                    };
-                    #[expect(
-                        clippy::cast_possible_truncation,
-                        reason = "backoff delay is bounded well under u64::MAX millis"
-                    )]
-                    let backoff_ms = delay.as_millis() as u64;
-                    warn!(backoff_ms, proto = proto.label(), %service, "sequence conflict on Upsert, retrying");
-                    tokio::time::sleep(delay).await;
-                    next_seq =
-                        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
-                }
-                Err(e) if is_unsupported_op(&e) => {
-                    warn!(
-                        hub_url = %ctx.hub_url,
-                        proto = proto.label(),
-                        error = %e,
-                        "hub does not support this service protocol; skipping",
-                    );
-                    return Ok(());
-                }
-                Err(e) => return Err(e),
+    // Deletes first so a service renamed onto an in-use port can claim it.
+    for service in to_delete {
+        let label = format!("Delete{}Service {service}", proto.label());
+        match submit_with_retry(ctx, &mut next_seq, proto.delete(service.clone()), &label).await {
+            Ok(()) => {
+                info!(proto = proto.label(), %service, "removed stale service");
             }
+            Err(e) if is_unsupported_op(&e) => {
+                warn!(
+                    hub_url = %ctx.hub_url,
+                    proto = proto.label(),
+                    error = %e,
+                    "hub does not support delete for this protocol; proceeding with upserts only",
+                );
+                break;
+            }
+            Err(e) => return Err(e),
         }
     }
+
+    for (service, listen_port) in to_upsert {
+        let label = format!("Upsert{}Service {service}", proto.label());
+        match submit_with_retry(
+            ctx,
+            &mut next_seq,
+            proto.upsert(service.clone(), *listen_port),
+            &label,
+        )
+        .await
+        {
+            Ok(()) => {
+                info!(proto = proto.label(), %service, listen_port, "published service");
+            }
+            Err(e) if is_unsupported_op(&e) => {
+                warn!(
+                    hub_url = %ctx.hub_url,
+                    proto = proto.label(),
+                    error = %e,
+                    "hub does not support this service protocol; skipping",
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     Ok(())
 }
 
@@ -446,6 +462,54 @@ pub async fn publish_udp_services(
     desired: &[(String, u16)],
 ) -> anyhow::Result<()> {
     publish_services(ctx, desired, ServiceProtocol::Udp).await
+}
+
+/// Must be called after [`register`] so the current agent is in the log
+/// before its predecessors are revoked.
+pub async fn reconcile_agents(ctx: &BootstrapContext) -> anyhow::Result<()> {
+    let existing = fetch_authorized_agents(ctx).await?;
+    let current = ctx.agent_id();
+    let stale: Vec<AgentId> = existing.into_iter().filter(|a| a != &current).collect();
+
+    if stale.is_empty() {
+        return Ok(());
+    }
+
+    let mut next_seq = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+    for agent_id in stale {
+        let label = format!("RevokeAgent {agent_id}");
+        submit_with_retry(
+            ctx,
+            &mut next_seq,
+            ConfigOp::RevokeAgent {
+                agent_id: agent_id.clone(),
+            },
+            &label,
+        )
+        .await?;
+        info!(%agent_id, "revoked stale agent");
+    }
+    Ok(())
+}
+
+async fn fetch_authorized_agents(ctx: &BootstrapContext) -> anyhow::Result<HashSet<AgentId>> {
+    let entries = fetch_tenant_entries(ctx).await?;
+    let pk = ctx.tenant_kp.public_key();
+    let mut agents = HashSet::new();
+    for entry in &entries {
+        if let Ok(payload) = entry.verify(pk) {
+            match payload.op {
+                ConfigOp::UpsertAgent { agent_id } => {
+                    agents.insert(agent_id);
+                }
+                ConfigOp::RevokeAgent { agent_id } => {
+                    agents.remove(&agent_id);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(agents)
 }
 
 /// Spawn the heartbeat task. Returns the `JoinHandle` so the caller can
