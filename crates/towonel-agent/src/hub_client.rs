@@ -1,24 +1,37 @@
 use anyhow::{Context, anyhow};
+use backon::BackoffBuilder;
+use tracing::warn;
+
 use towonel_common::CBOR_CONTENT_TYPE;
 use towonel_common::config_entry::{ConfigPayload, SignedConfigEntry};
 use towonel_common::hub_error;
 pub use towonel_common::hub_error::HubApiError;
 use towonel_common::identity::TenantKeypair;
 
+use crate::stateless::retry_policy;
+
 /// Check an HTTP response and return the body bytes on success. On failure,
 /// parses the hub's standard error envelope (`{"error":{"code","message"}}`)
-/// into a typed [`HubApiError`] so callers can pattern-match on the code
-/// instead of sniffing error strings.
+/// into a typed [`HubApiError`]. 429s come from `tower_governor` with a
+/// non-JSON body, so we synthesize a `rate_limited` [`HubApiError`] instead.
 pub async fn check_response(resp: reqwest::Response) -> anyhow::Result<Vec<u8>> {
     let status = resp.status();
     let body = resp.bytes().await?.to_vec();
     if status.is_success() {
         return Ok(body);
     }
-    Err(hub_error::parse(status.as_u16(), &body).map_or_else(
-        || anyhow!("hub returned {status} with unparsable error body"),
-        Into::into,
-    ))
+    if let Some(parsed) = hub_error::parse(status.as_u16(), &body) {
+        return Err(parsed.into());
+    }
+    if status.as_u16() == 429 {
+        return Err(HubApiError {
+            status: 429,
+            code: "rate_limited".to_string(),
+            message: String::from_utf8_lossy(&body).into_owned(),
+        }
+        .into());
+    }
+    Err(anyhow!("hub returned {status} with unparsable error body"))
 }
 
 /// Sign `payload` with `kp` and POST it to `/v1/entries` as CBOR.
@@ -54,6 +67,34 @@ pub fn is_sequence_conflict(err: &anyhow::Error) -> bool {
         .is_some_and(|e| e.code == "sequence_conflict")
 }
 
+#[must_use]
+pub fn is_rate_limited(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<HubApiError>()
+        .is_some_and(|e| e.status == 429)
+}
+
+pub async fn retry_on_rate_limit<T, F, Fut>(label: &str, mut f: F) -> anyhow::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let mut backoff = retry_policy().build();
+    loop {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) if is_rate_limited(&e) => {
+                let Some(delay) = backoff.next() else {
+                    return Err(e);
+                };
+                let backoff_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+                warn!(backoff_ms, op = label, "hub rate-limited, retrying");
+                tokio::time::sleep(delay).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// `true` if the hub rejected the entry because it doesn't recognize the
 /// `ConfigOp` variant. Pre-split hubs return `invalid_signature` with a CBOR
 /// `unknown variant` message; newer hubs return `unsupported_op` directly.
@@ -87,11 +128,8 @@ pub async fn fetch_latest_sequence(
         .send()
         .await
         .with_context(|| format!("failed to GET {url}"))?;
-    if !resp.status().is_success() {
-        return Ok(0);
-    }
-    let bytes = resp.bytes().await?;
-    let entries: Vec<SignedConfigEntry> = ciborium::from_reader(bytes.as_ref())
+    let bytes = check_response(resp).await?;
+    let entries: Vec<SignedConfigEntry> = ciborium::from_reader(bytes.as_slice())
         .context("hub returned malformed tenant-entries CBOR")?;
     let pq_pubkey = kp.public_key();
     let mut max_seq = 0u64;
@@ -171,6 +209,28 @@ mod tests {
         }
         .into();
         assert!(!is_unsupported_op(&err));
+    }
+
+    #[test]
+    fn is_rate_limited_matches_429() {
+        let err: anyhow::Error = HubApiError {
+            status: 429,
+            code: "rate_limited".into(),
+            message: String::new(),
+        }
+        .into();
+        assert!(is_rate_limited(&err));
+    }
+
+    #[test]
+    fn is_rate_limited_rejects_other_statuses() {
+        let err: anyhow::Error = HubApiError {
+            status: 409,
+            code: "sequence_conflict".into(),
+            message: String::new(),
+        }
+        .into();
+        assert!(!is_rate_limited(&err));
     }
 
     #[test]

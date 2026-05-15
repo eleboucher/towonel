@@ -242,8 +242,8 @@ fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<A
             reason = "config builder values are constants; failure is a programmer error caught at startup"
         )]
         tower_governor::governor::GovernorConfigBuilder::default()
-            .per_second(2)
-            .burst_size(20)
+            .per_second(10)
+            .burst_size(100)
             .finish()
             .expect("tower_governor config is valid"),
     );
