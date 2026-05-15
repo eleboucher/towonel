@@ -116,30 +116,23 @@ impl AgentConfig {
     /// Reject configs where two services in the same protocol would map to the
     /// same `listen_port` (the hub would accept only one), or where a service
     /// name collides with a hostname (the agent's stream dispatcher would pick
-    /// one arbitrarily). TCP and UDP have independent port namespaces.
+    /// one arbitrarily). TCP and UDP have independent port and name namespaces:
+    /// the wire format tags each stream with `tcp:` / `udp:` so the dispatcher
+    /// looks up names in protocol-specific maps.
     pub fn validate(&self) -> anyhow::Result<()> {
         let hostnames: std::collections::HashSet<&str> =
             self.services.iter().map(|s| s.hostname.as_str()).collect();
-        let tcp_names = validate_raw_services("tcp_service", &self.tcp_services, &hostnames)?;
-        let udp_names = validate_raw_services("udp_service", &self.udp_services, &hostnames)?;
-        for name in &udp_names {
-            if tcp_names.contains(name) {
-                anyhow::bail!(
-                    "udp_service name `{name}` collides with a tcp_service of the same name"
-                );
-            }
-        }
+        validate_raw_services("tcp_service", &self.tcp_services, &hostnames)?;
+        validate_raw_services("udp_service", &self.udp_services, &hostnames)?;
         Ok(())
     }
 }
 
-/// Returns the set of declared names so the caller can cross-check against
-/// the other protocol's set (TCP vs UDP name collisions).
-fn validate_raw_services<'a>(
+fn validate_raw_services(
     label: &str,
-    services: &'a [TcpServiceConfig],
+    services: &[TcpServiceConfig],
     hostnames: &std::collections::HashSet<&str>,
-) -> anyhow::Result<std::collections::HashSet<&'a str>> {
+) -> anyhow::Result<()> {
     let mut names = std::collections::HashSet::new();
     let mut ports = std::collections::HashSet::new();
     for svc in services {
@@ -166,7 +159,7 @@ fn validate_raw_services<'a>(
             );
         }
     }
-    Ok(names)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -297,25 +290,6 @@ mod tests {
             }],
         };
         assert!(cfg.validate().is_err());
-    }
-
-    #[test]
-    fn validate_rejects_udp_service_colliding_with_tcp_service() {
-        let cfg = AgentConfig {
-            services: Vec::new(),
-            tcp_services: vec![TcpServiceConfig {
-                name: "wg".into(),
-                origin: "127.0.0.1:51820".into(),
-                listen_port: 51820,
-            }],
-            udp_services: vec![UdpServiceConfig {
-                name: "wg".into(),
-                origin: "127.0.0.1:51820".into(),
-                listen_port: 51820,
-            }],
-        };
-        let err = cfg.validate().unwrap_err().to_string();
-        assert!(err.contains("collides"), "got: {err}");
     }
 
     #[test]
