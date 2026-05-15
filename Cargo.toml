@@ -138,7 +138,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2"
 hex = "0.4"
-clienthello = "0.1"
+clienthello = "0.2"
 anyhow = "1"
 axum = "0.8"
 tower = "0.5"
