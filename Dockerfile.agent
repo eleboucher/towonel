@@ -8,7 +8,7 @@ ARG ZIG_VERSION=0.16.0
 # renovate: datasource=github-releases depName=rust-cross/cargo-zigbuild
 ARG CARGO_ZIGBUILD_VERSION=0.22.3
 # renovate: datasource=github-releases depName=mozilla/sccache
-ARG SCCACHE_VERSION=0.15.0
+ARG SCCACHE_VERSION=0.14.0
 ARG ENABLE_SCCACHE=0
 
 RUN apt-get update \
@@ -35,10 +35,9 @@ COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY src/ src/
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=shared \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=shared \
-    --mount=type=cache,target=/app/target,id=target-${TARGETARCH} \
-    --mount=type=cache,target=/root/.cache/sccache \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/root/.cache,id=root-cache-${TARGETARCH},sharing=locked \
     --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
     --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
     set -eux && \
@@ -55,10 +54,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=shared \
                SCCACHE_S3_USE_SSL=true \
                AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
                AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
+        if sccache --start-server; then \
+            echo "sccache server started"; \
+        else \
+            echo "sccache failed to start, continuing without cache" >&2; \
+            unset RUSTC_WRAPPER; \
+        fi; \
     fi && \
     rustup target add "$RUST_TARGET" && \
     cargo zigbuild --release --target "$RUST_TARGET" -p towonel-agent && \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats; fi && \
+    if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats || true; fi && \
     cp "target/${RUST_TARGET}/release/towonel-agent" /towonel-agent
 
 FROM debian:bookworm-slim AS runtime-prep
