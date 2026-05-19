@@ -26,15 +26,23 @@ On the VPS:
 docker pull git.erwanleboucher.dev/eleboucher/towonel-node:latest
 docker run -d --name towonel \
   -p 80:80 -p 443:443 -p 8443:8443 \
-  -v towonel-data:/var/lib/towonel \
-  -e TOWONEL_IDENTITY_KEY_PATH=/var/lib/towonel/node.key \
-  -e TOWONEL_HUB_OPERATOR_API_KEY_PATH=/var/lib/towonel/operator.key \
-  -e TOWONEL_HUB_DB_DSN=/var/lib/towonel/hub.db \
+  -v towonel-data:/data \
+  -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
+  -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
   git.erwanleboucher.dev/eleboucher/towonel-node:latest
 ```
 
-`node.key` and `operator.key` are generated on first boot. Keep
-`operator.key` — it authenticates all admin commands.
+The image pins `TOWONEL_DATA_DIR=/data`, so every path-shaped env var
+(`TOWONEL_IDENTITY_KEY_PATH`, `TOWONEL_HUB_DB_DSN`,
+`TOWONEL_HUB_OPERATOR_API_KEY_PATH`, `TOWONEL_EDGE_TLS_CERT_DIR`,
+`TOWONEL_INVITE_HASH_KEY_PATH`) defaults to a path under `/data`. Override
+any of them individually if you want files elsewhere.
+
+`node.key`, `operator.key`, and `invite_hash.key` are generated on first
+boot. Keep `operator.key` (admin auth) and `invite_hash.key` (invalidates
+every outstanding invite if lost). For production, set
+`TOWONEL_INVITE_HASH_KEY` from a secret manager instead of relying on the
+on-disk file.
 
 ### 2. Create an invite
 
@@ -238,34 +246,46 @@ lists (tenants, services) require JSON.
 Full examples live in [`examples/agent.env.example`](examples/agent.env.example)
 and [`examples/node.env.example`](examples/node.env.example).
 
+### Base directory
+
+`TOWONEL_DATA_DIR` (the published Docker image pins it to `/data`) supplies
+defaults for every path-shaped env var below. Set it once and the node
+finds its identity, database, operator key, certs, and invite-hash key
+inside that directory. Individual overrides always win.
+
+| Variable           | Default | Cascades into                                                                                                                              |
+| ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `TOWONEL_DATA_DIR` | unset   | `IDENTITY_KEY_PATH`, `HUB_DB_DSN` (sqlite only), `HUB_OPERATOR_API_KEY_PATH`, `EDGE_TLS_CERT_DIR`, `INVITE_HASH_KEY_PATH` (see below)       |
+
 ### Hub
 
-| Variable                            | Default        | Description                                               |
-| ----------------------------------- | -------------- | --------------------------------------------------------- |
-| `TOWONEL_IDENTITY_KEY_PATH`         | `node.key`     | Node identity key                                         |
-| `TOWONEL_HUB_ENABLED`               | `true`         | Enable the hub API                                        |
-| `TOWONEL_INVITE_HASH_KEY`           |                | Key for hashing invite secrets (must be set for security) |
-| `TOWONEL_HUB_LISTEN_ADDR`           | `0.0.0.0:8443` | Hub API bind address                                      |
-| `TOWONEL_HUB_PUBLIC_URL`            | derived        | URL embedded in invite tokens                             |
-| `TOWONEL_HUB_OPERATOR_API_KEY_PATH` | `operator.key` | Operator API key file                                     |
-| `TOWONEL_HUB_DB_DRIVER`             | `sqlite`       | `sqlite` or `postgres`                                    |
-| `TOWONEL_HUB_DB_DSN`                | `hub.db`       | Connection string                                         |
-| `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`     | Pool size                                                 |
-| `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS`| `false`        | Allow tenants to claim TCP/UDP ports below 1024           |
+| Variable                            | Default                            | Description                                                                                |
+| ----------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------ |
+| `TOWONEL_IDENTITY_KEY_PATH`         | `${DATA_DIR}/node.key` or `node.key` | Node identity key                                                                          |
+| `TOWONEL_HUB_ENABLED`               | `true`                             | Enable the hub API                                                                         |
+| `TOWONEL_INVITE_HASH_KEY`           |                                    | Hex key for hashing invite secrets (optional if `INVITE_HASH_KEY_PATH` or `DATA_DIR` set)  |
+| `TOWONEL_INVITE_HASH_KEY_PATH`      | `${DATA_DIR}/invite_hash.key`      | Where the hub reads/generates the invite-hash key when the env var is unset                |
+| `TOWONEL_HUB_LISTEN_ADDR`           | `0.0.0.0:8443`                     | Hub API bind address                                                                       |
+| `TOWONEL_HUB_PUBLIC_URL`            | derived                            | URL embedded in invite tokens                                                              |
+| `TOWONEL_HUB_OPERATOR_API_KEY_PATH` | `${DATA_DIR}/operator.key` or `operator.key` | Operator API key file                                                                |
+| `TOWONEL_HUB_DB_DRIVER`             | `sqlite`                           | `sqlite` or `postgres`                                                                     |
+| `TOWONEL_HUB_DB_DSN`                | `${DATA_DIR}/hub.db` or `hub.db` (sqlite); required for postgres | Connection string                                            |
+| `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`                         | Pool size                                                                                  |
+| `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS`| `false`                            | Allow tenants to claim TCP/UDP ports below 1024                                            |
 
 ### Edge
 
-| Variable                            | Default        | Description                                                                       |
-| ----------------------------------- | -------------- | --------------------------------------------------------------------------------- |
-| `TOWONEL_EDGE_ENABLED`              | `true`         | Enable the edge listener                                                          |
-| `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`  | TLS bind address                                                                  |
-| `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090` | Health + metrics                                                                  |
-| `TOWONEL_EDGE_HUB_URL`              |                | Remote hub (edge-only mode); `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias |
-| `TOWONEL_EDGE_PUBLIC_ADDRESSES`     |                | Addresses advertised to agents                                                    |
-| `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                | Enables Let's Encrypt issuance                                                    |
-| `TOWONEL_EDGE_TLS_CERT_DIR`         | `/data/certs`  | Cert cache directory                                                              |
-| `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`        | Use Let's Encrypt staging                                                         |
-| `TOWONEL_EDGE_TLS_HTTP_LISTEN_ADDR` | `0.0.0.0:80`   | HTTP-01 responder                                                                 |
+| Variable                            | Default                                | Description                                                                                  |
+| ----------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `TOWONEL_EDGE_ENABLED`              | `true`                                 | Enable the edge listener                                                                     |
+| `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`                          | TLS bind address                                                                             |
+| `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090`                         | Health + metrics                                                                             |
+| `TOWONEL_EDGE_HUB_URL`              |                                        | Remote hub (edge-only mode); `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias            |
+| `TOWONEL_EDGE_PUBLIC_ADDRESSES`     | `<HUB_PUBLIC_URL host>:443` when unset | Addresses advertised to agents                                                               |
+| `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                                        | Enables Let's Encrypt issuance                                                               |
+| `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert cache directory                                                                         |
+| `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`                                | Use Let's Encrypt staging                                                                    |
+| `TOWONEL_EDGE_TLS_HTTP_LISTEN_ADDR` | `0.0.0.0:80`                           | HTTP-01 responder                                                                            |
 
 ### Agent
 

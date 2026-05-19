@@ -9,15 +9,23 @@ services:
       - "9090:9090"
     environment:
       RUST_LOG: info
-      TOWONEL_IDENTITY_KEY_PATH: /var/lib/towonel/node.key
-      TOWONEL_HUB_DB_DSN: /var/lib/towonel/hub.db
-      TOWONEL_HUB_LISTEN_ADDR: 0.0.0.0:8443
-      # TOWONEL_HUB_PUBLIC_URL: https://hub.example.eu:8443
+      # Required: public HTTPS URL of the hub. The edge derives its public
+      # address from this hostname unless TOWONEL_EDGE_PUBLIC_ADDRESSES is set.
+      # TOWONEL_HUB_PUBLIC_URL: https://hub.example.eu
+      #
+      # Required for Let's Encrypt:
+      # TOWONEL_EDGE_TLS_ACME_EMAIL: ops@example.eu
+      #
+      # Invite-hash key: provide via secret, or let the hub auto-generate one
+      # to ${TOWONEL_DATA_DIR}/invite_hash.key on first boot (back it up!).
+      # TOWONEL_INVITE_HASH_KEY: ${TOWONEL_INVITE_HASH_KEY}
+      #
+      # Everything else (identity key, hub.db, operator key, certs, invite-hash
+      # key path) defaults to ${TOWONEL_DATA_DIR}/<name>, which the image pins
+      # to /data. Override any individual var to opt out.
       # TOWONEL_HUB_DNS_WEBHOOK_URL: https://dns-sidecar.internal/update
-      TOWONEL_EDGE_LISTEN_ADDR: 0.0.0.0:443
-      TOWONEL_EDGE_HEALTH_LISTEN_ADDR: 0.0.0.0:9090
     volumes:
-      - node-data:/var/lib/towonel
+      - node-data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "--max-time", "2", "-fsS", "http://localhost:8443/v1/health"]
