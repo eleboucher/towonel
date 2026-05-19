@@ -247,21 +247,13 @@ pub struct TenantEntry {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct RawEnv {
-    /// Base directory whose subpaths supply defaults for every path-shaped
-    /// env var below (identity key, hub DB, operator key, TLS cert dir,
-    /// invite-hash key). Per-var env vars always win. The node Dockerfile
-    /// pins this to `/data`.
+    /// Base directory supplying defaults for every path-shaped env var below.
     data_dir: Option<PathBuf>,
 
     identity_key_path: Option<PathBuf>,
     edge_invite_token: Option<String>,
 
-    /// Hex-encoded 32-byte invite-hash key. Optional once
-    /// `invite_hash_key_path` (or `data_dir`) is set — the hub then
-    /// reads/generates the key on disk.
     invite_hash_key: Option<String>,
-    /// File-backed fallback for [`Self::invite_hash_key`]. When unset and
-    /// `data_dir` is set, defaults to `${DATA_DIR}/invite_hash.key`.
     invite_hash_key_path: Option<PathBuf>,
 
     hub_enabled: Option<bool>,
@@ -281,16 +273,10 @@ struct RawEnv {
     /// Deprecated alias for `edge_hub_url`; kept so existing deployments
     /// still boot. Prefer `TOWONEL_EDGE_HUB_URL` (no `S`).
     edge_hub_urls: Option<String>,
-    /// Addresses (`host:port`) the hub advertises to agents/clients. When
-    /// the node sits behind a reverse proxy, this is the **proxy's** public
-    /// address, not the edge process's listen address — the two only match
-    /// in a direct deployment. Plural because operators may publish more
-    /// than one endpoint (e.g. anycast IPs, IPv4 + IPv6).
+    /// `host:port` advertised to agents/clients — the reverse proxy's
+    /// public address when one fronts the edge, not the edge's listen addr.
     edge_advertised_addresses: Vec<String>,
-    /// Deprecated alias for `edge_advertised_addresses`. The old name was
-    /// ambiguous: "public" sounded like "the edge's listen address," but
-    /// it always meant "the address clients reach." Kept so existing
-    /// deployments still boot; the new name surfaces a deprecation warning.
+    /// Deprecated alias for `edge_advertised_addresses`.
     edge_public_addresses: Vec<String>,
     edge_listen_workers: Option<usize>,
     edge_proxy_protocol: Option<bool>,
@@ -456,9 +442,6 @@ fn build_tls(r: &RawEnv) -> Option<TlsConfig> {
     })
 }
 
-/// Owned slice of [`RawEnv`] consumed by [`build_hub_config`]. Splitting this
-/// out lets `from_raw` destructure `RawEnv` once and avoids partial-move
-/// errors when later code paths consume neighbouring fields.
 struct HubInputs<'a> {
     enabled: Option<bool>,
     listen_addr: Option<String>,
@@ -474,11 +457,6 @@ struct HubInputs<'a> {
     data_dir: Option<&'a Path>,
 }
 
-/// Assemble [`HubConfig`], applying `data_dir` cascade defaults to every
-/// path-shaped hub setting and loading (or generating) the invite-hash key.
-/// Pulled out of [`NodeConfig::from_raw`] both to keep that function under
-/// the clippy `too_many_lines` limit and because hub setup is independently
-/// testable from edge setup.
 fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
     let HubInputs {
         enabled,
@@ -537,9 +515,6 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
     })
 }
 
-/// Resolve the hub URL the edge uses to reach the hub. Honors the deprecated
-/// `TOWONEL_EDGE_HUB_URLS` alias with a one-time warning, then falls back to
-/// the URL embedded in the edge invite token if present.
 fn resolve_hub_url(
     primary: Option<String>,
     deprecated_alias: Option<String>,
@@ -558,21 +533,6 @@ fn resolve_hub_url(
     explicit.or_else(|| edge_invite.map(|t| t.hub_url.trim_end_matches('/').to_string()))
 }
 
-/// Resolve the addresses the hub advertises to agents and clients.
-///
-/// Resolution order:
-/// 1. `TOWONEL_EDGE_ADVERTISED_ADDRESSES` (canonical name) if non-empty.
-/// 2. `TOWONEL_EDGE_PUBLIC_ADDRESSES` (deprecated alias) with a one-time
-///    warning so legacy compose files keep booting.
-/// 3. `<host>:443` derived from `TOWONEL_HUB_PUBLIC_URL` host. Covers the
-///    common single-DNS deployment where the hub and the public edge
-///    endpoint share a hostname; multi-DNS operators set the addresses
-///    explicitly.
-///
-/// The `:443` derivation assumes the public endpoint is on the standard
-/// HTTPS port. Operators whose public endpoint is on a different port
-/// (e.g. when the reverse proxy itself listens elsewhere) must set the
-/// addresses explicitly.
 fn resolve_advertised_addresses(
     advertised: Vec<String>,
     deprecated_public: Vec<String>,

@@ -32,17 +32,11 @@ docker run -d --name towonel \
   git.erwanleboucher.dev/eleboucher/towonel-node:latest
 ```
 
-The image pins `TOWONEL_DATA_DIR=/data`, so every path-shaped env var
-(`TOWONEL_IDENTITY_KEY_PATH`, `TOWONEL_HUB_DB_DSN`,
-`TOWONEL_HUB_OPERATOR_API_KEY_PATH`, `TOWONEL_EDGE_TLS_CERT_DIR`,
-`TOWONEL_INVITE_HASH_KEY_PATH`) defaults to a path under `/data`. Override
-any of them individually if you want files elsewhere.
-
-`node.key`, `operator.key`, and `invite_hash.key` are generated on first
-boot. Keep `operator.key` (admin auth) and `invite_hash.key` (invalidates
-every outstanding invite if lost). For production, set
-`TOWONEL_INVITE_HASH_KEY` from a secret manager instead of relying on the
-on-disk file.
+The image pins `TOWONEL_DATA_DIR=/data`; every path-shaped env var defaults
+to a subpath under it. `node.key`, `operator.key`, and `invite_hash.key`
+are generated on first boot — back up `operator.key` (admin auth) and
+`invite_hash.key` (losing it invalidates every outstanding invite). For
+production, set `TOWONEL_INVITE_HASH_KEY` from a secret manager.
 
 ### 2. Create an invite
 
@@ -248,14 +242,12 @@ and [`examples/node.env.example`](examples/node.env.example).
 
 ### Base directory
 
-`TOWONEL_DATA_DIR` (the published Docker image pins it to `/data`) supplies
-defaults for every path-shaped env var below. Set it once and the node
-finds its identity, database, operator key, certs, and invite-hash key
-inside that directory. Individual overrides always win.
+`TOWONEL_DATA_DIR` (`/data` in the Docker image) supplies defaults for
+every path-shaped env var below. Individual overrides win.
 
 | Variable           | Default | Cascades into                                                                                                                              |
 | ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `TOWONEL_DATA_DIR` | unset   | `IDENTITY_KEY_PATH`, `HUB_DB_DSN` (sqlite only), `HUB_OPERATOR_API_KEY_PATH`, `EDGE_TLS_CERT_DIR`, `INVITE_HASH_KEY_PATH` (see below)       |
+| `TOWONEL_DATA_DIR` | unset   | `IDENTITY_KEY_PATH`, `HUB_DB_DSN` (sqlite only), `HUB_OPERATOR_API_KEY_PATH`, `EDGE_TLS_CERT_DIR`, `INVITE_HASH_KEY_PATH`                   |
 
 ### Hub
 
@@ -281,7 +273,7 @@ inside that directory. Individual overrides always win.
 | `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`                          | TLS bind address                                                                             |
 | `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090`                         | Health + metrics                                                                             |
 | `TOWONEL_EDGE_HUB_URL`              |                                        | Remote hub (edge-only mode); `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias            |
-| `TOWONEL_EDGE_ADVERTISED_ADDRESSES` | `<HUB_PUBLIC_URL host>:443` when unset | Addresses agents and clients reach — **the reverse proxy's public address** when one is fronting the edge, not `EDGE_LISTEN_ADDR`. The `:443` fallback assumes the public endpoint is on the standard HTTPS port; set this explicitly if your public endpoint is on a different port. `TOWONEL_EDGE_PUBLIC_ADDRESSES` accepted as deprecated alias |
+| `TOWONEL_EDGE_ADVERTISED_ADDRESSES` | `<HUB_PUBLIC_URL host>:443` when unset | `host:port` agents/clients reach (the reverse proxy when one fronts the edge). Override when the public endpoint is not on `:443`. `TOWONEL_EDGE_PUBLIC_ADDRESSES` accepted as deprecated alias |
 | `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                                        | Enables Let's Encrypt issuance                                                               |
 | `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert cache directory                                                                         |
 | `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`                                | Use Let's Encrypt staging                                                                    |
