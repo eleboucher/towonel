@@ -550,7 +550,11 @@ async fn build_edge(
     iroh::EndpointId,
     Vec<String>,
 )> {
-    let ep = Endpoint::builder(N0).secret_key(secret_key).bind().await?;
+    let ep = Endpoint::builder(N0)
+        .secret_key(secret_key)
+        .relay_mode(towonel_common::relay::relay_mode_from_env()?)
+        .bind()
+        .await?;
 
     let edge_node_id = ep.id();
     let edge_addresses: Vec<String> = ep
