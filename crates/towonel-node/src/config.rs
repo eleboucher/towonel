@@ -808,6 +808,29 @@ mod tests {
     }
 
     #[test]
+    fn explicit_invite_hash_key_path_overrides_data_dir_cascade() {
+        let dir = unique_data_dir("ihk-override");
+        let explicit = dir.join("custom-subdir").join("override.key");
+        let cfg = NodeConfig::from_raw(RawEnv {
+            data_dir: Some(dir.clone()),
+            invite_hash_key_path: Some(explicit.clone()),
+            ..RawEnv::default()
+        })
+        .unwrap();
+
+        assert!(cfg.hub.invite_hash_key.is_some());
+        assert!(
+            explicit.exists(),
+            "explicit invite-hash-key path must be used (not ${{DATA_DIR}}/invite_hash.key)"
+        );
+        assert!(
+            !dir.join("invite_hash.key").exists(),
+            "data_dir default must not be written when explicit path is set"
+        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
     fn data_dir_cascades_invite_hash_key_path_when_env_unset() {
         let dir = unique_data_dir("ihk");
         let cfg = NodeConfig::from_raw(RawEnv {
