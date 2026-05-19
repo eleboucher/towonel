@@ -101,6 +101,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let endpoint = Endpoint::builder(N0)
         .secret_key(ctx.iroh_secret_key())
         .alpns(vec![ALPN_TUNNEL.to_vec()])
+        .relay_mode(towonel_common::relay::relay_mode_from_env()?)
         .bind()
         .await
         .context("failed to create iroh endpoint")?;

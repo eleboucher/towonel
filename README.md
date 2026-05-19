@@ -38,6 +38,28 @@ are generated on first boot — back up `operator.key` (admin auth) and
 `invite_hash.key` (losing it invalidates every outstanding invite). For
 production, set `TOWONEL_INVITE_HASH_KEY` from a secret manager.
 
+#### Bundled-Caddy variant
+
+`Dockerfile.hub-caddy` ships the same `towonel` binary alongside Caddy
+(with the `caddy-l4` plugin). Caddy binds 80/443 and L4-forwards to
+towonel on internal ports with PROXY v2 — operators get a single image
+to deploy instead of overriding `EDGE_LISTEN_ADDR`,
+`EDGE_TLS_HTTP_LISTEN_ADDR`, `EDGE_PROXY_PROTOCOL`, etc. Both processes
+run under tini; if either exits, the container exits and Docker's
+restart policy brings the whole thing back.
+
+```bash
+docker run -d --name towonel \
+  -p 80:80 -p 443:443 -p 8443:8443 \
+  -v towonel-data:/data \
+  -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
+  -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
+  git.erwanleboucher.dev/eleboucher/towonel-hub-caddy:latest
+```
+
+Replace the baked Caddyfile by mounting one at `/etc/caddy/Caddyfile`.
+The hub API stays at `:8443` direct (not behind Caddy in this image).
+
 ### 2. Create an invite
 
 ```bash
@@ -303,6 +325,16 @@ Service shape:
 
 `proxy_protocol` defaults to `v2` for passthrough services and `none`
 for terminated services.
+
+### iroh relays
+
+Both the edge and the agent default to `relay.towonel.erwanleboucher.dev`
+with n0's EU relay (`euc1-1.relay.n0.iroh-canary.iroh.link`) as fallback.
+Set `TOWONEL_IROH_RELAY_URLS` (comma-separated) on both sides to override:
+
+```bash
+TOWONEL_IROH_RELAY_URLS=https://relay.example.eu/,https://euc1-1.relay.n0.iroh-canary.iroh.link/
+```
 
 ### CLI
 
