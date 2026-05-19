@@ -9,9 +9,12 @@ services:
       - "9090:9090"
     environment:
       RUST_LOG: info
-      # Required: public HTTPS URL of the hub. The edge derives its public
-      # address from this hostname unless TOWONEL_EDGE_PUBLIC_ADDRESSES is set.
+      # Required: public HTTPS URL of the hub. EDGE_ADVERTISED_ADDRESSES
+      # defaults to "<this host>:443" unless set — override it when the
+      # edge is reachable on a different DNS name or port (e.g. when a
+      # reverse proxy on a non-standard port is fronting it).
       # TOWONEL_HUB_PUBLIC_URL: https://hub.example.eu
+      # TOWONEL_EDGE_ADVERTISED_ADDRESSES: tunnel.example.eu:443
       #
       # Required for Let's Encrypt:
       # TOWONEL_EDGE_TLS_ACME_EMAIL: ops@example.eu

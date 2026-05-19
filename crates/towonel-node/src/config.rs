@@ -281,6 +281,16 @@ struct RawEnv {
     /// Deprecated alias for `edge_hub_url`; kept so existing deployments
     /// still boot. Prefer `TOWONEL_EDGE_HUB_URL` (no `S`).
     edge_hub_urls: Option<String>,
+    /// Addresses (`host:port`) the hub advertises to agents/clients. When
+    /// the node sits behind a reverse proxy, this is the **proxy's** public
+    /// address, not the edge process's listen address — the two only match
+    /// in a direct deployment. Plural because operators may publish more
+    /// than one endpoint (e.g. anycast IPs, IPv4 + IPv6).
+    edge_advertised_addresses: Vec<String>,
+    /// Deprecated alias for `edge_advertised_addresses`. The old name was
+    /// ambiguous: "public" sounded like "the edge's listen address," but
+    /// it always meant "the address clients reach." Kept so existing
+    /// deployments still boot; the new name surfaces a deprecation warning.
     edge_public_addresses: Vec<String>,
     edge_listen_workers: Option<usize>,
     edge_proxy_protocol: Option<bool>,
@@ -325,6 +335,7 @@ impl NodeConfig {
             edge_health_listen_addr,
             edge_hub_url,
             edge_hub_urls,
+            edge_advertised_addresses,
             edge_public_addresses,
             edge_listen_workers,
             edge_proxy_protocol,
@@ -386,8 +397,11 @@ impl NodeConfig {
                 .unwrap_or_else(default_trusted_cidrs),
         };
 
-        let public_addresses =
-            derive_public_addresses(edge_public_addresses, hub_public_url.as_deref());
+        let public_addresses = resolve_advertised_addresses(
+            edge_advertised_addresses,
+            edge_public_addresses,
+            hub_public_url.as_deref(),
+        );
 
         let edge = EdgeConfig {
             enabled: edge_enabled.unwrap_or(true),
@@ -544,17 +558,38 @@ fn resolve_hub_url(
     explicit.or_else(|| edge_invite.map(|t| t.hub_url.trim_end_matches('/').to_string()))
 }
 
-/// Resolve the list of public addresses the edge advertises to clients.
+/// Resolve the addresses the hub advertises to agents and clients.
 ///
-/// When the operator left `TOWONEL_EDGE_PUBLIC_ADDRESSES` unset and supplied
-/// `TOWONEL_HUB_PUBLIC_URL`, derive a single `<host>:443` entry from the
-/// hub URL. This covers the common single-DNS deployment where the hub and
-/// the public edge endpoint share a hostname; multi-DNS operators set the
-/// addresses explicitly as before.
-fn derive_public_addresses(explicit: Vec<String>, hub_public_url: Option<&str>) -> Vec<String> {
-    let trimmed = trim_entries(explicit);
-    if !trimmed.is_empty() {
-        return trimmed;
+/// Resolution order:
+/// 1. `TOWONEL_EDGE_ADVERTISED_ADDRESSES` (canonical name) if non-empty.
+/// 2. `TOWONEL_EDGE_PUBLIC_ADDRESSES` (deprecated alias) with a one-time
+///    warning so legacy compose files keep booting.
+/// 3. `<host>:443` derived from `TOWONEL_HUB_PUBLIC_URL` host. Covers the
+///    common single-DNS deployment where the hub and the public edge
+///    endpoint share a hostname; multi-DNS operators set the addresses
+///    explicitly.
+///
+/// The `:443` derivation assumes the public endpoint is on the standard
+/// HTTPS port. Operators whose public endpoint is on a different port
+/// (e.g. when the reverse proxy itself listens elsewhere) must set the
+/// addresses explicitly.
+fn resolve_advertised_addresses(
+    advertised: Vec<String>,
+    deprecated_public: Vec<String>,
+    hub_public_url: Option<&str>,
+) -> Vec<String> {
+    let primary = trim_entries(advertised);
+    if !primary.is_empty() {
+        return primary;
+    }
+    let alias = trim_entries(deprecated_public);
+    if !alias.is_empty() {
+        tracing::warn!(
+            "TOWONEL_EDGE_PUBLIC_ADDRESSES is deprecated; rename to \
+             TOWONEL_EDGE_ADVERTISED_ADDRESSES — the address agents/clients \
+             reach (typically your reverse proxy), not the edge's listen address"
+        );
+        return alias;
     }
     let Some(url_str) = hub_public_url else {
         return Vec::new();
@@ -660,35 +695,54 @@ mod tests {
     }
 
     #[test]
-    fn derive_public_addresses_uses_explicit_list() {
-        let got = derive_public_addresses(
+    fn resolve_advertised_uses_canonical_when_set() {
+        let got = resolve_advertised_addresses(
             vec!["tunnel.example.com:443".into()],
+            vec!["legacy.example.com:443".into()],
             Some("https://hub.example.com"),
         );
         assert_eq!(got, vec!["tunnel.example.com:443".to_string()]);
     }
 
     #[test]
-    fn derive_public_addresses_falls_back_to_hub_url_host() {
-        let got = derive_public_addresses(Vec::new(), Some("https://hub.example.com"));
+    fn resolve_advertised_falls_back_to_deprecated_alias() {
+        let got = resolve_advertised_addresses(
+            Vec::new(),
+            vec!["legacy.example.com:443".into()],
+            Some("https://hub.example.com"),
+        );
+        // Deprecated alias is honored (deployments don't break on upgrade) but
+        // emits a warning; the derived hub-url fallback is not used because
+        // the alias took precedence.
+        assert_eq!(got, vec!["legacy.example.com:443".to_string()]);
+    }
+
+    #[test]
+    fn resolve_advertised_falls_back_to_hub_url_host() {
+        let got =
+            resolve_advertised_addresses(Vec::new(), Vec::new(), Some("https://hub.example.com"));
         assert_eq!(got, vec!["hub.example.com:443".to_string()]);
     }
 
     #[test]
-    fn derive_public_addresses_strips_url_port_and_path() {
-        let got = derive_public_addresses(Vec::new(), Some("https://hub.example.com:8443/v1"));
+    fn resolve_advertised_strips_url_port_and_path() {
+        let got = resolve_advertised_addresses(
+            Vec::new(),
+            Vec::new(),
+            Some("https://hub.example.com:8443/v1"),
+        );
         assert_eq!(got, vec!["hub.example.com:443".to_string()]);
     }
 
     #[test]
-    fn derive_public_addresses_empty_when_no_hub_url() {
-        let got = derive_public_addresses(Vec::new(), None);
+    fn resolve_advertised_empty_when_no_hub_url() {
+        let got = resolve_advertised_addresses(Vec::new(), Vec::new(), None);
         assert!(got.is_empty());
     }
 
     #[test]
-    fn derive_public_addresses_empty_on_unparsable_hub_url() {
-        let got = derive_public_addresses(Vec::new(), Some("not-a-url"));
+    fn resolve_advertised_empty_on_unparsable_hub_url() {
+        let got = resolve_advertised_addresses(Vec::new(), Vec::new(), Some("not-a-url"));
         assert!(got.is_empty());
     }
 

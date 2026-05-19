@@ -281,7 +281,7 @@ inside that directory. Individual overrides always win.
 | `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`                          | TLS bind address                                                                             |
 | `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090`                         | Health + metrics                                                                             |
 | `TOWONEL_EDGE_HUB_URL`              |                                        | Remote hub (edge-only mode); `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias            |
-| `TOWONEL_EDGE_PUBLIC_ADDRESSES`     | `<HUB_PUBLIC_URL host>:443` when unset | Addresses advertised to agents. The `:443` fallback assumes the edge listens on 443 — set this explicitly when running edge on a different port |
+| `TOWONEL_EDGE_ADVERTISED_ADDRESSES` | `<HUB_PUBLIC_URL host>:443` when unset | Addresses agents and clients reach — **the reverse proxy's public address** when one is fronting the edge, not `EDGE_LISTEN_ADDR`. The `:443` fallback assumes the public endpoint is on the standard HTTPS port; set this explicitly if your public endpoint is on a different port. `TOWONEL_EDGE_PUBLIC_ADDRESSES` accepted as deprecated alias |
 | `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                                        | Enables Let's Encrypt issuance                                                               |
 | `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert cache directory                                                                         |
 | `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`                                | Use Let's Encrypt staging                                                                    |
