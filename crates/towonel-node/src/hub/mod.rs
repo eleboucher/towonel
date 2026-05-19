@@ -27,20 +27,58 @@ use tracing::info;
 const OPERATOR_KEY_BYTES: usize = 32;
 
 /// Env var carrying the 32-byte hex-encoded key used to keyed-hash invite
-/// secrets. Required at hub startup: losing or rotating it invalidates every
-/// outstanding invite. Generate with `openssl rand -hex 32`.
+/// secrets. Losing or rotating it invalidates every outstanding invite.
+/// Generate with `openssl rand -hex 32`, or let the hub auto-generate one
+/// to disk by setting `TOWONEL_INVITE_HASH_KEY_PATH` (or `TOWONEL_DATA_DIR`).
 pub const INVITE_HASH_KEY_ENV: &str = "TOWONEL_INVITE_HASH_KEY";
 
-/// Read the invite-hash key from `TOWONEL_INVITE_HASH_KEY` or fail with a
-/// message that tells the operator how to generate one.
-pub fn load_invite_hash_key() -> anyhow::Result<InviteHashKey> {
-    let hex = std::env::var(INVITE_HASH_KEY_ENV).map_err(|_e| {
-        anyhow::anyhow!(
-            "{INVITE_HASH_KEY_ENV} is not set — generate one with \
-             `openssl rand -hex 32` and export it before starting the hub"
-        )
-    })?;
-    InviteHashKey::from_hex(&hex)
+/// Resolve the invite-hash key from the operator-provided env value, falling
+/// back to a persisted file at `path`. If neither is set, fail loudly so the
+/// operator can't silently boot with no protection on outstanding invites.
+///
+/// Resolution order:
+/// 1. `env_value` non-empty → parse hex.
+/// 2. `path` set + file exists → read + parse hex.
+/// 3. `path` set + file missing → generate fresh, persist 0o600, log a backup
+///    warning.
+/// 4. Neither → error pointing at both `TOWONEL_INVITE_HASH_KEY` and
+///    `TOWONEL_INVITE_HASH_KEY_PATH`/`TOWONEL_DATA_DIR`.
+pub fn load_or_generate_invite_hash_key(
+    env_value: Option<&str>,
+    path: Option<&Path>,
+) -> anyhow::Result<InviteHashKey> {
+    if let Some(hex) = env_value.map(str::trim).filter(|s| !s.is_empty()) {
+        return InviteHashKey::from_hex(hex);
+    }
+    if let Some(path) = path {
+        return load_or_generate_invite_hash_key_at(path);
+    }
+    anyhow::bail!(
+        "{INVITE_HASH_KEY_ENV} is not set — generate one with \
+         `openssl rand -hex 32` and export it before starting the hub, \
+         or set TOWONEL_INVITE_HASH_KEY_PATH (or TOWONEL_DATA_DIR) so the \
+         hub can persist a generated key to disk"
+    )
+}
+
+fn load_or_generate_invite_hash_key_at(path: &Path) -> anyhow::Result<InviteHashKey> {
+    if path.exists() {
+        let content = std::fs::read_to_string(path)?;
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("invite-hash key file {} is empty", path.display());
+        }
+        return InviteHashKey::from_hex(trimmed);
+    }
+    let key = InviteHashKey::generate();
+    let hex = key.to_hex();
+    write_key_file(path, hex.as_bytes())?;
+    tracing::warn!(
+        path = %path.display(),
+        "generated new invite-hash key — BACK THIS UP; losing it invalidates \
+         every outstanding invite"
+    );
+    Ok(key)
 }
 
 /// Load the operator API key from `path`, or generate a new random one and
@@ -250,5 +288,86 @@ async fn refresh_metrics_loop(state: Arc<api::AppState>) {
             .metrics
             .tenants_total
             .set(i64::try_from(tenants).unwrap_or(i64::MAX));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_path(name: &str) -> std::path::PathBuf {
+        let mut suffix = [0u8; 8];
+        getrandom::fill(&mut suffix).expect("rng");
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "towonel-invite-hash-{name}-{}-{}",
+            std::process::id(),
+            hex::encode(suffix),
+        ));
+        p
+    }
+
+    #[test]
+    fn env_value_wins_over_path() {
+        let hex = "11".repeat(32);
+        let path = temp_path("env-wins");
+        // File doesn't exist, but env value should be used and file left alone.
+        let key = load_or_generate_invite_hash_key(Some(&hex), Some(&path)).unwrap();
+        assert_eq!(key.to_hex(), hex);
+        assert!(!path.exists(), "env value path must not be touched");
+    }
+
+    #[test]
+    fn file_is_read_when_present() {
+        let hex = "22".repeat(32);
+        let path = temp_path("file-read");
+        std::fs::write(&path, &hex).unwrap();
+        let key = load_or_generate_invite_hash_key(None, Some(&path)).unwrap();
+        assert_eq!(key.to_hex(), hex);
+        drop(std::fs::remove_file(&path));
+    }
+
+    #[test]
+    fn file_is_generated_when_missing() {
+        let path = temp_path("file-gen");
+        assert!(!path.exists());
+        let key = load_or_generate_invite_hash_key(None, Some(&path)).unwrap();
+        assert!(path.exists(), "key file must be persisted");
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk.trim(), key.to_hex());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        drop(std::fs::remove_file(&path));
+    }
+
+    #[test]
+    fn neither_env_nor_path_errors() {
+        let err = load_or_generate_invite_hash_key(None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(INVITE_HASH_KEY_ENV), "got: {msg}");
+        assert!(msg.contains("TOWONEL_INVITE_HASH_KEY_PATH"), "got: {msg}");
+    }
+
+    #[test]
+    fn empty_env_value_falls_through_to_path() {
+        let path = temp_path("empty-env");
+        let key = load_or_generate_invite_hash_key(Some("   "), Some(&path)).unwrap();
+        assert!(path.exists());
+        drop(std::fs::remove_file(&path));
+        // Sanity: we got a real key (not all-zeros).
+        assert_ne!(key.to_hex(), "0".repeat(64));
+    }
+
+    #[test]
+    fn empty_file_errors() {
+        let path = temp_path("empty-file");
+        std::fs::write(&path, "").unwrap();
+        let err = load_or_generate_invite_hash_key(None, Some(&path)).unwrap_err();
+        assert!(err.to_string().contains("empty"), "got: {err}");
+        drop(std::fs::remove_file(&path));
     }
 }
