@@ -1,0 +1,28 @@
+{
+	admin off
+
+	# L4 module: pure TCP byte-shuffling, no TLS termination here — towonel
+	# still does SNI peeking and runs ACME itself. Caddy's role is to bind
+	# the privileged ports (80/443) and prepend PROXY v2 so towonel sees
+	# the real client IP. Mount your own /etc/caddy/Caddyfile to override.
+	layer4 {
+		:80 {
+			@http http
+			route @http {
+				proxy {
+					upstream 127.0.0.1:8081
+					proxy_protocol v2
+				}
+			}
+		}
+		:443 {
+			@tls tls
+			route @tls {
+				proxy {
+					upstream 127.0.0.1:4443
+					proxy_protocol v2
+				}
+			}
+		}
+	}
+}

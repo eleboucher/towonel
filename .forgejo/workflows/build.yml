@@ -90,3 +90,31 @@ jobs:
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+
+      - name: Compute hub-caddy image metadata
+        id: meta-hub-caddy
+        uses: https://data.forgejo.org/docker/metadata-action@v6
+        with:
+          images: |
+            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy
+            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+
+      - name: Build and push towonel-hub-caddy
+        uses: https://data.forgejo.org/docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile.hub-caddy
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-hub-caddy.outputs.tags }}
+          labels: ${{ steps.meta-hub-caddy.outputs.labels }}
+          cache-from: type=gha,scope=towonel-hub-caddy
+          cache-to: type=gha,scope=towonel-hub-caddy,mode=max
+          build-args: |
+            ENABLE_SCCACHE=1
+          secrets: |
+            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
