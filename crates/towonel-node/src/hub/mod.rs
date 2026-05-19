@@ -26,23 +26,9 @@ use tracing::info;
 /// 32 bytes = 256 bits, base64url-encoded without padding = 43 chars.
 const OPERATOR_KEY_BYTES: usize = 32;
 
-/// Env var carrying the 32-byte hex-encoded key used to keyed-hash invite
-/// secrets. Losing or rotating it invalidates every outstanding invite.
-/// Generate with `openssl rand -hex 32`, or let the hub auto-generate one
-/// to disk by setting `TOWONEL_INVITE_HASH_KEY_PATH` (or `TOWONEL_DATA_DIR`).
 pub const INVITE_HASH_KEY_ENV: &str = "TOWONEL_INVITE_HASH_KEY";
 
-/// Resolve the invite-hash key from the operator-provided env value, falling
-/// back to a persisted file at `path`. If neither is set, fail loudly so the
-/// operator can't silently boot with no protection on outstanding invites.
-///
-/// Resolution order:
-/// 1. `env_value` non-empty → parse hex.
-/// 2. `path` set + file exists → read + parse hex.
-/// 3. `path` set + file missing → generate fresh, persist 0o600, log a backup
-///    warning.
-/// 4. Neither → error pointing at both `TOWONEL_INVITE_HASH_KEY` and
-///    `TOWONEL_INVITE_HASH_KEY_PATH`/`TOWONEL_DATA_DIR`.
+/// Resolve from env value, else read/generate at `path`, else error.
 pub fn load_or_generate_invite_hash_key(
     env_value: Option<&str>,
     path: Option<&Path>,
@@ -62,12 +48,8 @@ pub fn load_or_generate_invite_hash_key(
 }
 
 fn load_or_generate_invite_hash_key_at(path: &Path) -> anyhow::Result<InviteHashKey> {
-    // Always try exclusive create; on AlreadyExists, read the winner's file.
-    // Skipping the `path.exists()` precheck closes the TOCTOU window where
-    // two hubs on a shared volume each see the file missing, each generate
-    // a different key, and the last writer wins — leaving the loser with an
-    // in-memory key that no longer matches disk. Mirror of the pattern in
-    // `towonel_common::identity::load_or_generate_key_bytes`.
+    // Exclusive-create + AlreadyExists fallback closes the TOCTOU window
+    // where two hubs on shared storage would each generate a different key.
     let key = InviteHashKey::generate();
     let hex = key.to_hex();
     match write_key_file_exclusive(path, hex.as_bytes()) {

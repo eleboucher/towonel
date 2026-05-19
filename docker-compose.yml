@@ -9,23 +9,10 @@ services:
       - "9090:9090"
     environment:
       RUST_LOG: info
-      # Required: public HTTPS URL of the hub. EDGE_ADVERTISED_ADDRESSES
-      # defaults to "<this host>:443" unless set — override it when the
-      # edge is reachable on a different DNS name or port (e.g. when a
-      # reverse proxy on a non-standard port is fronting it).
       # TOWONEL_HUB_PUBLIC_URL: https://hub.example.eu
       # TOWONEL_EDGE_ADVERTISED_ADDRESSES: tunnel.example.eu:443
-      #
-      # Required for Let's Encrypt:
       # TOWONEL_EDGE_TLS_ACME_EMAIL: ops@example.eu
-      #
-      # Invite-hash key: provide via secret, or let the hub auto-generate one
-      # to ${TOWONEL_DATA_DIR}/invite_hash.key on first boot (back it up!).
       # TOWONEL_INVITE_HASH_KEY: ${TOWONEL_INVITE_HASH_KEY}
-      #
-      # Everything else (identity key, hub.db, operator key, certs, invite-hash
-      # key path) defaults to ${TOWONEL_DATA_DIR}/<name>, which the image pins
-      # to /data. Override any individual var to opt out.
       # TOWONEL_HUB_DNS_WEBHOOK_URL: https://dns-sidecar.internal/update
     volumes:
       - node-data:/data
