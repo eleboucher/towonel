@@ -16,7 +16,7 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use tokio::sync::broadcast;
-use towonel_common::identity::write_key_file;
+use towonel_common::identity::{write_key_file, write_key_file_exclusive};
 use towonel_common::invite::InviteHashKey;
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
@@ -62,23 +62,38 @@ pub fn load_or_generate_invite_hash_key(
 }
 
 fn load_or_generate_invite_hash_key_at(path: &Path) -> anyhow::Result<InviteHashKey> {
-    if path.exists() {
-        let content = std::fs::read_to_string(path)?;
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            anyhow::bail!("invite-hash key file {} is empty", path.display());
-        }
-        return InviteHashKey::from_hex(trimmed);
-    }
+    // Always try exclusive create; on AlreadyExists, read the winner's file.
+    // Skipping the `path.exists()` precheck closes the TOCTOU window where
+    // two hubs on a shared volume each see the file missing, each generate
+    // a different key, and the last writer wins — leaving the loser with an
+    // in-memory key that no longer matches disk. Mirror of the pattern in
+    // `towonel_common::identity::load_or_generate_key_bytes`.
     let key = InviteHashKey::generate();
     let hex = key.to_hex();
-    write_key_file(path, hex.as_bytes())?;
-    tracing::warn!(
-        path = %path.display(),
-        "generated new invite-hash key — BACK THIS UP; losing it invalidates \
-         every outstanding invite"
-    );
-    Ok(key)
+    match write_key_file_exclusive(path, hex.as_bytes()) {
+        Ok(()) => {
+            tracing::warn!(
+                path = %path.display(),
+                "generated new invite-hash key — BACK THIS UP; losing it invalidates \
+                 every outstanding invite"
+            );
+            Ok(key)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_invite_hash_key_file(path),
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to persist invite-hash key at {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+fn read_invite_hash_key_file(path: &Path) -> anyhow::Result<InviteHashKey> {
+    let content = std::fs::read_to_string(path)?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("invite-hash key file {} is empty", path.display());
+    }
+    InviteHashKey::from_hex(trimmed)
 }
 
 /// Load the operator API key from `path`, or generate a new random one and

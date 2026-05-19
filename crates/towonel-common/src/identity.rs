@@ -461,9 +461,13 @@ fn load_or_generate_key_bytes(path: &Path) -> anyhow::Result<[u8; 32]> {
     }
 }
 
-/// Write key bytes atomically: fail with `AlreadyExists` if the file exists,
-/// so a second racing creator falls back to reading the winner's output.
-fn write_key_file_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+/// Write key bytes atomically.
+///
+/// Fails with `AlreadyExists` if the file is already present, so a second
+/// racing creator falls back to reading the winner's output. Public so
+/// other crates (e.g. towonel-node's invite-hash-key bootstrap) can share
+/// the same race-safe primitive.
+pub fn write_key_file_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
