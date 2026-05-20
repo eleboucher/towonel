@@ -46,6 +46,14 @@ const PEEK_RETRY_DELAY: Duration = Duration::from_millis(5);
 /// exhaust FDs. Caddy's own listener wrapper defaults to 2s.
 const PROXY_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// `acceptor.accept` has no built-in timeout; cap it so a peer that sends a
+/// valid `ClientHello` then stalls cannot pin a spawn task.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// First-issue for a new hostname can legitimately take ~tens of seconds; the
+/// cap exists to keep a wedged ACME backend from pinning every connection.
+const ENSURE_CERT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Pool of iroh QUIC connections, keyed by agent `EndpointId`.
 ///
 /// QUIC connections are expensive to establish; streams are cheap. We keep
@@ -64,6 +72,10 @@ type AgentHealthState = AtomicU32;
 /// leave a harmless stale entry).
 type AgentHealthMap = papaya::HashMap<iroh::EndpointId, Arc<AgentHealthState>>;
 
+/// Per-agent dial guard. Held only on the cold path so concurrent first-time
+/// dials to the same agent share one handshake.
+type DialLocks = papaya::HashMap<iroh::EndpointId, Arc<tokio::sync::Mutex<()>>>;
+
 /// The edge: listens on one TCP port, peeks the SNI, looks up the hostname's
 /// TLS policy, and dispatches:
 ///   - `Passthrough`: raw TLS bytes forwarded to the agent (agent/origin handles TLS)
@@ -77,6 +89,7 @@ pub struct Edge {
     endpoint: Arc<Endpoint>,
     agent_pool: Arc<AgentPool>,
     agent_health: Arc<AgentHealthMap>,
+    dial_locks: Arc<DialLocks>,
     listen_addr: String,
     health_listen_addr: String,
     listen_workers: usize,
@@ -108,6 +121,7 @@ impl Edge {
             endpoint,
             agent_pool: Arc::new(AgentPool::new()),
             agent_health: Arc::new(AgentHealthMap::new()),
+            dial_locks: Arc::new(DialLocks::new()),
             listen_addr,
             health_listen_addr,
             listen_workers: 1,
@@ -161,6 +175,7 @@ impl Edge {
             endpoint: Arc::clone(&self.endpoint),
             pool: Arc::clone(&self.agent_pool),
             health: Arc::clone(&self.agent_health),
+            dial_locks: Arc::clone(&self.dial_locks),
             metrics: self.metrics.clone(),
             tls_acceptor: self.tls.as_ref().map(|t| t.acceptor.clone()),
             acme: self.tls.as_ref().map(|t| Arc::clone(&t.acme)),
@@ -280,6 +295,7 @@ struct ConnCtx {
     endpoint: Arc<Endpoint>,
     pool: Arc<AgentPool>,
     health: Arc<AgentHealthMap>,
+    dial_locks: Arc<DialLocks>,
     metrics: EdgeMetrics,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     acme: Option<Arc<AcmeManager>>,
@@ -353,7 +369,14 @@ async fn pick_agent_and_open_stream(
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..PICK_AGENT_ATTEMPTS {
         for ((agent_addr, health), already_penalised) in scored.iter().zip(penalised.iter_mut()) {
-            match open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr.clone()).await {
+            match open_agent_stream(
+                &ctx.endpoint,
+                &ctx.pool,
+                &ctx.dial_locks,
+                agent_addr.clone(),
+            )
+            .await
+            {
                 Ok((send, recv)) => {
                     health.store(0, Ordering::Relaxed);
                     return Ok((agent_addr.clone(), send, recv));
@@ -478,11 +501,10 @@ async fn handle_connection_inner(
         };
 
         match prep {
-            Preparation::SelfRoute { hostname } => {
-                let self_route = ctx
-                    .hub_self_route
-                    .as_ref()
-                    .expect("self route present during prepare");
+            Preparation::SelfRoute {
+                hostname,
+                self_route,
+            } => {
                 let (bytes_in, bytes_out) =
                     pipe_to_local_hub(tcp_stream, &hostname, &self_route.local_addr, ctx).await?;
                 ctx.metrics.total_bytes_in.inc_by(bytes_in);
@@ -563,6 +585,7 @@ async fn handle_connection_inner(
 enum Preparation {
     SelfRoute {
         hostname: String,
+        self_route: Arc<HubSelfRoute>,
     },
     Routed {
         hostname: String,
@@ -585,7 +608,10 @@ async fn prepare_connection(tcp_stream: &TcpStream, ctx: &ConnCtx) -> anyhow::Re
     if let Some(self_route) = ctx.hub_self_route.as_ref()
         && self_route.hostname.eq_ignore_ascii_case(&hostname)
     {
-        return Ok(Preparation::SelfRoute { hostname });
+        return Ok(Preparation::SelfRoute {
+            hostname,
+            self_route: Arc::clone(self_route),
+        });
     }
 
     let (candidates, policy) = ctx
@@ -626,11 +652,17 @@ async fn pipe_passthrough(
 
     let c2a = async {
         let res = tokio::io::copy_buf(&mut tcp_read, &mut send_stream).await;
+        if let Err(ref e) = res {
+            warn!(%hostname, "client->agent forward: {e}");
+        }
         drop(send_stream.finish());
         res.unwrap_or(0)
     };
     let a2c = async {
         let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
+        if let Err(ref e) = res {
+            warn!(%hostname, "agent->client forward: {e}");
+        }
         drop(tcp_write.shutdown().await);
         res.unwrap_or(0)
     };
@@ -656,9 +688,9 @@ async fn pipe_terminate(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("TLS termination configured but ACME manager missing"))?;
 
-    acme.ensure_cert(hostname).await?;
+    ensure_cert_bounded(acme, hostname).await?;
 
-    let tls_stream = acceptor.accept(tcp_stream).await?;
+    let tls_stream = tls_accept_bounded(acceptor, tcp_stream, hostname).await?;
     debug!(%hostname, "TLS handshake complete");
     let (tls_read, mut tls_write) = tokio::io::split(tls_stream);
     let mut tls_read = tokio::io::BufReader::with_capacity(COPY_BUF_SIZE, tls_read);
@@ -667,17 +699,47 @@ async fn pipe_terminate(
 
     let c2a = async {
         let res = tokio::io::copy_buf(&mut tls_read, &mut send_stream).await;
+        if let Err(ref e) = res {
+            warn!(%hostname, "client(tls)->agent forward: {e}");
+        }
         drop(send_stream.finish());
         res.unwrap_or(0)
     };
     let a2c = async {
         let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tls_write).await;
+        if let Err(ref e) = res {
+            warn!(%hostname, "agent->client(tls) forward: {e}");
+        }
         drop(tls_write.shutdown().await);
         res.unwrap_or(0)
     };
 
     let (c2a, a2c) = tokio::join!(c2a, a2c);
     Ok((c2a, a2c))
+}
+
+async fn tls_accept_bounded(
+    acceptor: &tokio_rustls::TlsAcceptor,
+    tcp_stream: TcpStream,
+    hostname: &str,
+) -> anyhow::Result<tokio_rustls::server::TlsStream<TcpStream>> {
+    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(tcp_stream)).await {
+        Ok(Ok(s)) => Ok(s),
+        Ok(Err(e)) => Err(anyhow::anyhow!("TLS handshake failed for {hostname}: {e}")),
+        Err(_) => Err(anyhow::anyhow!(
+            "TLS handshake for {hostname} timed out after {TLS_HANDSHAKE_TIMEOUT:?}"
+        )),
+    }
+}
+
+async fn ensure_cert_bounded(acme: &AcmeManager, hostname: &str) -> anyhow::Result<()> {
+    match tokio::time::timeout(ENSURE_CERT_TIMEOUT, acme.ensure_cert(hostname)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(anyhow::anyhow!(
+            "ACME ensure_cert for {hostname} timed out after {ENSURE_CERT_TIMEOUT:?}"
+        )),
+    }
 }
 
 async fn pipe_to_local_hub(
@@ -695,19 +757,24 @@ async fn pipe_to_local_hub(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("hub self-route requires the ACME manager"))?;
 
-    acme.ensure_cert(hostname).await?;
+    ensure_cert_bounded(acme, hostname).await?;
 
-    let mut tls_stream = acceptor.accept(tcp_stream).await?;
+    let mut tls_stream = tls_accept_bounded(acceptor, tcp_stream, hostname).await?;
     debug!(%hostname, "TLS handshake complete (hub self-route)");
 
+    // Local hub doesn't speak PROXY v2; forward cleartext as-is.
     let mut local = TcpStream::connect(local_addr).await.map_err(|e| {
         anyhow::anyhow!("hub self-route: failed to connect to local hub at {local_addr}: {e}")
     })?;
     drop(local.set_nodelay(true));
 
-    let (c2h, h2c) = tokio::io::copy_bidirectional(&mut tls_stream, &mut local)
-        .await
-        .unwrap_or((0, 0));
+    let (c2h, h2c) = match tokio::io::copy_bidirectional(&mut tls_stream, &mut local).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(%hostname, "hub self-route copy failed: {e}");
+            (0, 0)
+        }
+    };
     Ok((c2h, h2c))
 }
 
@@ -715,11 +782,14 @@ async fn pipe_to_local_hub(
 /// connection when possible.
 ///
 /// If the pooled connection's `open_bi` fails (peer went away, idle-timed
-/// out, etc.), we drop it and dial a fresh one. `agent_addr` may include
-/// direct socket addresses so iroh can connect without relay/discovery.
+/// out, etc.), we drop it and dial a fresh one. Concurrent cold-path dials
+/// to the same agent serialize through `dial_locks` so they share a single
+/// QUIC handshake. `agent_addr` may include direct socket addresses so iroh
+/// can connect without relay/discovery.
 async fn open_agent_stream(
     endpoint: &Endpoint,
     pool: &AgentPool,
+    dial_locks: &DialLocks,
     agent_addr: EndpointAddr,
 ) -> anyhow::Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     let agent_id = agent_addr.id;
@@ -733,6 +803,32 @@ async fn open_agent_stream(
                     agent = %agent_id.fmt_short(),
                     error = %e,
                     "pooled connection broken, reconnecting"
+                );
+                pool.pin().remove(&agent_id);
+            }
+        }
+    }
+
+    let lock = {
+        let guard = dial_locks.pin();
+        if let Some(existing) = guard.get(&agent_id) {
+            Arc::clone(existing)
+        } else {
+            Arc::clone(guard.get_or_insert(agent_id, Arc::new(tokio::sync::Mutex::new(()))))
+        }
+    };
+    let _dial_guard = lock.lock().await;
+
+    // Recheck: another task may have populated the pool while we waited.
+    let cached = pool.pin().get(&agent_id).cloned();
+    if let Some(conn) = cached {
+        match conn.open_bi().await {
+            Ok(pair) => return Ok(pair),
+            Err(e) => {
+                debug!(
+                    agent = %agent_id.fmt_short(),
+                    error = %e,
+                    "pooled connection broken after dial lock, redialing"
                 );
                 pool.pin().remove(&agent_id);
             }
@@ -999,11 +1095,17 @@ async fn pipe_tcp(
 
     let c2a = async {
         let res = tokio::io::copy_buf(&mut tcp_read, &mut send_stream).await;
+        if let Err(ref e) = res {
+            warn!(%route_key, "client->agent forward: {e}");
+        }
         drop(send_stream.finish());
         res.unwrap_or(0)
     };
     let a2c = async {
         let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
+        if let Err(ref e) = res {
+            warn!(%route_key, "agent->client forward: {e}");
+        }
         drop(tcp_write.shutdown().await);
         res.unwrap_or(0)
     };
