@@ -125,9 +125,8 @@ COPY --from=runtime-prep --chown=10001:10001 /home/nonroot    /home/nonroot
 COPY --from=runtime-prep /usr/local/bin/towonel /usr/local/bin/towonel
 COPY --from=runtime-prep /usr/local/bin/caddy   /usr/local/bin/caddy
 
-# Both binaries need cap_net_bind_service: caddy to bind 80/443, towonel to
-# keep parity with the bare image (operators who replace Caddyfile may still
-# rebind privileged ports).
+# Both binaries get cap_net_bind_service so operators can swap the Caddyfile
+# and rebind privileged ports without rebuilding the image.
 RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/caddy \
     && setcap 'cap_net_bind_service=+ep' /usr/local/bin/towonel
 
@@ -138,7 +137,6 @@ COPY deploy/hub-caddy/entrypoint.sh /usr/local/bin/entrypoint.sh
 # can repoint towonel by overriding any of these in compose.
 ENV TOWONEL_DATA_DIR=/data \
     TOWONEL_EDGE_LISTEN_ADDR=127.0.0.1:4443 \
-    TOWONEL_EDGE_TLS_HTTP_LISTEN_ADDR=127.0.0.1:8081 \
     TOWONEL_EDGE_PROXY_PROTOCOL=true \
     HOME=/home/nonroot
 

@@ -3,7 +3,6 @@ pub mod health;
 pub mod proxy_protocol;
 pub mod router;
 pub mod subscribe;
-pub mod tls;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -25,10 +24,9 @@ use towonel_common::tunnel::{
     forward_quic_to_writer, read_datagram_frame, write_datagram_frame, write_handshake,
 };
 
-use self::acme::AcmeCoordinator;
+use self::acme::AcmeManager;
 use self::health::EdgeMetrics;
 use self::router::Router;
-use self::tls::CertStore;
 use crate::config::ProxyProtocolConfig;
 
 /// Maximum bytes to peek from a TCP connection to extract the TLS `ClientHello`.
@@ -90,8 +88,7 @@ pub struct Edge {
 
 struct TlsState {
     acceptor: tokio_rustls::TlsAcceptor,
-    cert_store: CertStore,
-    acme: Option<Arc<AcmeCoordinator>>,
+    acme: Arc<AcmeManager>,
 }
 
 pub struct HubSelfRoute {
@@ -133,13 +130,9 @@ impl Edge {
         self
     }
 
-    pub fn with_tls(mut self, cert_store: CertStore, acme: Option<Arc<AcmeCoordinator>>) -> Self {
-        let acceptor = tokio_rustls::TlsAcceptor::from(cert_store.server_config());
-        self.tls = Some(TlsState {
-            acceptor,
-            cert_store,
-            acme,
-        });
+    pub fn with_tls(mut self, acme: Arc<AcmeManager>) -> Self {
+        let acceptor = tokio_rustls::TlsAcceptor::from(acme.server_config());
+        self.tls = Some(TlsState { acceptor, acme });
         self
     }
 
@@ -149,8 +142,8 @@ impl Edge {
         self
     }
 
-    pub fn acme(&self) -> Option<Arc<AcmeCoordinator>> {
-        self.tls.as_ref().and_then(|t| t.acme.clone())
+    pub fn acme(&self) -> Option<Arc<AcmeManager>> {
+        self.tls.as_ref().map(|t| Arc::clone(&t.acme))
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -170,8 +163,7 @@ impl Edge {
             health: Arc::clone(&self.agent_health),
             metrics: self.metrics.clone(),
             tls_acceptor: self.tls.as_ref().map(|t| t.acceptor.clone()),
-            cert_store: self.tls.as_ref().map(|t| t.cert_store.clone()),
-            acme: self.tls.as_ref().and_then(|t| t.acme.clone()),
+            acme: self.tls.as_ref().map(|t| Arc::clone(&t.acme)),
             hub_self_route: self.hub_self_route.clone(),
             proxy_protocol: Arc::clone(&self.proxy_protocol),
         });
@@ -290,8 +282,7 @@ struct ConnCtx {
     health: Arc<AgentHealthMap>,
     metrics: EdgeMetrics,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
-    cert_store: Option<CertStore>,
-    acme: Option<Arc<AcmeCoordinator>>,
+    acme: Option<Arc<AcmeManager>>,
     hub_self_route: Option<Arc<HubSelfRoute>>,
     proxy_protocol: Arc<ProxyProtocolConfig>,
 }
@@ -586,17 +577,12 @@ async fn pipe_terminate(
         .tls_acceptor
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("TLS termination configured but acceptor missing"))?;
-    let cert_store = ctx
-        .cert_store
+    let acme = ctx
+        .acme
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("TLS termination configured but cert store missing"))?;
+        .ok_or_else(|| anyhow::anyhow!("TLS termination configured but ACME manager missing"))?;
 
-    if !cert_store.has_cert(hostname) {
-        match &ctx.acme {
-            Some(acme) => acme.ensure_cert(hostname).await?,
-            None => anyhow::bail!("no cert for {hostname} and ACME disabled"),
-        }
-    }
+    acme.ensure_cert(hostname).await?;
 
     let tls_stream = acceptor.accept(tcp_stream).await?;
     debug!(%hostname, "TLS handshake complete");
@@ -630,17 +616,12 @@ async fn pipe_to_local_hub(
         .tls_acceptor
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("hub self-route requires TLS termination"))?;
-    let cert_store = ctx
-        .cert_store
+    let acme = ctx
+        .acme
         .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("hub self-route requires a cert store"))?;
+        .ok_or_else(|| anyhow::anyhow!("hub self-route requires the ACME manager"))?;
 
-    if !cert_store.has_cert(hostname) {
-        match &ctx.acme {
-            Some(acme) => acme.ensure_cert(hostname).await?,
-            None => anyhow::bail!("no cert for hub hostname {hostname} and ACME disabled"),
-        }
-    }
+    acme.ensure_cert(hostname).await?;
 
     let mut tls_stream = acceptor.accept(tcp_stream).await?;
     debug!(%hostname, "TLS handshake complete (hub self-route)");
@@ -689,7 +670,7 @@ async fn open_agent_stream(
     let path_type = conn
         .paths()
         .into_iter()
-        .find(iroh::endpoint::PathInfo::is_selected)
+        .find(iroh::endpoint::Path::is_selected)
         .map_or("unknown", |p| if p.is_relay() { "relay" } else { "direct" });
     info!(
         agent = %agent_id.fmt_short(),

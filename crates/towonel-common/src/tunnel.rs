@@ -41,11 +41,11 @@ where
     loop {
         match recv.read_chunk(COPY_BUF_SIZE).await {
             Ok(Some(chunk)) => {
-                total = total.saturating_add(chunk.bytes.len() as u64);
+                total = total.saturating_add(chunk.len() as u64);
                 if prefix.is_empty() {
-                    writer.write_all(&chunk.bytes).await?;
+                    writer.write_all(&chunk).await?;
                 } else {
-                    prefix.extend_from_slice(&chunk.bytes);
+                    prefix.extend_from_slice(&chunk);
                     writer.write_all(&prefix).await?;
                     prefix = Vec::new();
                 }

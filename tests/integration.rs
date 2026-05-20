@@ -51,11 +51,15 @@ async fn tunnel_echo_roundtrip() {
         .await
         .expect("edge endpoint bind");
 
-    // Build an EndpointAddr with the agent's direct socket addresses so the
-    // edge can reach it without relay or discovery.
+    // Rewrite unspecified bind addrs to loopback so the edge can dial them.
     let mut agent_addr = EndpointAddr::new(agent_id);
     for sock in &agent_sockets {
-        agent_addr = agent_addr.with_ip_addr(*sock);
+        let reachable = if sock.ip().is_unspecified() {
+            SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), sock.port())
+        } else {
+            *sock
+        };
+        agent_addr = agent_addr.with_ip_addr(reachable);
     }
 
     // 4. Spawn agent-side handler: accept connection, read hostname header,
@@ -163,9 +167,16 @@ async fn tcp_service_handshake_carries_tcp_prefix() {
         .await
         .expect("edge endpoint bind");
 
+    // iroh binds on the unspecified address (0.0.0.0); rewrite to loopback
+    // so the edge endpoint can actually reach the agent on macOS/Linux.
     let mut agent_addr = EndpointAddr::new(agent_id);
     for sock in &agent_sockets {
-        agent_addr = agent_addr.with_ip_addr(*sock);
+        let reachable = if sock.ip().is_unspecified() {
+            SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), sock.port())
+        } else {
+            *sock
+        };
+        agent_addr = agent_addr.with_ip_addr(reachable);
     }
 
     let (agent_done_tx, agent_done_rx) = oneshot::channel::<Connection>();

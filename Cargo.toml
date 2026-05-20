@@ -106,7 +106,7 @@ tokio = { workspace = true }
 
 
 [workspace.dependencies]
-iroh = "0.98.0"
+iroh = "1.0.0-rc.0"
 ed25519-dalek = { version = "2.2", features = ["serde", "rand_core"] }
 ciborium = "0.2"
 sea-orm = { version = "1", features = [
@@ -180,7 +180,7 @@ rustls = { version = "0.23", default-features = false, features = [
   "ring",
 ] }
 rustls-pemfile = "2"
-instant-acme = "0.8"
+certon = { version = "0.2", default-features = false, features = ["ring"] }
 rcgen = "0.14"
 webpki-roots = "1.0"
 arc-swap = "1.7"
