@@ -355,7 +355,7 @@ async fn run_node() -> anyhow::Result<()> {
     match (config.hub.enabled, config.edge.enabled) {
         (true, true) => {
             let (route_tx, route_rx) = broadcast::channel::<RouteTable>(64);
-            let (router, edge, edge_node_id, edge_addresses, relay_watchdog) =
+            let (router, edge, edge_node_id, edge_addresses, relay_watchdog, endpoint) =
                 build_edge(secret_key, &config.tenants, &config.edge).await?;
 
             let edge = configure_hub_self_route(edge, &config.hub);
@@ -386,6 +386,7 @@ async fn run_node() -> anyhow::Result<()> {
                 () = towonel_common::shutdown::shutdown_signal() => {}
             }
             relay_watchdog.abort();
+            endpoint.close().await;
         }
         (true, false) => {
             let (route_tx, _) = broadcast::channel::<RouteTable>(64);
@@ -406,7 +407,7 @@ async fn run_node() -> anyhow::Result<()> {
         }
         (false, true) => {
             let subscriber_key = secret_key.clone();
-            let (router, edge, _edge_node_id, _edge_addresses, relay_watchdog) =
+            let (router, edge, _edge_node_id, _edge_addresses, relay_watchdog, endpoint) =
                 build_edge(secret_key, &config.tenants, &config.edge).await?;
 
             if let Some(hub_url) = config.edge.hub_url.clone() {
@@ -427,6 +428,7 @@ async fn run_node() -> anyhow::Result<()> {
                 () = towonel_common::shutdown::shutdown_signal() => {}
             }
             relay_watchdog.abort();
+            endpoint.close().await;
         }
         (false, false) => {
             anyhow::bail!("both hub and edge are disabled -- nothing to run");
@@ -552,6 +554,7 @@ async fn build_edge(
     iroh::EndpointId,
     Vec<String>,
     tokio::task::JoinHandle<()>,
+    Arc<Endpoint>,
 )> {
     let ep = Endpoint::builder(N0)
         .secret_key(secret_key)
@@ -573,11 +576,12 @@ async fn build_edge(
         "iroh endpoint bound for edge (outbound-only)"
     );
 
+    let endpoint = Arc::new(ep);
     let router = Arc::new(edge::router::Router::load_from_config(tenants)?);
 
     let mut edge = edge::Edge::new(
         Arc::clone(&router),
-        Arc::new(ep),
+        Arc::clone(&endpoint),
         edge_config.listen_addr.clone(),
         edge_config.health_listen_addr.clone(),
     )
@@ -594,7 +598,14 @@ async fn build_edge(
         edge = edge.with_tls(manager);
     }
 
-    Ok((router, edge, edge_node_id, edge_addresses, relay_watchdog))
+    Ok((
+        router,
+        edge,
+        edge_node_id,
+        edge_addresses,
+        relay_watchdog,
+        endpoint,
+    ))
 }
 
 /// Background task: receives materialized route tables from the hub's broadcast
