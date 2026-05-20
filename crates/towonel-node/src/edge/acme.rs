@@ -23,9 +23,8 @@ pub struct AcmeManager {
 
 impl AcmeManager {
     pub fn new(cert_dir: &Path, acme_email: String, staging: bool) -> anyhow::Result<Arc<Self>> {
-        std::fs::create_dir_all(cert_dir).with_context(|| {
-            format!("failed to create cert_dir {}", cert_dir.display())
-        })?;
+        std::fs::create_dir_all(cert_dir)
+            .with_context(|| format!("failed to create cert_dir {}", cert_dir.display()))?;
 
         let storage: Arc<dyn Storage> = Arc::new(FileStorage::new(cert_dir));
         let cache = CertCache::new(CacheOptions::default());
@@ -103,10 +102,7 @@ impl EdgeAlpnSolver {
         Self { resolver }
     }
 
-    fn build_challenge_cert(
-        domain: &str,
-        key_auth: &str,
-    ) -> anyhow::Result<Arc<CertifiedKey>> {
+    fn build_challenge_cert(domain: &str, key_auth: &str) -> anyhow::Result<Arc<CertifiedKey>> {
         let key_pair = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
         let mut params = CertificateParams::new(vec![domain.to_string()])?;
         params.distinguished_name = rcgen::DistinguishedName::new();
