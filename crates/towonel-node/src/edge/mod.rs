@@ -323,6 +323,11 @@ fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentHealthS
     Arc::clone(guard.get_or_insert(id, Arc::new(AgentHealthState::new(0))))
 }
 
+/// Re-dial the full candidate list a few times before giving up; bridges
+/// the agent reconnect window after an edge restart.
+const PICK_AGENT_ATTEMPTS: u32 = 3;
+const PICK_AGENT_BACKOFF: Duration = Duration::from_millis(200);
+
 /// Shuffle `candidates` for fair spread, then stable-sort by consecutive
 /// failures so healthy agents are tried before failing ones. Dials in order
 /// until one succeeds; records success/failure as a side effect. Returns the
@@ -344,25 +349,37 @@ async fn pick_agent_and_open_stream(
     }
     scored.sort_by_key(|(_, h)| h.load(Ordering::Relaxed));
 
+    let mut penalised: SmallVec<[bool; 4]> = smallvec::smallvec![false; scored.len()];
     let mut last_err: Option<anyhow::Error> = None;
-    for (agent_addr, health) in scored {
-        match open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr.clone()).await {
-            Ok((send, recv)) => {
-                health.store(0, Ordering::Relaxed);
-                return Ok((agent_addr, send, recv));
-            }
-            Err(e) => {
-                health.fetch_add(1, Ordering::Relaxed);
-                debug!(
-                    agent = %agent_addr.id.fmt_short(),
-                    error = %e,
-                    "agent stream open failed, trying next"
-                );
-                last_err = Some(e);
+    for attempt in 0..PICK_AGENT_ATTEMPTS {
+        for ((agent_addr, health), already_penalised) in scored.iter().zip(penalised.iter_mut()) {
+            match open_agent_stream(&ctx.endpoint, &ctx.pool, agent_addr.clone()).await {
+                Ok((send, recv)) => {
+                    health.store(0, Ordering::Relaxed);
+                    return Ok((agent_addr.clone(), send, recv));
+                }
+                Err(e) => {
+                    if !*already_penalised {
+                        health.fetch_add(1, Ordering::Relaxed);
+                        *already_penalised = true;
+                    }
+                    debug!(
+                        agent = %agent_addr.id.fmt_short(),
+                        attempt,
+                        error = %e,
+                        "agent stream open failed, trying next"
+                    );
+                    last_err = Some(e);
+                }
             }
         }
+        if attempt + 1 < PICK_AGENT_ATTEMPTS {
+            tokio::time::sleep(PICK_AGENT_BACKOFF.saturating_mul(1u32 << attempt)).await;
+        }
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("all agents failed")))
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!("all agents failed after {PICK_AGENT_ATTEMPTS} attempts")
+    }))
 }
 
 /// Peek bytes until a full TLS record is visible in the kernel buffer,
@@ -440,102 +457,159 @@ async fn handle_connection_inner(
     immediate_peer: std::net::SocketAddr,
     ctx: &ConnCtx,
 ) -> anyhow::Result<()> {
-    let peer_addr = resolve_peer_addr(&mut tcp_stream, immediate_peer, ctx).await?;
+    let peer_addr = match resolve_peer_addr(&mut tcp_stream, immediate_peer, ctx).await {
+        Ok(a) => a,
+        Err(e) => {
+            drop(tcp_stream.shutdown().await);
+            return Err(e);
+        }
+    };
 
     let span = info_span!("conn", peer = %peer_addr);
     async move {
         let start = Instant::now();
 
-        let mut peek_buf = [0u8; PEEK_BUF_SIZE];
-        let n = peek_client_hello(&tcp_stream, &mut peek_buf).await?;
+        let prep = match prepare_connection(&tcp_stream, ctx).await {
+            Ok(p) => p,
+            Err(e) => {
+                drop(tcp_stream.shutdown().await);
+                return Err(e);
+            }
+        };
 
-        let peeked = peek_buf.get(..n).unwrap_or(&peek_buf);
-        let hostname =
-            extract_sni(peeked).ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?;
-        debug!(%hostname, "SNI extracted");
-
-        if let Some(self_route) = ctx.hub_self_route.as_ref()
-            && self_route.hostname.eq_ignore_ascii_case(hostname)
-        {
-            let (bytes_in, bytes_out) =
-                pipe_to_local_hub(tcp_stream, hostname, &self_route.local_addr, ctx).await?;
-            ctx.metrics.total_bytes_in.inc_by(bytes_in);
-            ctx.metrics.total_bytes_out.inc_by(bytes_out);
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "connection won't last 584 million years"
-            )]
-            let duration_ms = start.elapsed().as_millis() as u64;
-            debug!(
-                %hostname,
-                bytes_in,
-                bytes_out,
-                duration_ms,
-                "hub self-route connection closed"
-            );
-            return Ok(());
+        match prep {
+            Preparation::SelfRoute { hostname } => {
+                let self_route = ctx
+                    .hub_self_route
+                    .as_ref()
+                    .expect("self route present during prepare");
+                let (bytes_in, bytes_out) =
+                    pipe_to_local_hub(tcp_stream, &hostname, &self_route.local_addr, ctx).await?;
+                ctx.metrics.total_bytes_in.inc_by(bytes_in);
+                ctx.metrics.total_bytes_out.inc_by(bytes_out);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "connection won't last 584 million years"
+                )]
+                let duration_ms = start.elapsed().as_millis() as u64;
+                debug!(
+                    %hostname,
+                    bytes_in,
+                    bytes_out,
+                    duration_ms,
+                    "hub self-route connection closed"
+                );
+                return Ok(());
+            }
+            Preparation::Routed {
+                hostname,
+                policy,
+                agent_addr,
+                send_stream,
+                recv_stream,
+            } => {
+                let agent_short = agent_addr.id.fmt_short();
+                let client_addrs = ClientAddrs {
+                    src: peer_addr,
+                    dst: tcp_stream.local_addr()?,
+                };
+                let (bytes_in, bytes_out) = match policy {
+                    TlsMode::Passthrough => {
+                        pipe_passthrough(
+                            tcp_stream,
+                            &hostname,
+                            client_addrs,
+                            send_stream,
+                            recv_stream,
+                        )
+                        .await?
+                    }
+                    TlsMode::Terminate => {
+                        pipe_terminate(
+                            tcp_stream,
+                            &hostname,
+                            client_addrs,
+                            send_stream,
+                            recv_stream,
+                            ctx,
+                        )
+                        .await?
+                    }
+                };
+                ctx.metrics.total_bytes_in.inc_by(bytes_in);
+                ctx.metrics.total_bytes_out.inc_by(bytes_out);
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "connection won't last 584 million years"
+                )]
+                let duration_ms = start.elapsed().as_millis() as u64;
+                debug!(
+                    %hostname,
+                    agent = %agent_short,
+                    mode = policy.label(),
+                    bytes_in,
+                    bytes_out,
+                    duration_ms,
+                    "connection closed"
+                );
+            }
         }
-
-        let (candidates, policy) = ctx
-            .router
-            .route(hostname)
-            .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
-        debug!(
-            %hostname,
-            candidates = candidates.len(),
-            mode = policy.label(),
-            "route matched"
-        );
-
-        let (agent_addr, send_stream, recv_stream) =
-            pick_agent_and_open_stream(ctx, candidates).await?;
-        let agent_short = agent_addr.id.fmt_short();
-        debug!(agent = %agent_short, "agent selected, stream opened");
-
-        let client_addrs = ClientAddrs {
-            src: peer_addr,
-            dst: tcp_stream.local_addr()?,
-        };
-
-        let (bytes_in, bytes_out) = match policy {
-            TlsMode::Passthrough => {
-                pipe_passthrough(tcp_stream, hostname, client_addrs, send_stream, recv_stream)
-                    .await?
-            }
-            TlsMode::Terminate => {
-                pipe_terminate(
-                    tcp_stream,
-                    hostname,
-                    client_addrs,
-                    send_stream,
-                    recv_stream,
-                    ctx,
-                )
-                .await?
-            }
-        };
-
-        ctx.metrics.total_bytes_in.inc_by(bytes_in);
-        ctx.metrics.total_bytes_out.inc_by(bytes_out);
-
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "connection won't last 584 million years"
-        )]
-        let duration_ms = start.elapsed().as_millis() as u64;
-        debug!(
-            %hostname,
-            agent = %agent_short,
-            mode = policy.label(),
-            bytes_in,
-            bytes_out,
-            duration_ms,
-            "connection closed"
-        );
         Ok(())
     }
     .instrument(span)
     .await
+}
+
+enum Preparation {
+    SelfRoute {
+        hostname: String,
+    },
+    Routed {
+        hostname: String,
+        policy: TlsMode,
+        agent_addr: EndpointAddr,
+        send_stream: iroh::endpoint::SendStream,
+        recv_stream: iroh::endpoint::RecvStream,
+    },
+}
+
+async fn prepare_connection(tcp_stream: &TcpStream, ctx: &ConnCtx) -> anyhow::Result<Preparation> {
+    let mut peek_buf = [0u8; PEEK_BUF_SIZE];
+    let n = peek_client_hello(tcp_stream, &mut peek_buf).await?;
+    let peeked = peek_buf.get(..n).unwrap_or(&peek_buf);
+    let hostname = extract_sni(peeked)
+        .ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?
+        .to_string();
+    debug!(%hostname, "SNI extracted");
+
+    if let Some(self_route) = ctx.hub_self_route.as_ref()
+        && self_route.hostname.eq_ignore_ascii_case(&hostname)
+    {
+        return Ok(Preparation::SelfRoute { hostname });
+    }
+
+    let (candidates, policy) = ctx
+        .router
+        .route(&hostname)
+        .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
+    debug!(
+        %hostname,
+        candidates = candidates.len(),
+        mode = policy.label(),
+        "route matched"
+    );
+
+    let (agent_addr, send_stream, recv_stream) =
+        pick_agent_and_open_stream(ctx, candidates).await?;
+    debug!(agent = %agent_addr.id.fmt_short(), "agent selected, stream opened");
+
+    Ok(Preparation::Routed {
+        hostname,
+        policy,
+        agent_addr,
+        send_stream,
+        recv_stream,
+    })
 }
 
 async fn pipe_passthrough(

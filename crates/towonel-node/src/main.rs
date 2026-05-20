@@ -355,7 +355,7 @@ async fn run_node() -> anyhow::Result<()> {
     match (config.hub.enabled, config.edge.enabled) {
         (true, true) => {
             let (route_tx, route_rx) = broadcast::channel::<RouteTable>(64);
-            let (router, edge, edge_node_id, edge_addresses) =
+            let (router, edge, edge_node_id, edge_addresses, relay_watchdog) =
                 build_edge(secret_key, &config.tenants, &config.edge).await?;
 
             let edge = configure_hub_self_route(edge, &config.hub);
@@ -385,6 +385,7 @@ async fn run_node() -> anyhow::Result<()> {
                 }
                 () = towonel_common::shutdown::shutdown_signal() => {}
             }
+            relay_watchdog.abort();
         }
         (true, false) => {
             let (route_tx, _) = broadcast::channel::<RouteTable>(64);
@@ -405,7 +406,7 @@ async fn run_node() -> anyhow::Result<()> {
         }
         (false, true) => {
             let subscriber_key = secret_key.clone();
-            let (router, edge, _edge_node_id, _edge_addresses) =
+            let (router, edge, _edge_node_id, _edge_addresses, relay_watchdog) =
                 build_edge(secret_key, &config.tenants, &config.edge).await?;
 
             if let Some(hub_url) = config.edge.hub_url.clone() {
@@ -425,6 +426,7 @@ async fn run_node() -> anyhow::Result<()> {
                 }
                 () = towonel_common::shutdown::shutdown_signal() => {}
             }
+            relay_watchdog.abort();
         }
         (false, false) => {
             anyhow::bail!("both hub and edge are disabled -- nothing to run");
@@ -549,12 +551,15 @@ async fn build_edge(
     edge::Edge,
     iroh::EndpointId,
     Vec<String>,
+    tokio::task::JoinHandle<()>,
 )> {
     let ep = Endpoint::builder(N0)
         .secret_key(secret_key)
         .relay_mode(towonel_common::relay::relay_mode_from_env()?)
         .bind()
         .await?;
+
+    let relay_watchdog = towonel_common::relay_watchdog::spawn(ep.clone());
 
     let edge_node_id = ep.id();
     let edge_addresses: Vec<String> = ep
@@ -589,7 +594,7 @@ async fn build_edge(
         edge = edge.with_tls(manager);
     }
 
-    Ok((router, edge, edge_node_id, edge_addresses))
+    Ok((router, edge, edge_node_id, edge_addresses, relay_watchdog))
 }
 
 /// Background task: receives materialized route tables from the hub's broadcast
