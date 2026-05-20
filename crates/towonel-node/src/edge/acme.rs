@@ -77,7 +77,8 @@ impl AcmeManager {
         let mut server_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(resolver);
-        server_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        server_config.alpn_protocols =
+            vec![b"acme-tls/1".to_vec(), b"h2".to_vec(), b"http/1.1".to_vec()];
 
         let mgr = Arc::new(Self {
             config: Arc::new(config),
