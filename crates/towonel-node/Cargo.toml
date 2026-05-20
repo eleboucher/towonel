@@ -45,7 +45,6 @@ tower_governor = { workspace = true }
 subtle = { workspace = true }
 tokio-rustls = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 certon = { workspace = true }
 rcgen = { workspace = true }
 sha2 = { workspace = true }
@@ -56,7 +55,6 @@ zeroize = { workspace = true }
 backon = { workspace = true }
 papaya = { workspace = true }
 smallvec = { workspace = true }
-normpath = { workspace = true }
 fastrand = { workspace = true }
 envy = { workspace = true }
 tabled = { workspace = true }

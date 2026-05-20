@@ -51,7 +51,7 @@ assertions_on_result_states = "warn"
 # Don't Do Bad Async Stuff - prevent deadlocks and concurrency bugs
 await_holding_lock = "warn"
 await_holding_refcell_ref = "warn"
-if_let_mutex = "warn"  # only relevant on editions before 2024
+if_let_mutex = "warn"              # only relevant on editions before 2024
 large_futures = "warn"
 
 # Don't Do Unsafe Things with Memory

@@ -3132,15 +3132,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "normpath"
-version = "1.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9985ef7269fa99f3b12437bb698381da2428743ab90f20393f399fa14cab21a"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4395,15 +4386,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]
@@ -5778,7 +5760,6 @@ dependencies = [
  "ipnet",
  "iroh",
  "moka",
- "normpath",
  "papaya",
  "ppp",
  "prometheus",
@@ -5786,7 +5767,6 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rustls",
- "rustls-pemfile",
  "sea-orm",
  "sea-orm-migration",
  "serde",
