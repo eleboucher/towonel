@@ -109,7 +109,9 @@ plaintext. ACME challenges work through the tunnel.
 **Terminate.** The edge issues an on-demand Let's Encrypt cert for the
 hostname and forwards plaintext to the agent.
 
-- TLS-ALPN-01 validation on `:443` — no port 80 needed.
+- TLS-ALPN-01 validation on `:443` — no port 80 needed. Any L4 proxy
+  fronting the edge must pass the `acme-tls/1` ALPN through; stripping
+  it breaks validation.
 - First-request issuance, cached, renewed at ~1/3 lifetime remaining.
 - OCSP staples fetched and refreshed automatically.
 - Wildcards issue per exact subdomain. LE rate limits apply
