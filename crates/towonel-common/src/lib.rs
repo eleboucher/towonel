@@ -10,6 +10,7 @@ pub mod process_metrics;
 pub mod protocol;
 pub mod random_name;
 pub mod relay;
+pub mod relay_watchdog;
 pub mod routing;
 pub mod shutdown;
 pub mod sni;

@@ -169,6 +169,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let trusted_edges = ctx.trusted_edges.clone();
 
     let health_handle = tokio::spawn(serve_http(cli.health_port, metrics.clone()));
+    let relay_watchdog = towonel_common::relay_watchdog::spawn(endpoint.clone());
 
     tokio::select! {
         res = tunnel::run(&endpoint, service_map, trusted_edges, allow_any, metrics.clone()) => {
@@ -181,6 +182,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
 
     heartbeat.abort();
     health_handle.abort();
+    relay_watchdog.abort();
     endpoint.close().await;
     info!("towonel-agent stopped");
     Ok(())
