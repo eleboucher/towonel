@@ -50,10 +50,6 @@ const PROXY_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(2);
 /// valid `ClientHello` then stalls cannot pin a spawn task.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// First-issue for a new hostname can legitimately take ~tens of seconds; the
-/// cap exists to keep a wedged ACME backend from pinning every connection.
-const ENSURE_CERT_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Pool of iroh QUIC connections, keyed by agent `EndpointId`.
 ///
 /// QUIC connections are expensive to establish; streams are cheap. We keep
@@ -688,7 +684,7 @@ async fn pipe_terminate(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("TLS termination configured but ACME manager missing"))?;
 
-    ensure_cert_bounded(acme, hostname).await?;
+    acme.trigger_obtain(hostname);
 
     let tls_stream = tls_accept_bounded(acceptor, tcp_stream, hostname).await?;
     debug!(%hostname, "TLS handshake complete");
@@ -732,16 +728,6 @@ async fn tls_accept_bounded(
     }
 }
 
-async fn ensure_cert_bounded(acme: &AcmeManager, hostname: &str) -> anyhow::Result<()> {
-    match tokio::time::timeout(ENSURE_CERT_TIMEOUT, acme.ensure_cert(hostname)).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err(anyhow::anyhow!(
-            "ACME ensure_cert for {hostname} timed out after {ENSURE_CERT_TIMEOUT:?}"
-        )),
-    }
-}
-
 async fn pipe_to_local_hub(
     tcp_stream: TcpStream,
     hostname: &str,
@@ -757,7 +743,7 @@ async fn pipe_to_local_hub(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("hub self-route requires the ACME manager"))?;
 
-    ensure_cert_bounded(acme, hostname).await?;
+    acme.trigger_obtain(hostname);
 
     let mut tls_stream = tls_accept_bounded(acceptor, tcp_stream, hostname).await?;
     debug!(%hostname, "TLS handshake complete (hub self-route)");

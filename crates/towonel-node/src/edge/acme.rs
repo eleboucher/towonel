@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use async_trait::async_trait;
@@ -16,9 +17,26 @@ use tracing::{debug, info, warn};
 /// RFC 8737 `acmeIdentifier` extension OID.
 const ACME_IDENTIFIER_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 1, 31];
 
+const FAILURE_COOLDOWN: Duration = Duration::from_mins(15);
+
 pub struct AcmeManager {
     config: Arc<Config>,
     server_config: Arc<rustls::ServerConfig>,
+    inflight: Arc<papaya::HashMap<String, ()>>,
+    failures: papaya::HashMap<String, Instant>,
+}
+
+/// Clears the inflight entry on drop so a panicking or aborted spawn cannot
+/// permanently wedge a hostname out of `trigger_obtain`.
+struct InflightGuard {
+    map: Arc<papaya::HashMap<String, ()>>,
+    host: String,
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.map.pin().remove(&self.host);
+    }
 }
 
 impl AcmeManager {
@@ -64,6 +82,8 @@ impl AcmeManager {
         let mgr = Arc::new(Self {
             config: Arc::new(config),
             server_config: Arc::new(server_config),
+            inflight: Arc::new(papaya::HashMap::new()),
+            failures: papaya::HashMap::new(),
         });
 
         // Detached: runs for the lifetime of the process.
@@ -90,6 +110,42 @@ impl AcmeManager {
             warn!(%hostname, error = %e, "failed to refresh cert cache after manage_sync");
         }
         Ok(())
+    }
+
+    pub fn trigger_obtain(self: &Arc<Self>, hostname: &str) {
+        if let Some(&retry_after) = self.failures.pin().get(hostname)
+            && Instant::now() < retry_after
+        {
+            return;
+        }
+        if self
+            .inflight
+            .pin()
+            .insert(hostname.to_string(), ())
+            .is_some()
+        {
+            return;
+        }
+        let guard = InflightGuard {
+            map: Arc::clone(&self.inflight),
+            host: hostname.to_string(),
+        };
+        let this = Arc::clone(self);
+        let host = hostname.to_string();
+        tokio::spawn(async move {
+            let _guard = guard; // released (and entry cleared) on task exit, including abort
+            match this.ensure_cert(&host).await {
+                Ok(()) => {
+                    this.failures.pin().remove(&host);
+                }
+                Err(e) => {
+                    this.failures
+                        .pin()
+                        .insert(host.clone(), Instant::now() + FAILURE_COOLDOWN);
+                    warn!(%host, error = %e, "background ACME issuance failed");
+                }
+            }
+        });
     }
 }
 

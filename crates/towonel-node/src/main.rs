@@ -461,11 +461,7 @@ fn configure_hub_self_route(edge: edge::Edge, hub: &config::HubConfig) -> edge::
         local_addr: hub.listen_addr.clone(),
     });
     if let Some(acme) = edge.acme() {
-        tokio::spawn(async move {
-            if let Err(e) = acme.ensure_cert(&host).await {
-                warn!(error = %e, %host, "initial hub cert request failed; will retry on first connection");
-            }
-        });
+        acme.trigger_obtain(&host);
     }
     edge
 }
