@@ -222,7 +222,6 @@ pub struct TlsConfig {
     pub cert_dir: PathBuf,
     pub acme_email: Option<String>,
     pub acme_staging: bool,
-    pub http_listen_addr: String,
 }
 
 /// Operator-configured tenant allowlist entry.
@@ -284,7 +283,6 @@ struct RawEnv {
     edge_tls_cert_dir: Option<PathBuf>,
     edge_tls_acme_email: Option<String>,
     edge_tls_acme_staging: Option<bool>,
-    edge_tls_http_listen_addr: Option<String>,
 
     tenants: Option<String>,
 }
@@ -422,8 +420,7 @@ impl NodeConfig {
 fn build_tls(r: &RawEnv) -> Option<TlsConfig> {
     let any = r.edge_tls_cert_dir.is_some()
         || r.edge_tls_acme_email.is_some()
-        || r.edge_tls_acme_staging.is_some()
-        || r.edge_tls_http_listen_addr.is_some();
+        || r.edge_tls_acme_staging.is_some();
     if !any {
         return None;
     }
@@ -435,10 +432,6 @@ fn build_tls(r: &RawEnv) -> Option<TlsConfig> {
         cert_dir: r.edge_tls_cert_dir.clone().unwrap_or(default_cert_dir),
         acme_email: r.edge_tls_acme_email.clone(),
         acme_staging: r.edge_tls_acme_staging.unwrap_or(false),
-        http_listen_addr: r
-            .edge_tls_http_listen_addr
-            .clone()
-            .unwrap_or_else(|| "0.0.0.0:80".to_string()),
     })
 }
 

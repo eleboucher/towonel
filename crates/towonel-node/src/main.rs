@@ -580,37 +580,13 @@ async fn build_edge(
     .with_proxy_protocol(edge_config.proxy_protocol.clone());
 
     if let Some(tls) = &edge_config.tls {
-        let cert_store = edge::tls::CertStore::new(&tls.cert_dir)?;
-
-        let acme = tls.acme_email.clone().map_or_else(
-            || {
-                info!("TLS termination enabled without ACME; certs must be user-provided");
-                None
-            },
-            |email| {
-                let tokens: edge::acme::ChallengeTokens = Arc::default();
-
-                // HTTP-01 challenge server on :80 (or wherever `http_listen_addr` points).
-                let http_addr = tls.http_listen_addr.clone();
-                let tokens_for_http = tokens.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = edge::acme::run_http01_server(&http_addr, tokens_for_http).await
-                    {
-                        tracing::error!(error = %e, "ACME HTTP-01 server exited");
-                    }
-                });
-
-                let coordinator = edge::acme::AcmeCoordinator::new(
-                    cert_store.clone(),
-                    tokens,
-                    email,
-                    tls.acme_staging,
-                );
-                Some(Arc::new(coordinator))
-            },
-        );
-
-        edge = edge.with_tls(cert_store, acme);
+        let email = tls.acme_email.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "TLS termination requires TOWONEL_EDGE_TLS_ACME_EMAIL (ACME-managed certs only)"
+            )
+        })?;
+        let manager = edge::acme::AcmeManager::new(&tls.cert_dir, email, tls.acme_staging)?;
+        edge = edge.with_tls(manager);
     }
 
     Ok((router, edge, edge_node_id, edge_addresses))

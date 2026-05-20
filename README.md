@@ -25,7 +25,7 @@ On the VPS:
 ```bash
 docker pull git.erwanleboucher.dev/eleboucher/towonel-node:latest
 docker run -d --name towonel \
-  -p 80:80 -p 443:443 -p 8443:8443 \
+  -p 443:443 -p 8443:8443 \
   -v towonel-data:/data \
   -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
   -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
@@ -44,7 +44,7 @@ production, set `TOWONEL_INVITE_HASH_KEY` from a secret manager.
 (with the `caddy-l4` plugin). Caddy binds 80/443 and L4-forwards to
 towonel on internal ports with PROXY v2 — operators get a single image
 to deploy instead of overriding `EDGE_LISTEN_ADDR`,
-`EDGE_TLS_HTTP_LISTEN_ADDR`, `EDGE_PROXY_PROTOCOL`, etc. Both processes
+`EDGE_PROXY_PROTOCOL`, etc. Both processes
 run under tini; if either exits, the container exits and Docker's
 restart policy brings the whole thing back.
 
@@ -109,12 +109,12 @@ plaintext. ACME challenges work through the tunnel.
 **Terminate.** The edge issues an on-demand Let's Encrypt cert for the
 hostname and forwards plaintext to the agent.
 
-- HTTP-01 issuance is triggered on first request, cached, renewed lazily.
-- Requires inbound `:80` on the edge for challenges.
-- Wildcards issue per exact subdomain. Subject to Let's Encrypt rate
-  limits (50 certs/week/registered domain).
-- Failures back off exponentially, then enter a 5-minute cooldown per
-  hostname.
+- TLS-ALPN-01 validation on `:443` — no port 80 needed.
+- First-request issuance, cached, renewed at ~1/3 lifetime remaining.
+- OCSP staples fetched and refreshed automatically.
+- Wildcards issue per exact subdomain. LE rate limits apply
+  (50 certs/week/registered domain).
+- Cert management via [`certon`](https://crates.io/crates/certon).
 
 Pin a mode in the service entry:
 
@@ -262,10 +262,16 @@ lists (tenants, services) require JSON.
 Full examples live in [`examples/agent.env.example`](examples/agent.env.example)
 and [`examples/node.env.example`](examples/node.env.example).
 
+Required variables are marked **Required** in the Description column.
+Conditions are spelled out next to the marker.
+
 ### Base directory
 
 `TOWONEL_DATA_DIR` (`/data` in the Docker image) supplies defaults for
-every path-shaped env var below. Individual overrides win.
+every path-shaped env var below. Individual overrides win. At least one
+of `TOWONEL_DATA_DIR`, `TOWONEL_IDENTITY_KEY_PATH`, or
+`TOWONEL_EDGE_INVITE_TOKEN` must be set so the node can resolve an
+identity at startup.
 
 | Variable           | Default | Cascades into                                                                                                                              |
 | ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -275,15 +281,15 @@ every path-shaped env var below. Individual overrides win.
 
 | Variable                            | Default                            | Description                                                                                |
 | ----------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------ |
-| `TOWONEL_IDENTITY_KEY_PATH`         | `${DATA_DIR}/node.key` or `node.key` | Node identity key                                                                          |
+| `TOWONEL_IDENTITY_KEY_PATH`         | `${DATA_DIR}/node.key` or `node.key` | Node identity key (generated on first boot)                                              |
 | `TOWONEL_HUB_ENABLED`               | `true`                             | Enable the hub API                                                                         |
-| `TOWONEL_INVITE_HASH_KEY`           |                                    | Hex key for hashing invite secrets (optional if `INVITE_HASH_KEY_PATH` or `DATA_DIR` set)  |
-| `TOWONEL_INVITE_HASH_KEY_PATH`      | `${DATA_DIR}/invite_hash.key`      | Where the hub reads/generates the invite-hash key when the env var is unset                |
+| `TOWONEL_INVITE_HASH_KEY`           | derived from `INVITE_HASH_KEY_PATH` | Hex key for hashing invite secrets (file generated on first boot when unset)               |
+| `TOWONEL_INVITE_HASH_KEY_PATH`      | `${DATA_DIR}/invite_hash.key`      | Where the hub reads/generates the invite-hash key                                          |
 | `TOWONEL_HUB_LISTEN_ADDR`           | `0.0.0.0:8443`                     | Hub API bind address                                                                       |
 | `TOWONEL_HUB_PUBLIC_URL`            | derived                            | URL embedded in invite tokens                                                              |
-| `TOWONEL_HUB_OPERATOR_API_KEY_PATH` | `${DATA_DIR}/operator.key` or `operator.key` | Operator API key file                                                                |
+| `TOWONEL_HUB_OPERATOR_API_KEY_PATH` | `${DATA_DIR}/operator.key` or `operator.key` | Operator API key file (generated on first boot)                                     |
 | `TOWONEL_HUB_DB_DRIVER`             | `sqlite`                           | `sqlite` or `postgres`                                                                     |
-| `TOWONEL_HUB_DB_DSN`                | `${DATA_DIR}/hub.db` or `hub.db` (sqlite); required for postgres | Connection string                                            |
+| `TOWONEL_HUB_DB_DSN`                | `${DATA_DIR}/hub.db` or `hub.db` (sqlite) | Connection string. **Required** for `postgres`                                       |
 | `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`                         | Pool size                                                                                  |
 | `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS`| `false`                            | Allow tenants to claim TCP/UDP ports below 1024                                            |
 
@@ -294,22 +300,22 @@ every path-shaped env var below. Individual overrides win.
 | `TOWONEL_EDGE_ENABLED`              | `true`                                 | Enable the edge listener                                                                     |
 | `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`                          | TLS bind address                                                                             |
 | `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090`                         | Health + metrics                                                                             |
-| `TOWONEL_EDGE_HUB_URL`              |                                        | Remote hub (edge-only mode); `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias            |
-| `TOWONEL_EDGE_ADVERTISED_ADDRESSES` | `<HUB_PUBLIC_URL host>:443` when unset | `host:port` agents/clients reach (the reverse proxy when one fronts the edge). Override when the public endpoint is not on `:443`. `TOWONEL_EDGE_PUBLIC_ADDRESSES` accepted as deprecated alias |
-| `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                                        | Enables Let's Encrypt issuance                                                               |
-| `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert cache directory                                                                         |
+| `TOWONEL_EDGE_INVITE_TOKEN`         |                                        | `tt_edge_inv_…` token from the hub. **Required** in edge-only mode unless both `EDGE_HUB_URL` and an identity (`IDENTITY_KEY_PATH` or `DATA_DIR`'s `node.key`) are set |
+| `TOWONEL_EDGE_HUB_URL`              | derived from invite token              | Remote hub URL (edge-only mode). **Required** when no invite token is provided. `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias |
+| `TOWONEL_EDGE_ADVERTISED_ADDRESSES` | `<HUB_PUBLIC_URL host>:443` when unset | `host:port` agents/clients reach (the reverse proxy when one fronts the edge). `TOWONEL_EDGE_PUBLIC_ADDRESSES` accepted as deprecated alias |
+| `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                                        | LE account contact (TLS-ALPN-01). **Required** when any `EDGE_TLS_*` var is set                                |
+| `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert/storage directory                                                                       |
 | `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`                                | Use Let's Encrypt staging                                                                    |
-| `TOWONEL_EDGE_TLS_HTTP_LISTEN_ADDR` | `0.0.0.0:80`                           | HTTP-01 responder                                                                            |
 
 ### Agent
 
-| Variable                       | Description                                       |
-| ------------------------------ | ------------------------------------------------- |
-| `TOWONEL_INVITE_TOKEN`         | **Required.** `tt_inv_2_...` token from the hub   |
-| `TOWONEL_AGENT_SERVICES`       | JSON array of HTTPS services                      |
-| `TOWONEL_AGENT_TCP_SERVICES`   | JSON array of raw TCP services (see above)        |
-| `TOWONEL_AGENT_UDP_SERVICES`   | JSON array of raw UDP services (see above)        |
-| `TOWONEL_AGENT_TRUSTED_EDGES`  | Optional override for trusted edge IDs            |
+| Variable                       | Description                                                                                  |
+| ------------------------------ | -------------------------------------------------------------------------------------------- |
+| `TOWONEL_INVITE_TOKEN`         | `tt_inv_2_…` token from the hub. **Required.**                                                |
+| `TOWONEL_AGENT_SERVICES`       | JSON array of HTTPS services                                                                  |
+| `TOWONEL_AGENT_TCP_SERVICES`   | JSON array of raw TCP services (see above)                                                    |
+| `TOWONEL_AGENT_UDP_SERVICES`   | JSON array of raw UDP services (see above)                                                    |
+| `TOWONEL_AGENT_TRUSTED_EDGES`  | Optional override for trusted edge IDs                                                        |
 
 Service shape:
 
