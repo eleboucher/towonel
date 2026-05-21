@@ -116,13 +116,19 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         }
     }
 
-    // The hub surfaces only its colocated edge's iroh addrs — multi-edge
-    // clusters need a future hub change to advertise per-edge addrs.
+    // Match each trusted edge against the hub's advertised iroh endpoints
+    // by id — addresses only belong to the edge that owns them. Edges
+    // without an advertised endpoint get empty addrs (supervisor skips).
     let edge_contacts: Vec<EdgeContact> = trusted_edges
         .iter()
         .map(|id| EdgeContact {
             id: *id,
-            addrs: resp.edge_iroh_addresses.clone(),
+            addrs: resp
+                .iroh_endpoints
+                .iter()
+                .find(|e| e.node_id == *id)
+                .map(|e| e.addresses.clone())
+                .unwrap_or_default(),
         })
         .collect();
 
@@ -131,7 +137,8 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         agent_id = %agent_kp.id(),
         hub_url = %token.hub_url,
         edges = trusted_edges.len(),
-        iroh_addrs_advertised = resp.edge_iroh_addresses.len(),
+        iroh_endpoints = resp.iroh_endpoints.len(),
+        dialable_edges = edge_contacts.iter().filter(|c| !c.addrs.is_empty()).count(),
         "bootstrap complete"
     );
 
@@ -625,22 +632,23 @@ async fn send_heartbeat(ctx: &BootstrapContext) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The hub's `/v1/bootstrap` response; we only need the two fields the
-/// agent actually uses (`tenant_id` for verification, `edge_node_id` for
-/// trusted-edge seeding). Serde ignores unknown fields by default, so new
-/// hub fields don't break old agents.
+#[derive(Deserialize)]
+struct IrohEndpoint {
+    node_id: EndpointId,
+    #[serde(default)]
+    addresses: Vec<String>,
+}
+
 #[derive(Deserialize)]
 struct BootstrapResponse {
     tenant_id: String,
     #[serde(default)]
     hostnames: Vec<String>,
-    /// Absent on older hubs; default keeps us compatible.
     #[serde(default)]
     trusted_edges: Vec<EndpointId>,
     edge_node_id: Option<EndpointId>,
-    /// Absent on older hubs.
     #[serde(default)]
-    edge_iroh_addresses: Vec<String>,
+    iroh_endpoints: Vec<IrohEndpoint>,
 }
 
 async fn post_bootstrap(

@@ -614,6 +614,60 @@ async fn bootstrap_sources_trusted_edges_from_edge_invites() {
     assert_eq!(body["edge_node_id"].as_str().expect("hex"), self_edge);
 }
 
+/// `iroh_endpoints` must pair the colocated edge's id with its iroh
+/// addresses. Other entries in `trusted_edges` (edges from invites with
+/// no colocated socket info) MUST NOT receive the colocated edge's
+/// addresses — agents would dial them on the wrong endpoint.
+#[tokio::test]
+async fn bootstrap_iroh_endpoints_only_describe_colocated_edge() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/edge-invites"),
+        json!({ "name": "remote-edge" }),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200, "create edge invite: {body}");
+
+    let token = create_invite(&hub, &client, "alice", &["a.test"]).await;
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/bootstrap"),
+        json!({
+            "invite_id": B64.encode(token.invite_id),
+            "invite_secret": B64.encode(token.invite_secret),
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "bootstrap: {body}");
+
+    let self_edge = hub
+        .state
+        .identity
+        .edge_node_id
+        .expect("test hub has edge_node_id")
+        .to_string();
+    let endpoints = body["iroh_endpoints"]
+        .as_array()
+        .expect("iroh_endpoints array");
+    assert_eq!(endpoints.len(), 1, "exactly the colocated edge");
+    assert_eq!(
+        endpoints[0]["node_id"].as_str().expect("node_id"),
+        self_edge
+    );
+    let addrs: Vec<String> = endpoints[0]["addresses"]
+        .as_array()
+        .expect("addresses array")
+        .iter()
+        .map(|v| v.as_str().expect("addr").to_string())
+        .collect();
+    assert_eq!(addrs, vec!["127.0.0.1:51820".to_string()]);
+}
+
 #[tokio::test]
 async fn bootstrap_rejects_wrong_secret() {
     let hub = TestHub::start().await;

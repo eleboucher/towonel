@@ -24,6 +24,12 @@ pub(super) struct BootstrapRequest {
 }
 
 #[derive(Debug, Serialize)]
+pub(super) struct IrohEndpoint {
+    node_id: iroh::EndpointId,
+    addresses: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub(super) struct BootstrapResponse {
     status: &'static str,
     tenant_id: String,
@@ -33,7 +39,7 @@ pub(super) struct BootstrapResponse {
     /// Mirror of `trusted_edges.first()`; kept so pre-multi-edge agents still work.
     edge_node_id: Option<iroh::EndpointId>,
     edge_addresses: Vec<String>,
-    edge_iroh_addresses: Vec<String>,
+    iroh_endpoints: Vec<IrohEndpoint>,
 }
 
 pub(super) async fn post_bootstrap(
@@ -95,6 +101,17 @@ pub(super) async fn post_bootstrap(
     }
     let edge_node_id = trusted_edges.first().copied();
 
+    let iroh_endpoints: Vec<IrohEndpoint> = match (
+        state.identity.edge_node_id,
+        state.identity.edge_iroh_addresses.as_slice(),
+    ) {
+        (Some(node_id), addrs) if !addrs.is_empty() => vec![IrohEndpoint {
+            node_id,
+            addresses: addrs.to_vec(),
+        }],
+        _ => Vec::new(),
+    };
+
     json_ok(BootstrapResponse {
         status: "ok",
         tenant_id: invite.tenant_id.to_string(),
@@ -103,6 +120,6 @@ pub(super) async fn post_bootstrap(
         trusted_edges,
         edge_node_id,
         edge_addresses: state.identity.edge_addresses.clone(),
-        edge_iroh_addresses: state.identity.edge_iroh_addresses.clone(),
+        iroh_endpoints,
     })
 }
