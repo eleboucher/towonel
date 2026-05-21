@@ -148,6 +148,10 @@ pub struct HubConfig {
     pub invite_hash_key: Option<std::sync::Arc<towonel_common::invite::InviteHashKey>>,
 }
 
+/// Default UDP port for the iroh QUIC socket. Operators rarely need
+/// to override this; matches the example in the README and examples/.
+pub const DEFAULT_IROH_PORT: u16 = 51820;
+
 #[derive(Debug)]
 pub struct EdgeConfig {
     pub enabled: bool,
@@ -155,9 +159,9 @@ pub struct EdgeConfig {
     pub health_listen_addr: String,
     pub hub_url: Option<String>,
     pub public_addresses: Vec<String>,
-    /// Pinned UDP port for the iroh QUIC socket. `None` = ephemeral
-    /// (the OS picks); set when reverse-dial agents need a stable hole.
-    pub iroh_port: Option<u16>,
+    /// Pinned UDP port for the iroh QUIC socket. Operators forward this
+    /// port through their firewall so agents can reach the edge.
+    pub iroh_port: u16,
     pub tls: Option<TlsConfig>,
     /// Number of TCP accept workers sharing `listen_addr` via `SO_REUSEPORT`
     /// on Unix. Raise to scale accept across cores under bursty load.
@@ -403,7 +407,7 @@ impl NodeConfig {
                 .unwrap_or_else(|| "0.0.0.0:9090".to_string()),
             hub_url,
             public_addresses,
-            iroh_port: edge_iroh_port,
+            iroh_port: edge_iroh_port.unwrap_or(DEFAULT_IROH_PORT),
             tls,
             listen_workers: edge_listen_workers.unwrap_or(1),
             proxy_protocol,

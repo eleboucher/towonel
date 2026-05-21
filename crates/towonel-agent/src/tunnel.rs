@@ -1,11 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use arc_swap::ArcSwap;
-use iroh::EndpointId;
 use rustls::pki_types::ServerName;
 use tokio::io::{self, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket, lookup_host};
@@ -308,61 +307,6 @@ async fn resolve_origin(origin: &str) -> (Vec<SocketAddr>, bool) {
             warn!(origin, error = %e, "initial DNS resolution failed; will retry on first connect");
             (Vec::new(), false)
         }
-    }
-}
-
-pub async fn run(
-    endpoint: &iroh::Endpoint,
-    service_map: Arc<ServiceMap>,
-    trusted_edges: HashSet<EndpointId>,
-    allow_any_edge: bool,
-    metrics: Arc<AgentMetrics>,
-) -> anyhow::Result<()> {
-    if allow_any_edge {
-        warn!(
-            "--allow-any-edge is set: accepting connections from ANY peer on the iroh \
-             network. DO NOT USE IN PRODUCTION."
-        );
-    } else {
-        info!(count = trusted_edges.len(), "trusted edge allowlist loaded");
-    }
-
-    info!("agent tunnel ready, waiting for connections from edges");
-
-    loop {
-        let Some(incoming) = endpoint.accept().await else {
-            info!("endpoint closed, shutting down");
-            return Ok(());
-        };
-
-        let conn = match incoming.await {
-            Ok(conn) => conn,
-            Err(e) => {
-                warn!("failed to accept connection: {e}");
-                continue;
-            }
-        };
-
-        let remote_id = conn.remote_id();
-
-        if !allow_any_edge && !trusted_edges.contains(&remote_id) {
-            warn!(
-                remote = %remote_id.fmt_short(),
-                "rejected connection from untrusted edge"
-            );
-            metrics.edge_connections_rejected.inc();
-            conn.close(403u32.into(), b"not authorized");
-            continue;
-        }
-
-        info!(%remote_id, "accepted connection from edge");
-        metrics.edge_connections_accepted.inc();
-
-        let map = Arc::clone(&service_map);
-        let m = Arc::clone(&metrics);
-        tokio::spawn(async move {
-            handle_connection(conn, remote_id, map, m).await;
-        });
     }
 }
 
