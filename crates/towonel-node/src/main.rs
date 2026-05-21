@@ -8,7 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use iroh::endpoint::{Endpoint, presets::N0};
+use iroh::RelayMode;
+use iroh::endpoint::{Endpoint, presets::Minimal};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
@@ -365,7 +366,6 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_node_id,
                 bound_socket_strings,
                 bound_iroh_port,
-                relay_watchdog,
                 endpoint,
             } = build_edge(secret_key, &config.tenants, &config.edge).await?;
 
@@ -402,7 +402,6 @@ async fn run_node() -> anyhow::Result<()> {
                 }
                 () = towonel_common::shutdown::shutdown_signal() => {}
             }
-            relay_watchdog.abort();
             endpoint.close().await;
         }
         (true, false) => {
@@ -428,7 +427,6 @@ async fn run_node() -> anyhow::Result<()> {
             let BuiltEdge {
                 router,
                 edge,
-                relay_watchdog,
                 endpoint,
                 ..
             } = build_edge(secret_key, &config.tenants, &config.edge).await?;
@@ -450,7 +448,6 @@ async fn run_node() -> anyhow::Result<()> {
                 }
                 () = towonel_common::shutdown::shutdown_signal() => {}
             }
-            relay_watchdog.abort();
             endpoint.close().await;
         }
         (false, false) => {
@@ -563,25 +560,23 @@ struct BuiltEdge {
     edge_node_id: iroh::EndpointId,
     bound_socket_strings: Vec<String>,
     bound_iroh_port: Option<u16>,
-    relay_watchdog: tokio::task::JoinHandle<()>,
     endpoint: Arc<Endpoint>,
 }
 
 /// Create an iroh Endpoint, build the Router from tenant config, and
 /// construct the Edge.
 ///
-/// The endpoint registers `ALPN_TUNNEL` so it can accept agent-initiated
-/// connections; it also makes outbound dials to agents still running in
-/// accept mode.
+/// The endpoint registers `ALPN_TUNNEL` for inbound agent connections.
+/// It never dials, so Pkarr discovery and relays are disabled.
 async fn build_edge(
     secret_key: iroh::SecretKey,
     tenants: &[config::TenantEntry],
     edge_config: &config::EdgeConfig,
 ) -> anyhow::Result<BuiltEdge> {
-    let mut builder = Endpoint::builder(N0)
+    let mut builder = Endpoint::builder(Minimal)
         .secret_key(secret_key)
         .alpns(vec![towonel_common::protocol::ALPN_TUNNEL.to_vec()])
-        .relay_mode(towonel_common::relay::relay_mode_from_env()?);
+        .relay_mode(RelayMode::Disabled);
     if let Some(port) = edge_config.iroh_port {
         // clear_ip_transports drops the default unspecified binds so we
         // don't end up with three sockets after our two explicit binds.
@@ -593,8 +588,6 @@ async fn build_edge(
             .map_err(|e| anyhow::anyhow!("invalid IPv6 iroh bind addr: {e}"))?;
     }
     let ep = builder.bind().await?;
-
-    let relay_watchdog = towonel_common::relay_watchdog::spawn(ep.clone());
 
     let edge_node_id = ep.id();
     let bound_sockets = ep.bound_sockets();
@@ -637,7 +630,6 @@ async fn build_edge(
         edge_node_id,
         bound_socket_strings,
         bound_iroh_port,
-        relay_watchdog,
         endpoint,
     })
 }

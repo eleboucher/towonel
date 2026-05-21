@@ -6,18 +6,15 @@ pub mod sessions;
 pub mod subscribe;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use iroh::EndpointAddr;
-use iroh::endpoint::{Connection, Endpoint};
-use smallvec::SmallVec;
+use iroh::endpoint::Endpoint;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
 
-use towonel_common::protocol::ALPN_TUNNEL;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
@@ -52,28 +49,6 @@ const PROXY_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(2);
 /// valid `ClientHello` then stalls cannot pin a spawn task.
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Pool of iroh QUIC connections, keyed by agent `EndpointId`.
-///
-/// QUIC connections are expensive to establish; streams are cheap. We keep
-/// one connection per agent and open multiple streams over it. iroh's
-/// `Connection` is cheaply cloneable (internal `Arc`), so callers can take
-/// a handle out of the map without blocking.
-type AgentPool = papaya::HashMap<iroh::EndpointId, Connection>;
-
-/// Per-agent consecutive connect failures. Reset to 0 on success;
-/// `fetch_add(1)` on failure. Ordering by this value demotes recently
-/// failing agents without remembering how long ago they failed.
-type AgentHealthState = AtomicU32;
-
-/// Shared map of per-agent health. Populated lazily on first connection
-/// attempt. Never shrinks (agents that disappear from the route table
-/// leave a harmless stale entry).
-type AgentHealthMap = papaya::HashMap<iroh::EndpointId, Arc<AgentHealthState>>;
-
-/// Per-agent dial guard. Held only on the cold path so concurrent first-time
-/// dials to the same agent share one handshake.
-type DialLocks = papaya::HashMap<iroh::EndpointId, Arc<tokio::sync::Mutex<()>>>;
-
 /// The edge: listens on one TCP port, peeks the SNI, looks up the hostname's
 /// TLS policy, and dispatches:
 ///   - `Passthrough`: raw TLS bytes forwarded to the agent (agent/origin handles TLS)
@@ -85,9 +60,6 @@ type DialLocks = papaya::HashMap<iroh::EndpointId, Arc<tokio::sync::Mutex<()>>>;
 pub struct Edge {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
-    agent_pool: Arc<AgentPool>,
-    agent_health: Arc<AgentHealthMap>,
-    dial_locks: Arc<DialLocks>,
     sessions: Arc<SessionRegistry>,
     listen_addr: String,
     health_listen_addr: String,
@@ -120,9 +92,6 @@ impl Edge {
         Self {
             router,
             endpoint,
-            agent_pool: Arc::new(AgentPool::new()),
-            agent_health: Arc::new(AgentHealthMap::new()),
-            dial_locks: Arc::new(DialLocks::new()),
             sessions,
             listen_addr,
             health_listen_addr,
@@ -174,10 +143,6 @@ impl Edge {
 
         let ctx = Arc::new(ConnCtx {
             router: Arc::clone(&self.router),
-            endpoint: Arc::clone(&self.endpoint),
-            pool: Arc::clone(&self.agent_pool),
-            health: Arc::clone(&self.agent_health),
-            dial_locks: Arc::clone(&self.dial_locks),
             sessions: Arc::clone(&self.sessions),
             metrics: self.metrics.clone(),
             tls_acceptor: self.tls.as_ref().map(|t| t.acceptor.clone()),
@@ -367,10 +332,6 @@ async fn bind_listeners(listen_addr: &str, workers: usize) -> anyhow::Result<Vec
 /// ~seven `Arc`s each.
 struct ConnCtx {
     router: Arc<Router>,
-    endpoint: Arc<Endpoint>,
-    pool: Arc<AgentPool>,
-    health: Arc<AgentHealthMap>,
-    dial_locks: Arc<DialLocks>,
     sessions: Arc<SessionRegistry>,
     metrics: EdgeMetrics,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
@@ -405,25 +366,14 @@ async fn handle_connection(
     result
 }
 
-fn get_health(health: &AgentHealthMap, id: iroh::EndpointId) -> Arc<AgentHealthState> {
-    let guard = health.pin();
-    if let Some(existing) = guard.get(&id) {
-        return Arc::clone(existing);
-    }
-    // Concurrent insert is fine: whoever lost the race drops their Arc and we
-    // return the winning one. All callers ultimately see the same Arc.
-    Arc::clone(guard.get_or_insert(id, Arc::new(AgentHealthState::new(0))))
-}
-
-/// Re-dial the full candidate list a few times before giving up; bridges
-/// the agent reconnect window after an edge restart.
+/// Retry the candidate sweep a few times to ride out the brief window
+/// where an agent's session is in transition (supersede race after
+/// reconnect). Each attempt is a cheap session lookup; no dialing.
 const PICK_AGENT_ATTEMPTS: u32 = 3;
 const PICK_AGENT_BACKOFF: Duration = Duration::from_millis(200);
 
-/// Shuffle `candidates` for fair spread, then stable-sort by consecutive
-/// failures so healthy agents are tried before failing ones. Dials in order
-/// until one succeeds; records success/failure as a side effect. Returns the
-/// chosen agent plus an open bidirectional QUIC stream.
+/// Shuffle `candidates` for fair spread, then try each agent's session.
+/// Returns the first stream that opens.
 async fn pick_agent_and_open_stream(
     ctx: &ConnCtx,
     mut candidates: self::router::Candidates,
@@ -433,42 +383,20 @@ async fn pick_agent_and_open_stream(
     iroh::endpoint::RecvStream,
 )> {
     fastrand::shuffle(&mut candidates);
-    let mut scored: SmallVec<[(EndpointAddr, Arc<AgentHealthState>); 4]> =
-        SmallVec::with_capacity(candidates.len());
-    for addr in candidates {
-        let h = get_health(&ctx.health, addr.id);
-        scored.push((addr, h));
-    }
-    scored.sort_by_key(|(_, h)| h.load(Ordering::Relaxed));
 
-    let mut penalised: SmallVec<[bool; 4]> = smallvec::smallvec![false; scored.len()];
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..PICK_AGENT_ATTEMPTS {
-        for ((agent_addr, health), already_penalised) in scored.iter().zip(penalised.iter_mut()) {
-            match open_agent_stream(
-                &ctx.endpoint,
-                &ctx.pool,
-                &ctx.dial_locks,
-                &ctx.sessions,
-                &ctx.metrics,
-                agent_addr.clone(),
-            )
-            .await
-            {
+        for agent_addr in &candidates {
+            match open_agent_stream(&ctx.sessions, &ctx.metrics, agent_addr.id).await {
                 Ok((send, recv)) => {
-                    health.store(0, Ordering::Relaxed);
                     return Ok((agent_addr.clone(), send, recv));
                 }
                 Err(e) => {
-                    if !*already_penalised {
-                        health.fetch_add(1, Ordering::Relaxed);
-                        *already_penalised = true;
-                    }
                     debug!(
                         agent = %agent_addr.id.fmt_short(),
                         attempt,
                         error = %e,
-                        "agent stream open failed, trying next"
+                        "agent session not usable, trying next"
                     );
                     last_err = Some(e);
                 }
@@ -846,91 +774,28 @@ async fn pipe_to_local_hub(
     Ok((c2h, h2c))
 }
 
-/// Open a bi-stream to the agent. Prefers a registered session
-/// (reverse-dial), falls back to the dial pool for accept-mode agents.
-/// `dial_locks` serializes cold-path dials so concurrent requests share
-/// one handshake.
+/// Open a bi-stream on the agent's registered session. Returns an error
+/// if the agent has no session (offline) or if `open_bi` fails on a
+/// broken connection — the supersede-race retry happens at the caller.
 async fn open_agent_stream(
-    endpoint: &Endpoint,
-    pool: &AgentPool,
-    dial_locks: &DialLocks,
     sessions: &SessionRegistry,
     metrics: &EdgeMetrics,
-    agent_addr: EndpointAddr,
+    agent_id: iroh::EndpointId,
 ) -> anyhow::Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
-    let agent_id = agent_addr.id;
-
-    if let Some(session) = sessions.get(&agent_id) {
-        match session.open_stream().await {
-            Ok(pair) => return Ok(pair),
-            Err(e) => {
-                debug!(
-                    agent = %agent_id.fmt_short(),
-                    error = %e,
-                    "session open_bi failed; falling back to dial"
-                );
-                sessions.remove_if_current(&session);
-            }
-        }
-    } else {
-        // Count only true "no session" cases so the metric reflects
-        // degraded reverse-dial coverage, not supersede races.
+    let Some(session) = sessions.get(&agent_id) else {
         metrics.route_no_session_total.inc();
-    }
-
-    let cached = pool.pin().get(&agent_id).cloned();
-    if let Some(conn) = cached {
-        match conn.open_bi().await {
-            Ok(pair) => return Ok(pair),
-            Err(e) => {
-                debug!(
-                    agent = %agent_id.fmt_short(),
-                    error = %e,
-                    "pooled connection broken, reconnecting"
-                );
-                pool.pin().remove(&agent_id);
-            }
+        anyhow::bail!("agent {} has no active session", agent_id.fmt_short());
+    };
+    match session.open_stream().await {
+        Ok(pair) => Ok(pair),
+        Err(e) => {
+            sessions.remove_if_current(&session);
+            Err(anyhow::anyhow!(
+                "open_bi on agent {} session failed: {e}",
+                agent_id.fmt_short()
+            ))
         }
     }
-
-    let lock = Arc::clone(
-        dial_locks
-            .pin()
-            .get_or_insert_with(agent_id, || Arc::new(tokio::sync::Mutex::new(()))),
-    );
-    let _dial_guard = lock.lock().await;
-
-    // Recheck: another task may have populated the pool while we waited.
-    let cached = pool.pin().get(&agent_id).cloned();
-    if let Some(conn) = cached {
-        match conn.open_bi().await {
-            Ok(pair) => return Ok(pair),
-            Err(e) => {
-                debug!(
-                    agent = %agent_id.fmt_short(),
-                    error = %e,
-                    "pooled connection broken after dial lock, redialing"
-                );
-                pool.pin().remove(&agent_id);
-            }
-        }
-    }
-
-    info!(agent = %agent_id.fmt_short(), "connecting to agent");
-    let conn = endpoint.connect(agent_addr, ALPN_TUNNEL).await?;
-    let path_type = conn
-        .paths()
-        .into_iter()
-        .find(iroh::endpoint::Path::is_selected)
-        .map_or("unknown", |p| if p.is_relay() { "relay" } else { "direct" });
-    info!(
-        agent = %agent_id.fmt_short(),
-        path = path_type,
-        "agent connection established"
-    );
-    let pair = conn.open_bi().await?;
-    pool.pin().insert(agent_id, conn);
-    Ok(pair)
 }
 
 async fn tcp_listener_reconciler(ctx: Arc<ConnCtx>) {
