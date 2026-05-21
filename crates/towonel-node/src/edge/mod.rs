@@ -795,14 +795,11 @@ async fn open_agent_stream(
         }
     }
 
-    let lock = {
-        let guard = dial_locks.pin();
-        if let Some(existing) = guard.get(&agent_id) {
-            Arc::clone(existing)
-        } else {
-            Arc::clone(guard.get_or_insert(agent_id, Arc::new(tokio::sync::Mutex::new(()))))
-        }
-    };
+    let lock = Arc::clone(
+        dial_locks
+            .pin()
+            .get_or_insert_with(agent_id, || Arc::new(tokio::sync::Mutex::new(()))),
+    );
     let _dial_guard = lock.lock().await;
 
     // Recheck: another task may have populated the pool while we waited.
