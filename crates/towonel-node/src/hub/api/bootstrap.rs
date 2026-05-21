@@ -33,6 +33,7 @@ pub(super) struct BootstrapResponse {
     /// Mirror of `trusted_edges.first()`; kept so pre-multi-edge agents still work.
     edge_node_id: Option<iroh::EndpointId>,
     edge_addresses: Vec<String>,
+    edge_iroh_addresses: Vec<String>,
 }
 
 pub(super) async fn post_bootstrap(
@@ -102,5 +103,6 @@ pub(super) async fn post_bootstrap(
         trusted_edges,
         edge_node_id,
         edge_addresses: state.identity.edge_addresses.clone(),
+        edge_iroh_addresses: state.identity.edge_iroh_addresses.clone(),
     })
 }

@@ -1,9 +1,11 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use iroh::{Endpoint, EndpointAddr};
+use tokio::net::lookup_host;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
@@ -134,9 +136,13 @@ async fn dial_and_serve(
     service_map: &Arc<ServiceMap>,
     metrics: &Arc<AgentMetrics>,
 ) -> anyhow::Result<Duration> {
+    let resolved = resolve_addrs(&contact.addrs).await;
+    if resolved.is_empty() {
+        anyhow::bail!("no addresses resolved for edge {}", contact.id.fmt_short());
+    }
     let mut addr = EndpointAddr::new(contact.id);
-    for sock in &contact.addrs {
-        addr = addr.with_ip_addr(*sock);
+    for sock in resolved {
+        addr = addr.with_ip_addr(sock);
     }
     let conn = endpoint
         .connect(addr, ALPN_TUNNEL)
@@ -168,4 +174,15 @@ async fn dial_and_serve(
         .with_label_values(&[&edge_label])
         .set(0);
     Ok(started.elapsed())
+}
+
+async fn resolve_addrs(addrs: &[String]) -> Vec<SocketAddr> {
+    let mut out = Vec::new();
+    for s in addrs {
+        match lookup_host(s).await {
+            Ok(iter) => out.extend(iter),
+            Err(e) => warn!(addr = %s, error = %e, "edge address DNS lookup failed"),
+        }
+    }
+    out
 }

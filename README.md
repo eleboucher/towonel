@@ -275,49 +275,51 @@ of `TOWONEL_DATA_DIR`, `TOWONEL_IDENTITY_KEY_PATH`, or
 `TOWONEL_EDGE_INVITE_TOKEN` must be set so the node can resolve an
 identity at startup.
 
-| Variable           | Default | Cascades into                                                                                                                              |
-| ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `TOWONEL_DATA_DIR` | unset   | `IDENTITY_KEY_PATH`, `HUB_DB_DSN` (sqlite only), `HUB_OPERATOR_API_KEY_PATH`, `EDGE_TLS_CERT_DIR`, `INVITE_HASH_KEY_PATH`                   |
+| Variable           | Default | Cascades into                                                                                                             |
+| ------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `TOWONEL_DATA_DIR` | unset   | `IDENTITY_KEY_PATH`, `HUB_DB_DSN` (sqlite only), `HUB_OPERATOR_API_KEY_PATH`, `EDGE_TLS_CERT_DIR`, `INVITE_HASH_KEY_PATH` |
 
 ### Hub
 
-| Variable                            | Default                            | Description                                                                                |
-| ----------------------------------- | ---------------------------------- | ------------------------------------------------------------------------------------------ |
-| `TOWONEL_IDENTITY_KEY_PATH`         | `${DATA_DIR}/node.key` or `node.key` | Node identity key (generated on first boot)                                              |
-| `TOWONEL_HUB_ENABLED`               | `true`                             | Enable the hub API                                                                         |
-| `TOWONEL_INVITE_HASH_KEY`           | derived from `INVITE_HASH_KEY_PATH` | Hex key for hashing invite secrets (file generated on first boot when unset)               |
-| `TOWONEL_INVITE_HASH_KEY_PATH`      | `${DATA_DIR}/invite_hash.key`      | Where the hub reads/generates the invite-hash key                                          |
-| `TOWONEL_HUB_LISTEN_ADDR`           | `0.0.0.0:8443`                     | Hub API bind address                                                                       |
-| `TOWONEL_HUB_PUBLIC_URL`            | derived                            | URL embedded in invite tokens                                                              |
-| `TOWONEL_HUB_OPERATOR_API_KEY_PATH` | `${DATA_DIR}/operator.key` or `operator.key` | Operator API key file (generated on first boot)                                     |
-| `TOWONEL_HUB_DB_DRIVER`             | `sqlite`                           | `sqlite` or `postgres`                                                                     |
-| `TOWONEL_HUB_DB_DSN`                | `${DATA_DIR}/hub.db` or `hub.db` (sqlite) | Connection string. **Required** for `postgres`                                       |
-| `TOWONEL_HUB_DB_MAX_OPEN_CONNS`     | `4` / `25`                         | Pool size                                                                                  |
-| `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS`| `false`                            | Allow tenants to claim TCP/UDP ports below 1024                                            |
+| Variable                             | Default                                      | Description                                                                  |
+| ------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------------- |
+| `TOWONEL_IDENTITY_KEY_PATH`          | `${DATA_DIR}/node.key` or `node.key`         | Node identity key (generated on first boot)                                  |
+| `TOWONEL_HUB_ENABLED`                | `true`                                       | Enable the hub API                                                           |
+| `TOWONEL_INVITE_HASH_KEY`            | derived from `INVITE_HASH_KEY_PATH`          | Hex key for hashing invite secrets (file generated on first boot when unset) |
+| `TOWONEL_INVITE_HASH_KEY_PATH`       | `${DATA_DIR}/invite_hash.key`                | Where the hub reads/generates the invite-hash key                            |
+| `TOWONEL_HUB_LISTEN_ADDR`            | `0.0.0.0:8443`                               | Hub API bind address                                                         |
+| `TOWONEL_HUB_PUBLIC_URL`             | derived                                      | URL embedded in invite tokens                                                |
+| `TOWONEL_HUB_OPERATOR_API_KEY_PATH`  | `${DATA_DIR}/operator.key` or `operator.key` | Operator API key file (generated on first boot)                              |
+| `TOWONEL_HUB_DB_DRIVER`              | `sqlite`                                     | `sqlite` or `postgres`                                                       |
+| `TOWONEL_HUB_DB_DSN`                 | `${DATA_DIR}/hub.db` or `hub.db` (sqlite)    | Connection string. **Required** for `postgres`                               |
+| `TOWONEL_HUB_DB_MAX_OPEN_CONNS`      | `4` / `25`                                   | Pool size                                                                    |
+| `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS` | `false`                                      | Allow tenants to claim TCP/UDP ports below 1024                              |
 
 ### Edge
 
-| Variable                            | Default                                | Description                                                                                  |
-| ----------------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------- |
-| `TOWONEL_EDGE_ENABLED`              | `true`                                 | Enable the edge listener                                                                     |
-| `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`                          | TLS bind address                                                                             |
-| `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090`                         | Health + metrics                                                                             |
+| Variable                            | Default                                | Description                                                                                                                                                            |
+| ----------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TOWONEL_EDGE_ENABLED`              | `true`                                 | Enable the edge listener                                                                                                                                               |
+| `TOWONEL_EDGE_LISTEN_ADDR`          | `0.0.0.0:443`                          | TLS bind address                                                                                                                                                       |
+| `TOWONEL_EDGE_HEALTH_LISTEN_ADDR`   | `0.0.0.0:9090`                         | Health + metrics                                                                                                                                                       |
 | `TOWONEL_EDGE_INVITE_TOKEN`         |                                        | `tt_edge_inv_…` token from the hub. **Required** in edge-only mode unless both `EDGE_HUB_URL` and an identity (`IDENTITY_KEY_PATH` or `DATA_DIR`'s `node.key`) are set |
-| `TOWONEL_EDGE_HUB_URL`              | derived from invite token              | Remote hub URL (edge-only mode). **Required** when no invite token is provided. `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias |
-| `TOWONEL_EDGE_ADVERTISED_ADDRESSES` | `<HUB_PUBLIC_URL host>:443` when unset | `host:port` agents/clients reach (the reverse proxy when one fronts the edge). `TOWONEL_EDGE_PUBLIC_ADDRESSES` accepted as deprecated alias |
-| `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                                        | LE account contact (TLS-ALPN-01). **Required** when any `EDGE_TLS_*` var is set                                |
-| `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert/storage directory                                                                       |
-| `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`                                | Use Let's Encrypt staging                                                                    |
+| `TOWONEL_EDGE_HUB_URL`              | derived from invite token              | Remote hub URL (edge-only mode). **Required** when no invite token is provided. `TOWONEL_EDGE_HUB_URLS` accepted as deprecated alias                                   |
+| `TOWONEL_EDGE_ADVERTISED_ADDRESSES` | `<HUB_PUBLIC_URL host>:443` when unset | `host:port` agents/clients reach (the reverse proxy when one fronts the edge). `TOWONEL_EDGE_PUBLIC_ADDRESSES` accepted as deprecated alias                            |
+| `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                                        | LE account contact (TLS-ALPN-01). **Required** when any `EDGE_TLS_*` var is set                                                                                        |
+| `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert/storage directory                                                                                                                                                 |
+| `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`                                | Use Let's Encrypt staging                                                                                                                                              |
+| `TOWONEL_EDGE_IROH_PORT`            | ephemeral                              | Pin the iroh QUIC UDP port. Required for reverse-dial agents so the operator can open a stable firewall hole. Binds both `0.0.0.0` and `[::]` — IPv6 stack required when set |
 
 ### Agent
 
-| Variable                       | Description                                                                                  |
-| ------------------------------ | -------------------------------------------------------------------------------------------- |
-| `TOWONEL_INVITE_TOKEN`         | `tt_inv_2_…` token from the hub. **Required.**                                                |
-| `TOWONEL_AGENT_SERVICES`       | JSON array of HTTPS services                                                                  |
-| `TOWONEL_AGENT_TCP_SERVICES`   | JSON array of raw TCP services (see above)                                                    |
-| `TOWONEL_AGENT_UDP_SERVICES`   | JSON array of raw UDP services (see above)                                                    |
-| `TOWONEL_AGENT_TRUSTED_EDGES`  | Optional override for trusted edge IDs                                                        |
+| Variable                      | Description                                                                       |
+| ----------------------------- | --------------------------------------------------------------------------------- |
+| `TOWONEL_INVITE_TOKEN`        | `tt_inv_2_…` token from the hub. **Required.**                                    |
+| `TOWONEL_AGENT_SERVICES`      | JSON array of HTTPS services                                                      |
+| `TOWONEL_AGENT_TCP_SERVICES`  | JSON array of raw TCP services (see above)                                        |
+| `TOWONEL_AGENT_UDP_SERVICES`  | JSON array of raw UDP services (see above)                                        |
+| `TOWONEL_AGENT_TRUSTED_EDGES` | Optional override for trusted edge IDs                                            |
+| `TOWONEL_AGENT_DIAL_EDGE`     | Set to `true` to dial the edge instead of accepting (see below). Default `false`. |
 
 Service shape:
 
@@ -343,6 +345,50 @@ Set `TOWONEL_IROH_RELAY_URLS` (comma-separated) on both sides to override:
 ```bash
 TOWONEL_IROH_RELAY_URLS=https://relay.example.eu/,https://euc1-1.relay.n0.iroh-canary.iroh.link/
 ```
+
+### Reverse-dial mode
+
+By default the edge dials the agent and iroh relays bridge NAT. Setting
+`TOWONEL_AGENT_DIAL_EDGE=true` on the agent flips the direction: the
+agent dials each trusted edge and holds the QUIC connection open; the
+edge multiplexes per-request bi-streams over it. Since the edge is
+publicly addressable, iroh-relay is disabled in this mode and the agent
+stops publishing to the n0 DNS (`iroh.link`) discovery service.
+
+On the hub side, set `TOWONEL_EDGE_IROH_PORT` to pin the iroh UDP port
+to a known value (and open it in your firewall / forward it through
+your load balancer). The hub then advertises `<EDGE_ADVERTISED_ADDRESSES
+hostname>:<iroh-port>` to agents — no separate address env var needed.
+
+```bash
+# Hub side
+docker run -d --name towonel \
+  -p 80:80 -p 443:443 -p 8443:8443 -p 51820:51820/udp \
+  -v towonel-data:/data \
+  -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
+  -e TOWONEL_EDGE_ADVERTISED_ADDRESSES=hub.example.eu:443 \
+  -e TOWONEL_EDGE_IROH_PORT=51820 \
+  -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
+  git.erwanleboucher.dev/eleboucher/towonel-node:latest
+
+# Agent side
+docker run -d --name towonel-agent \
+  --network host \
+  -e TOWONEL_INVITE_TOKEN=tt_inv_2_... \
+  -e TOWONEL_AGENT_DIAL_EDGE=true \
+  -e TOWONEL_AGENT_SERVICES='[{"hostname":"app.example.eu","origin":"127.0.0.1:8443"}]' \
+  git.erwanleboucher.dev/eleboucher/towonel-agent:latest
+```
+
+Notes:
+
+- The agent re-resolves hostnames at every redial, so DNS changes apply
+  without a restart.
+- HA: multiple agents using the same invite token each generate distinct
+  identities and register independent sessions; the edge load-balances.
+- If `TOWONEL_EDGE_IROH_PORT` isn't set, the hub won't advertise iroh
+  addresses; agents with `TOWONEL_AGENT_DIAL_EDGE=true` fall back to
+  accept-mode and log a warning at boot.
 
 ### CLI
 

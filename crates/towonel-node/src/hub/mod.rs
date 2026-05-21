@@ -119,6 +119,8 @@ pub struct HubIdentity {
     pub node_id: iroh::EndpointId,
     pub edge_node_id: Option<iroh::EndpointId>,
     pub edge_addresses: Vec<String>,
+    /// Derived from `edge_addresses`' hostnames + the pinned iroh UDP port.
+    pub edge_iroh_addresses: Vec<String>,
     pub software_version: &'static str,
 }
 
@@ -212,6 +214,7 @@ impl Hub {
                 node_id: self.p.identity.node_id,
                 edge_node_id: self.p.identity.edge_node_id,
                 edge_addresses: self.p.identity.edge_addresses.clone(),
+                edge_iroh_addresses: self.p.identity.edge_iroh_addresses.clone(),
                 software_version: self.p.identity.software_version,
             },
             operator_api_key: self.p.operator_api_key.clone(),
