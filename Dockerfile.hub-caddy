@@ -109,9 +109,20 @@ COPY --from=caddy-builder /caddy-build/caddy /usr/local/bin/caddy
 # Stage 4: final runtime image
 # ============================================================
 FROM debian:bookworm-slim
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG CREATED=
 LABEL org.opencontainers.image.title="towonel-hub-caddy" \
+      org.opencontainers.image.description="Towonel hub bundled with Caddy (L4 PROXY-protocol shifter for privileged ports)" \
       org.opencontainers.image.source="https://git.erwanleboucher.dev/erwan/turbo-tunnel" \
-      org.opencontainers.image.licenses="MIT OR Apache-2.0"
+      org.opencontainers.image.url="https://git.erwanleboucher.dev/erwan/turbo-tunnel" \
+      org.opencontainers.image.documentation="https://git.erwanleboucher.dev/erwan/turbo-tunnel/src/branch/main/README.md" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.authors="Erwan Leboucher <erwanleboucher@gmail.com>" \
+      org.opencontainers.image.vendor="Erwan Leboucher" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${CREATED}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin tini bash \
