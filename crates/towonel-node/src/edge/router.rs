@@ -91,7 +91,7 @@ impl Router {
 
         let table = RouteTable::from_raw(routes);
         let addr_cache = build_addr_cache(&table, &direct_addrs);
-        let known_agents = build_known_agents(&addr_cache);
+        let known_agents = build_known_agents(table.signed_agents());
         let (tcp_tx, _) = watch::channel(0);
         let (udp_tx, _) = watch::channel(0);
         Ok(Self {
@@ -109,7 +109,7 @@ impl Router {
     /// reconcilers so they can bind/unbind ports per the new listener maps.
     pub fn replace(&self, new_table: RouteTable) {
         let addr_cache = build_addr_cache(&new_table, &self.direct_addrs);
-        let known_agents = build_known_agents(&addr_cache);
+        let known_agents = build_known_agents(new_table.signed_agents());
         self.addr_cache.store(Arc::new(addr_cache));
         self.known_agents.store(Arc::new(known_agents));
         self.table.store(Arc::new(new_table));
@@ -196,8 +196,11 @@ fn build_addr_cache(
         .collect()
 }
 
-fn build_known_agents(addr_cache: &HashMap<AgentId, EndpointAddr>) -> HashSet<EndpointId> {
-    addr_cache.values().map(|addr| addr.id).collect()
+fn build_known_agents(signed_agents: &HashSet<AgentId>) -> HashSet<EndpointId> {
+    signed_agents
+        .iter()
+        .filter_map(|aid| EndpointId::from_bytes(aid.as_bytes()).ok())
+        .collect()
 }
 
 #[cfg(test)]

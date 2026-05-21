@@ -191,6 +191,35 @@ fn live_agents_filter_hides_offline_agents() {
 }
 
 #[test]
+fn signed_agents_not_filtered_by_liveness() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &["app.example.eu"]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertHostname {
+                hostname: "app.example.eu".into(),
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+
+    let live = HashSet::new();
+    let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&live));
+
+    assert!(table.lookup("app.example.eu").is_none());
+    assert!(table.signed_agents().contains(&agent.id()));
+}
+
+#[test]
 fn live_agents_empty_hides_all_routes() {
     let kp = TenantKeypair::generate();
     let agent = AgentKeypair::generate();
