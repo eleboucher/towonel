@@ -1,40 +1,34 @@
----
 name: Build and push container images
-
 on:
   push:
     branches: [main]
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   build-images:
     runs-on: multiarch
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-
       - uses: https://data.forgejo.org/docker/setup-qemu-action@v4
         with:
           platforms: arm64
-
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
-
+      - name: Compute build timestamp
+        id: build-meta
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
       - name: Login to git.erwanleboucher.dev
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: git.erwanleboucher.dev
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.OWNER_PACKAGE_SECRET }}
-
       - name: Login to registry.erwanleboucher.dev
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: registry.erwanleboucher.dev
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.APOCI_REGISTRY_TOKEN }}
-
       - name: Compute node image metadata
         id: meta-node
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -45,7 +39,12 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
-
+          labels: |
+            org.opencontainers.image.title=towonel
+            org.opencontainers.image.description=Towonel hub/edge node — Iroh-based tunnel control plane and data plane
+            org.opencontainers.image.documentation=https://git.erwanleboucher.dev/erwan/turbo-tunnel/src/branch/main/README.md
+            org.opencontainers.image.authors=Erwan Leboucher <erwanleboucher@gmail.com>
+            org.opencontainers.image.vendor=Erwan Leboucher
       - name: Build and push towonel-node
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
@@ -59,10 +58,12 @@ jobs:
           cache-to: type=gha,scope=towonel-node,mode=max
           build-args: |
             ENABLE_SCCACHE=1
+            VERSION=${{ steps.meta-node.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.build-meta.outputs.created }}
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
-
       - name: Compute agent image metadata
         id: meta-agent
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -73,7 +74,12 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
-
+          labels: |
+            org.opencontainers.image.title=towonel-agent
+            org.opencontainers.image.description=Towonel agent — exposes local services through a towonel hub
+            org.opencontainers.image.documentation=https://git.erwanleboucher.dev/erwan/turbo-tunnel/src/branch/main/README.md
+            org.opencontainers.image.authors=Erwan Leboucher <erwanleboucher@gmail.com>
+            org.opencontainers.image.vendor=Erwan Leboucher
       - name: Build and push towonel-agent
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
@@ -87,10 +93,12 @@ jobs:
           cache-to: type=gha,scope=towonel-agent,mode=max
           build-args: |
             ENABLE_SCCACHE=1
+            VERSION=${{ steps.meta-agent.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.build-meta.outputs.created }}
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
-
       - name: Compute hub-caddy image metadata
         id: meta-hub-caddy
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -101,7 +109,12 @@ jobs:
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
-
+          labels: |
+            org.opencontainers.image.title=towonel-hub-caddy
+            org.opencontainers.image.description=Towonel hub bundled with Caddy (L4 PROXY-protocol shifter for privileged ports)
+            org.opencontainers.image.documentation=https://git.erwanleboucher.dev/erwan/turbo-tunnel/src/branch/main/README.md
+            org.opencontainers.image.authors=Erwan Leboucher <erwanleboucher@gmail.com>
+            org.opencontainers.image.vendor=Erwan Leboucher
       - name: Build and push towonel-hub-caddy
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
@@ -115,6 +128,9 @@ jobs:
           cache-to: type=gha,scope=towonel-hub-caddy,mode=max
           build-args: |
             ENABLE_SCCACHE=1
+            VERSION=${{ steps.meta-hub-caddy.outputs.version }}
+            REVISION=${{ github.sha }}
+            CREATED=${{ steps.build-meta.outputs.created }}
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
