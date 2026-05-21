@@ -32,6 +32,8 @@ pub struct RouteTable {
     udp_routes: HashMap<UdpRouteKey, HashSet<AgentId>>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     udp_listeners: BTreeMap<u16, UdpListenerBinding>,
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    signed_agents: HashSet<AgentId>,
 }
 
 /// Struct rather than a `(TenantId, String)` tuple so the CBOR wire form has
@@ -108,6 +110,10 @@ impl RouteTable {
         let mut tcp_listeners: BTreeMap<u16, TcpListenerBinding> = BTreeMap::new();
         let mut udp_routes: HashMap<UdpRouteKey, HashSet<AgentId>> = HashMap::new();
         let mut udp_listeners: BTreeMap<u16, UdpListenerBinding> = BTreeMap::new();
+        let signed_agents: HashSet<AgentId> = tenant_state
+            .values()
+            .flat_map(|s| s.agents.iter().cloned())
+            .collect();
 
         // Sort tenants so cross-tenant port collisions resolve deterministically
         // (lowest `tenant_id` wins). HashMap iteration is randomized.
@@ -138,6 +144,7 @@ impl RouteTable {
             tcp_listeners,
             udp_routes,
             udp_listeners,
+            signed_agents,
         }
     }
 
@@ -187,6 +194,7 @@ impl RouteTable {
     /// enforced by the TOML structure itself.
     #[must_use]
     pub fn from_raw(routes: HashMap<String, HashSet<AgentId>>) -> Self {
+        let signed_agents: HashSet<AgentId> = routes.values().flatten().cloned().collect();
         Self {
             routes,
             tls_policies: TlsPolicyTable::new(),
@@ -194,7 +202,15 @@ impl RouteTable {
             tcp_listeners: BTreeMap::new(),
             udp_routes: HashMap::new(),
             udp_listeners: BTreeMap::new(),
+            signed_agents,
         }
+    }
+
+    /// Every agent ID a tenant has signed an `UpsertAgent` for, regardless
+    /// of liveness. Used by edges to authorize inbound iroh connections.
+    #[must_use]
+    pub const fn signed_agents(&self) -> &HashSet<AgentId> {
+        &self.signed_agents
     }
 
     /// Service names are exact-match — no wildcards (unlike `lookup`).
