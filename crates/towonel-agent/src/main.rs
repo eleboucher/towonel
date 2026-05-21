@@ -1,4 +1,5 @@
 mod config;
+mod edge_session;
 mod hub_client;
 mod metrics;
 mod publish_tls;
@@ -16,10 +17,23 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
-use iroh::{Endpoint, endpoint::presets::N0};
+use iroh::{
+    Endpoint, RelayMode,
+    endpoint::presets::{Minimal, N0},
+};
 use prometheus::{Encoder, TextEncoder};
+use tokio_util::sync::CancellationToken;
 use towonel_common::protocol::ALPN_TUNNEL;
 use tracing::{error, info, warn};
+
+/// Truthy values switch the agent to reverse-dial mode (dials each
+/// trusted edge instead of accepting); disables relay since the edge is
+/// publicly addressable.
+const DIAL_EDGE_ENV: &str = "TOWONEL_AGENT_DIAL_EDGE";
+
+fn dial_edge_enabled() -> bool {
+    std::env::var(DIAL_EDGE_ENV).is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
+}
 
 use crate::metrics::AgentMetrics;
 
@@ -79,6 +93,10 @@ async fn main() -> anyhow::Result<()> {
     clippy::large_futures,
     reason = "top-level orchestration future is large; boxing it provides no benefit"
 )]
+#[expect(
+    clippy::too_many_lines,
+    reason = "boot sequence is intentionally linear so the order of operations is auditable"
+)]
 async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let metrics = Arc::new(AgentMetrics::new());
     metrics.set_info(env!("CARGO_PKG_VERSION"));
@@ -98,13 +116,28 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     );
     service_map.spawn_dns_refresher();
 
-    let endpoint = Endpoint::builder(N0)
-        .secret_key(ctx.iroh_secret_key())
-        .alpns(vec![ALPN_TUNNEL.to_vec()])
-        .relay_mode(towonel_common::relay::relay_mode_from_env()?)
-        .bind()
-        .await
-        .context("failed to create iroh endpoint")?;
+    let dial_edge = dial_edge_enabled() && ctx.edge_contacts.iter().any(|c| !c.addrs.is_empty());
+    if std::env::var(DIAL_EDGE_ENV).is_ok() && !dial_edge {
+        warn!(
+            "{DIAL_EDGE_ENV} set but no edge has advertised addresses; falling back to accept-mode"
+        );
+    }
+
+    let endpoint = if dial_edge {
+        Endpoint::builder(Minimal)
+            .secret_key(ctx.iroh_secret_key())
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+    } else {
+        Endpoint::builder(N0)
+            .secret_key(ctx.iroh_secret_key())
+            .alpns(vec![ALPN_TUNNEL.to_vec()])
+            .relay_mode(towonel_common::relay::relay_mode_from_env()?)
+            .bind()
+            .await
+    }
+    .context("failed to create iroh endpoint")?;
 
     let node_id = endpoint.id();
     info!(%node_id, "agent iroh endpoint ready");
@@ -169,6 +202,37 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let trusted_edges = ctx.trusted_edges.clone();
 
     let health_handle = tokio::spawn(serve_http(cli.health_port, metrics.clone()));
+
+    if dial_edge {
+        info!(
+            edges = ctx.edge_contacts.len(),
+            "dial-edge mode active; spawning reverse-dial supervisors (relay disabled)"
+        );
+        let shutdown = CancellationToken::new();
+        let mut supervisors = edge_session::spawn(
+            &endpoint,
+            &ctx.edge_contacts,
+            &service_map,
+            &metrics,
+            &shutdown,
+        );
+        tokio::select! {
+            () = towonel_common::shutdown::shutdown_signal() => {}
+            // Supervisors retry forever; exit here is catastrophic — let
+            // the container restart policy take over.
+            r = supervisors.join_next() => {
+                error!(?r, "edge supervisor exited unexpectedly; shutting down");
+            }
+        }
+        shutdown.cancel();
+        supervisors.shutdown().await;
+        heartbeat.abort();
+        health_handle.abort();
+        endpoint.close().await;
+        info!("towonel-agent stopped");
+        return Ok(());
+    }
+
     let relay_watchdog = towonel_common::relay_watchdog::spawn(endpoint.clone());
 
     tokio::select! {

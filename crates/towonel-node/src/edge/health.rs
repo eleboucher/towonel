@@ -5,9 +5,9 @@ use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{Router, get};
-use prometheus::{Encoder, IntCounter, IntGauge, Registry, TextEncoder};
+use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Registry, TextEncoder};
 use serde::Serialize;
-use towonel_common::metrics::{register_counter, register_gauge};
+use towonel_common::metrics::{register_counter, register_counter_vec, register_gauge};
 
 /// Edge observability surface. Cheap to clone: the `prometheus` metric
 /// types are internally `Arc`-shared and the `Registry` is held as an `Arc`.
@@ -17,6 +17,10 @@ pub struct EdgeMetrics {
     pub total_connections: IntCounter,
     pub total_bytes_in: IntCounter,
     pub total_bytes_out: IntCounter,
+    pub active_sessions: IntGauge,
+    pub sessions_total: IntCounter,
+    pub sessions_rejected_total: IntCounterVec,
+    pub route_no_session_total: IntCounter,
     registry: Arc<Registry>,
 }
 
@@ -45,9 +49,36 @@ impl EdgeMetrics {
                 "towonel_edge_bytes_out_total",
                 "Total bytes sent to clients",
             ),
+            active_sessions: register_gauge(
+                &r,
+                "towonel_edge_active_sessions",
+                "Agent iroh sessions currently registered with this edge",
+            ),
+            sessions_total: register_counter(
+                &r,
+                "towonel_edge_sessions_total",
+                "Agent iroh sessions registered (each reconnect counts once)",
+            ),
+            sessions_rejected_total: register_counter_vec(
+                &r,
+                "towonel_edge_sessions_rejected_total",
+                "Inbound iroh connections rejected, by reason",
+                &["reason"],
+            ),
+            route_no_session_total: register_counter(
+                &r,
+                "towonel_edge_route_no_session_total",
+                "Requests where no session was registered for the agent at lookup time \
+                 (excludes the case where a session existed but its open_bi failed)",
+            ),
             registry: Arc::new(r),
         }
     }
+}
+
+pub mod session_reject_reason {
+    pub const UNKNOWN_AGENT: &str = "unknown_agent";
+    pub const HANDSHAKE_ERROR: &str = "handshake_error";
 }
 
 #[derive(Serialize)]
