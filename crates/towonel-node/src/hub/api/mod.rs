@@ -185,7 +185,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
                 request_id = %request_id,
             )
         })
-        .on_response(DefaultOnResponse::new().level(Level::INFO));
+        .on_response(DefaultOnResponse::new().level(Level::DEBUG));
     let correlated = tower::ServiceBuilder::new()
         .set_x_request_id(MakeRequestUuid)
         .layer(trace_layer)

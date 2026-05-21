@@ -62,7 +62,9 @@ impl Db {
     /// `max_open` and `max_idle` configure the connection pool.
     pub async fn open(url: &str, max_open: u32, max_idle: u32) -> anyhow::Result<Self> {
         let mut opts = ConnectOptions::new(url.to_string());
-        opts.max_connections(max_open).min_connections(max_idle);
+        opts.max_connections(max_open)
+            .min_connections(max_idle)
+            .sqlx_logging_level(tracing::log::LevelFilter::Debug);
         let conn = Database::connect(opts).await?;
         Migrator::up(&conn, None).await?;
         Ok(Self { conn })
@@ -140,7 +142,9 @@ pub(super) async fn temp_db() -> Db {
     // One connection only — shared `sqlite::memory:` pools across
     // multiple connections would create separate databases.
     let mut opts = ConnectOptions::new("sqlite::memory:".to_string());
-    opts.max_connections(1).min_connections(1);
+    opts.max_connections(1)
+        .min_connections(1)
+        .sqlx_logging_level(tracing::log::LevelFilter::Debug);
     let conn = Database::connect(opts).await.unwrap();
     Migrator::up(&conn, None).await.unwrap();
     Db { conn }
