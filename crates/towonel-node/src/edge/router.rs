@@ -24,6 +24,8 @@ pub struct Router {
     /// `EndpointAddr` per known agent, precomputed once at load/replace time
     /// so route lookups on the hot path don't rebuild them per connection.
     addr_cache: ArcSwap<HashMap<AgentId, EndpointAddr>>,
+    /// `EndpointId` set for O(1) inbound-connection authorization.
+    known_agents: ArcSwap<HashSet<EndpointId>>,
     /// Direct socket addresses per agent, used when relay discovery is
     /// unavailable (e.g. Docker e2e tests).
     direct_addrs: HashMap<AgentId, Vec<SocketAddr>>,
@@ -89,11 +91,13 @@ impl Router {
 
         let table = RouteTable::from_raw(routes);
         let addr_cache = build_addr_cache(&table, &direct_addrs);
+        let known_agents = build_known_agents(&addr_cache);
         let (tcp_tx, _) = watch::channel(0);
         let (udp_tx, _) = watch::channel(0);
         Ok(Self {
             table: ArcSwap::from_pointee(table),
             addr_cache: ArcSwap::from_pointee(addr_cache),
+            known_agents: ArcSwap::from_pointee(known_agents),
             direct_addrs,
             tcp_listeners_changed: tcp_tx,
             udp_listeners_changed: udp_tx,
@@ -105,12 +109,19 @@ impl Router {
     /// reconcilers so they can bind/unbind ports per the new listener maps.
     pub fn replace(&self, new_table: RouteTable) {
         let addr_cache = build_addr_cache(&new_table, &self.direct_addrs);
+        let known_agents = build_known_agents(&addr_cache);
         self.addr_cache.store(Arc::new(addr_cache));
+        self.known_agents.store(Arc::new(known_agents));
         self.table.store(Arc::new(new_table));
         self.tcp_listeners_changed
             .send_modify(|n| *n = n.wrapping_add(1));
         self.udp_listeners_changed
             .send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    #[must_use]
+    pub fn is_known_agent(&self, id: &EndpointId) -> bool {
+        self.known_agents.load().contains(id)
     }
 
     pub fn subscribe_tcp_listener_changes(&self) -> watch::Receiver<u64> {
@@ -183,6 +194,10 @@ fn build_addr_cache(
             Some((aid.clone(), addr))
         })
         .collect()
+}
+
+fn build_known_agents(addr_cache: &HashMap<AgentId, EndpointAddr>) -> HashSet<EndpointId> {
+    addr_cache.values().map(|addr| addr.id).collect()
 }
 
 #[cfg(test)]

@@ -29,6 +29,8 @@ pub mod direction {
 pub struct AgentMetrics {
     pub edge_connections_accepted: IntCounter,
     pub edge_connections_rejected: IntCounter,
+    pub edge_session_reconnects: IntCounterVec,
+    pub edge_session_state: IntGaugeVec,
     pub streams_accepted: IntCounter,
     pub streams_completed: IntCounter,
     pub stream_errors: IntCounterVec,
@@ -53,6 +55,18 @@ impl AgentMetrics {
                 &r,
                 "towonel_agent_edge_connections_rejected_total",
                 "iroh connections rejected because the remote is not a trusted edge",
+            ),
+            edge_session_reconnects: register_counter_vec(
+                &r,
+                "towonel_agent_edge_session_reconnects_total",
+                "Times the agent reconnected to an edge",
+                &["edge"],
+            ),
+            edge_session_state: register_gauge_vec(
+                &r,
+                "towonel_agent_edge_session_state",
+                "1 while a session to the edge is held, 0 otherwise",
+                &["edge"],
             ),
             streams_accepted: register_counter(
                 &r,

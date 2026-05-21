@@ -366,7 +366,7 @@ pub async fn run(
     }
 }
 
-async fn handle_connection(
+pub async fn handle_connection(
     conn: iroh::endpoint::Connection,
     remote_id: iroh::EndpointId,
     service_map: Arc<ServiceMap>,

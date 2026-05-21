@@ -2,6 +2,7 @@ pub mod acme;
 pub mod health;
 pub mod proxy_protocol;
 pub mod router;
+pub mod sessions;
 pub mod subscribe;
 
 use std::sync::Arc;
@@ -25,8 +26,9 @@ use towonel_common::tunnel::{
 };
 
 use self::acme::AcmeManager;
-use self::health::EdgeMetrics;
+use self::health::{EdgeMetrics, session_reject_reason};
 use self::router::Router;
+use self::sessions::{AgentSession, SessionRegistry};
 use crate::config::ProxyProtocolConfig;
 
 /// Maximum bytes to peek from a TCP connection to extract the TLS `ClientHello`.
@@ -86,6 +88,7 @@ pub struct Edge {
     agent_pool: Arc<AgentPool>,
     agent_health: Arc<AgentHealthMap>,
     dial_locks: Arc<DialLocks>,
+    sessions: Arc<SessionRegistry>,
     listen_addr: String,
     health_listen_addr: String,
     listen_workers: usize,
@@ -112,19 +115,22 @@ impl Edge {
         listen_addr: String,
         health_listen_addr: String,
     ) -> Self {
+        let metrics = EdgeMetrics::new();
+        let sessions = Arc::new(SessionRegistry::new(metrics.clone()));
         Self {
             router,
             endpoint,
             agent_pool: Arc::new(AgentPool::new()),
             agent_health: Arc::new(AgentHealthMap::new()),
             dial_locks: Arc::new(DialLocks::new()),
+            sessions,
             listen_addr,
             health_listen_addr,
             listen_workers: 1,
             tls: None,
             hub_self_route: None,
             proxy_protocol: Arc::default(),
-            metrics: EdgeMetrics::new(),
+            metrics,
         }
     }
 
@@ -172,6 +178,7 @@ impl Edge {
             pool: Arc::clone(&self.agent_pool),
             health: Arc::clone(&self.agent_health),
             dial_locks: Arc::clone(&self.dial_locks),
+            sessions: Arc::clone(&self.sessions),
             metrics: self.metrics.clone(),
             tls_acceptor: self.tls.as_ref().map(|t| t.acceptor.clone()),
             acme: self.tls.as_ref().map(|t| Arc::clone(&t.acme)),
@@ -187,7 +194,7 @@ impl Edge {
             "edge listening"
         );
 
-        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(listeners.len());
+        let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(listeners.len() + 3);
         for listener in listeners {
             let ctx = Arc::clone(&ctx);
             tasks.push(tokio::spawn(accept_loop(listener, ctx)));
@@ -203,6 +210,18 @@ impl Edge {
             tasks.push(tokio::spawn(udp_listener_reconciler(ctx)));
         }
 
+        // Agents dialing in register sessions; the legacy outbound-dial
+        // path stays available for agents still running in accept mode.
+        {
+            let endpoint = Arc::clone(&self.endpoint);
+            let sessions = Arc::clone(&self.sessions);
+            let router = Arc::clone(&self.router);
+            let metrics = self.metrics.clone();
+            tasks.push(tokio::spawn(iroh_accept_loop(
+                endpoint, sessions, router, metrics,
+            )));
+        }
+
         for task in tasks {
             // Accept loops never return `Ok`; only observe task panics.
             if let Err(e) = task.await {
@@ -211,6 +230,66 @@ impl Edge {
         }
         Ok(())
     }
+}
+
+async fn iroh_accept_loop(
+    endpoint: Arc<Endpoint>,
+    sessions: Arc<SessionRegistry>,
+    router: Arc<Router>,
+    metrics: EdgeMetrics,
+) {
+    info!("edge iroh accept loop ready");
+    loop {
+        let Some(incoming) = endpoint.accept().await else {
+            info!("edge iroh endpoint closed, stopping accept loop");
+            return;
+        };
+        let sessions = Arc::clone(&sessions);
+        let router = Arc::clone(&router);
+        let metrics = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_inbound_agent(incoming, sessions, router, metrics).await {
+                debug!(error = %e, "inbound agent connection ended with error");
+            }
+        });
+    }
+}
+
+async fn handle_inbound_agent(
+    incoming: iroh::endpoint::Incoming,
+    sessions: Arc<SessionRegistry>,
+    router: Arc<Router>,
+    metrics: EdgeMetrics,
+) -> anyhow::Result<()> {
+    let conn = match incoming.await {
+        Ok(c) => c,
+        Err(e) => {
+            metrics
+                .sessions_rejected_total
+                .with_label_values(&[session_reject_reason::HANDSHAKE_ERROR])
+                .inc();
+            return Err(anyhow::anyhow!("iroh handshake failed: {e}"));
+        }
+    };
+    let agent_id = conn.remote_id();
+    if !router.is_known_agent(&agent_id) {
+        metrics
+            .sessions_rejected_total
+            .with_label_values(&[session_reject_reason::UNKNOWN_AGENT])
+            .inc();
+        warn!(
+            agent = %agent_id.fmt_short(),
+            "rejecting inbound iroh connection from unknown agent"
+        );
+        conn.close(403u32.into(), b"unknown agent");
+        return Ok(());
+    }
+
+    let session = Arc::new(AgentSession::new(agent_id, conn.clone()));
+    sessions.register(&session);
+    let _close = conn.closed().await;
+    sessions.remove_if_current(&session);
+    Ok(())
 }
 
 /// One accept loop — shared by all reuseport workers.
@@ -292,6 +371,7 @@ struct ConnCtx {
     pool: Arc<AgentPool>,
     health: Arc<AgentHealthMap>,
     dial_locks: Arc<DialLocks>,
+    sessions: Arc<SessionRegistry>,
     metrics: EdgeMetrics,
     tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
     acme: Option<Arc<AcmeManager>>,
@@ -369,6 +449,8 @@ async fn pick_agent_and_open_stream(
                 &ctx.endpoint,
                 &ctx.pool,
                 &ctx.dial_locks,
+                &ctx.sessions,
+                &ctx.metrics,
                 agent_addr.clone(),
             )
             .await
@@ -764,21 +846,37 @@ async fn pipe_to_local_hub(
     Ok((c2h, h2c))
 }
 
-/// Return a new bidirectional QUIC stream to the agent, reusing a pooled
-/// connection when possible.
-///
-/// If the pooled connection's `open_bi` fails (peer went away, idle-timed
-/// out, etc.), we drop it and dial a fresh one. Concurrent cold-path dials
-/// to the same agent serialize through `dial_locks` so they share a single
-/// QUIC handshake. `agent_addr` may include direct socket addresses so iroh
-/// can connect without relay/discovery.
+/// Open a bi-stream to the agent. Prefers a registered session
+/// (reverse-dial), falls back to the dial pool for accept-mode agents.
+/// `dial_locks` serializes cold-path dials so concurrent requests share
+/// one handshake.
 async fn open_agent_stream(
     endpoint: &Endpoint,
     pool: &AgentPool,
     dial_locks: &DialLocks,
+    sessions: &SessionRegistry,
+    metrics: &EdgeMetrics,
     agent_addr: EndpointAddr,
 ) -> anyhow::Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     let agent_id = agent_addr.id;
+
+    if let Some(session) = sessions.get(&agent_id) {
+        match session.open_stream().await {
+            Ok(pair) => return Ok(pair),
+            Err(e) => {
+                debug!(
+                    agent = %agent_id.fmt_short(),
+                    error = %e,
+                    "session open_bi failed; falling back to dial"
+                );
+                sessions.remove_if_current(&session);
+            }
+        }
+    } else {
+        // Count only true "no session" cases so the metric reflects
+        // degraded reverse-dial coverage, not supersede races.
+        metrics.route_no_session_total.inc();
+    }
 
     let cached = pool.pin().get(&agent_id).cloned();
     if let Some(conn) = cached {

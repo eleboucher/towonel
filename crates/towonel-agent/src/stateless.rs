@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -46,6 +47,15 @@ pub fn retry_policy() -> ExponentialBuilder {
         .with_jitter()
 }
 
+/// One trusted edge. `addrs` may be empty if the hub didn't surface
+/// socket addresses for this edge — the supervisor skips those since
+/// dialing without an address requires a relay.
+#[derive(Clone, Debug)]
+pub struct EdgeContact {
+    pub id: EndpointId,
+    pub addrs: Vec<SocketAddr>,
+}
+
 /// Boot-time context derived from the invite token + hub bootstrap response.
 /// Shared across the register + heartbeat paths and dropped when the agent
 /// shuts down.
@@ -55,6 +65,7 @@ pub struct BootstrapContext {
     pub hub_url: String,
     pub tenant_id: TenantId,
     pub trusted_edges: HashSet<EndpointId>,
+    pub edge_contacts: Vec<EdgeContact>,
     pub client: reqwest::Client,
     pub hostnames: Vec<String>,
 }
@@ -107,11 +118,24 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         }
     }
 
+    let edge_addrs = parse_edge_addresses(&resp.edge_addresses);
+    // The hub only surfaces its own edge's addrs in `edge_addresses`;
+    // multi-edge clusters need a future hub change to advertise per-edge
+    // addrs. Single-edge deployments (the common case) are correct.
+    let edge_contacts: Vec<EdgeContact> = trusted_edges
+        .iter()
+        .map(|id| EdgeContact {
+            id: *id,
+            addrs: edge_addrs.clone(),
+        })
+        .collect();
+
     info!(
         %tenant_id,
         agent_id = %agent_kp.id(),
         hub_url = %token.hub_url,
         edges = trusted_edges.len(),
+        dialable_edges = edge_contacts.iter().filter(|c| !c.addrs.is_empty()).count(),
         "bootstrap complete"
     );
 
@@ -121,9 +145,22 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         hub_url: token.hub_url.clone(),
         tenant_id,
         trusted_edges,
+        edge_contacts,
         client,
         hostnames: resp.hostnames,
     })
+}
+
+fn parse_edge_addresses(raw: &[String]) -> Vec<SocketAddr> {
+    raw.iter()
+        .filter_map(|s| match s.parse::<SocketAddr>() {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                warn!(addr = %s, error = %e, "hub returned unparsable edge address, skipping");
+                None
+            }
+        })
+        .collect()
 }
 
 /// Submit an `UpsertAgent` config entry authorizing the ephemeral iroh key
@@ -617,6 +654,9 @@ struct BootstrapResponse {
     #[serde(default)]
     trusted_edges: Vec<EndpointId>,
     edge_node_id: Option<EndpointId>,
+    /// Absent on older hubs.
+    #[serde(default)]
+    edge_addresses: Vec<String>,
 }
 
 async fn post_bootstrap(

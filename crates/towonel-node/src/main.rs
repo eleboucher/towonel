@@ -538,8 +538,9 @@ fn build_ownership_policy(tenants: &[config::TenantEntry]) -> anyhow::Result<Own
 /// construct the Edge. Returns the Router (for dynamic updates), the Edge,
 /// the edge's `EndpointId` (hex), and its bound socket addresses (as strings).
 ///
-/// The edge endpoint has no ALPNs because it only makes outbound connections
-/// to agents -- it never accepts inbound iroh connections.
+/// The endpoint registers `ALPN_TUNNEL` so it can accept agent-initiated
+/// connections; it also makes outbound dials to agents still running in
+/// accept mode.
 async fn build_edge(
     secret_key: iroh::SecretKey,
     tenants: &[config::TenantEntry],
@@ -554,6 +555,7 @@ async fn build_edge(
 )> {
     let ep = Endpoint::builder(N0)
         .secret_key(secret_key)
+        .alpns(vec![towonel_common::protocol::ALPN_TUNNEL.to_vec()])
         .relay_mode(towonel_common::relay::relay_mode_from_env()?)
         .bind()
         .await?;
