@@ -522,59 +522,6 @@ pub async fn publish_udp_services(
     publish_services(ctx, desired, ServiceProtocol::Udp).await
 }
 
-/// Must be called after [`register`] so the current agent is in the log
-/// before its predecessors are revoked.
-pub async fn reconcile_agents(ctx: &BootstrapContext) -> anyhow::Result<()> {
-    let existing =
-        retry_on_rate_limit("fetch_authorized_agents", || fetch_authorized_agents(ctx)).await?;
-    let current = ctx.agent_id();
-    let stale: Vec<AgentId> = existing.into_iter().filter(|a| a != &current).collect();
-
-    if stale.is_empty() {
-        return Ok(());
-    }
-
-    let mut next_seq = retry_on_rate_limit("fetch_latest_sequence", || {
-        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp)
-    })
-    .await?
-        + 1;
-    for agent_id in stale {
-        let label = format!("RevokeAgent {agent_id}");
-        submit_with_retry(
-            ctx,
-            &mut next_seq,
-            ConfigOp::RevokeAgent {
-                agent_id: agent_id.clone(),
-            },
-            &label,
-        )
-        .await?;
-        info!(%agent_id, "revoked stale agent");
-    }
-    Ok(())
-}
-
-async fn fetch_authorized_agents(ctx: &BootstrapContext) -> anyhow::Result<HashSet<AgentId>> {
-    let entries = fetch_tenant_entries(ctx).await?;
-    let pk = ctx.tenant_kp.public_key();
-    let mut agents = HashSet::new();
-    for entry in &entries {
-        if let Ok(payload) = entry.verify(pk) {
-            match payload.op {
-                ConfigOp::UpsertAgent { agent_id } => {
-                    agents.insert(agent_id);
-                }
-                ConfigOp::RevokeAgent { agent_id } => {
-                    agents.remove(&agent_id);
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(agents)
-}
-
 /// Spawn the heartbeat task. Returns the `JoinHandle` so the caller can
 /// abort on shutdown (not strictly necessary -- the hub reaps stale
 /// heartbeats -- but keeps shutdown logs clean).
