@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,13 +46,12 @@ pub fn retry_policy() -> ExponentialBuilder {
         .with_jitter()
 }
 
-/// One trusted edge. `addrs` may be empty if the hub didn't surface
-/// socket addresses for this edge — the supervisor skips those since
-/// dialing without an address requires a relay.
+/// One trusted edge. `addrs` are resolved at dial time so DNS changes
+/// don't require a restart. Empty = no advertised iroh endpoint.
 #[derive(Clone, Debug)]
 pub struct EdgeContact {
     pub id: EndpointId,
-    pub addrs: Vec<SocketAddr>,
+    pub addrs: Vec<String>,
 }
 
 /// Boot-time context derived from the invite token + hub bootstrap response.
@@ -118,15 +116,13 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         }
     }
 
-    let edge_addrs = parse_edge_addresses(&resp.edge_addresses);
-    // The hub only surfaces its own edge's addrs in `edge_addresses`;
-    // multi-edge clusters need a future hub change to advertise per-edge
-    // addrs. Single-edge deployments (the common case) are correct.
+    // The hub surfaces only its colocated edge's iroh addrs — multi-edge
+    // clusters need a future hub change to advertise per-edge addrs.
     let edge_contacts: Vec<EdgeContact> = trusted_edges
         .iter()
         .map(|id| EdgeContact {
             id: *id,
-            addrs: edge_addrs.clone(),
+            addrs: resp.edge_iroh_addresses.clone(),
         })
         .collect();
 
@@ -135,7 +131,7 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         agent_id = %agent_kp.id(),
         hub_url = %token.hub_url,
         edges = trusted_edges.len(),
-        dialable_edges = edge_contacts.iter().filter(|c| !c.addrs.is_empty()).count(),
+        iroh_addrs_advertised = resp.edge_iroh_addresses.len(),
         "bootstrap complete"
     );
 
@@ -149,18 +145,6 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         client,
         hostnames: resp.hostnames,
     })
-}
-
-fn parse_edge_addresses(raw: &[String]) -> Vec<SocketAddr> {
-    raw.iter()
-        .filter_map(|s| match s.parse::<SocketAddr>() {
-            Ok(addr) => Some(addr),
-            Err(e) => {
-                warn!(addr = %s, error = %e, "hub returned unparsable edge address, skipping");
-                None
-            }
-        })
-        .collect()
 }
 
 /// Submit an `UpsertAgent` config entry authorizing the ephemeral iroh key
@@ -656,7 +640,7 @@ struct BootstrapResponse {
     edge_node_id: Option<EndpointId>,
     /// Absent on older hubs.
     #[serde(default)]
-    edge_addresses: Vec<String>,
+    edge_iroh_addresses: Vec<String>,
 }
 
 async fn post_bootstrap(

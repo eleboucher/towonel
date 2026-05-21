@@ -155,6 +155,9 @@ pub struct EdgeConfig {
     pub health_listen_addr: String,
     pub hub_url: Option<String>,
     pub public_addresses: Vec<String>,
+    /// Pinned UDP port for the iroh QUIC socket. `None` = ephemeral
+    /// (the OS picks); set when reverse-dial agents need a stable hole.
+    pub iroh_port: Option<u16>,
     pub tls: Option<TlsConfig>,
     /// Number of TCP accept workers sharing `listen_addr` via `SO_REUSEPORT`
     /// on Unix. Raise to scale accept across cores under bursty load.
@@ -277,6 +280,7 @@ struct RawEnv {
     edge_advertised_addresses: Vec<String>,
     /// Deprecated alias for `edge_advertised_addresses`.
     edge_public_addresses: Vec<String>,
+    edge_iroh_port: Option<u16>,
     edge_listen_workers: Option<usize>,
     edge_proxy_protocol: Option<bool>,
     edge_proxy_protocol_trusted: Option<String>,
@@ -297,6 +301,10 @@ impl NodeConfig {
         Ok(c)
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "single linear flat-env destructure; splitting hides which fields feed which struct"
+    )]
     fn from_raw(r: RawEnv) -> anyhow::Result<Self> {
         let tls = build_tls(&r);
         let RawEnv {
@@ -321,6 +329,7 @@ impl NodeConfig {
             edge_hub_urls,
             edge_advertised_addresses,
             edge_public_addresses,
+            edge_iroh_port,
             edge_listen_workers,
             edge_proxy_protocol,
             edge_proxy_protocol_trusted,
@@ -394,6 +403,7 @@ impl NodeConfig {
                 .unwrap_or_else(|| "0.0.0.0:9090".to_string()),
             hub_url,
             public_addresses,
+            iroh_port: edge_iroh_port,
             tls,
             listen_workers: edge_listen_workers.unwrap_or(1),
             proxy_protocol,
