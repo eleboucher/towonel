@@ -191,31 +191,51 @@ fn live_agents_filter_hides_offline_agents() {
 }
 
 #[test]
-fn signed_agents_not_filtered_by_liveness() {
+fn signed_agents_intersected_with_liveness() {
     let kp = TenantKeypair::generate();
-    let agent = AgentKeypair::generate();
+    let live_agent = AgentKeypair::generate();
+    let dead_agent = AgentKeypair::generate();
     let policy = policy_for(&kp, &["app.example.eu"]);
     let entries = vec![
         sign_entry(
             &kp,
             1,
-            ConfigOp::UpsertHostname {
-                hostname: "app.example.eu".into(),
+            ConfigOp::UpsertAgent {
+                agent_id: live_agent.id(),
             },
         ),
         sign_entry(
             &kp,
             2,
             ConfigOp::UpsertAgent {
-                agent_id: agent.id(),
+                agent_id: dead_agent.id(),
             },
         ),
     ];
 
-    let live = HashSet::new();
+    let mut live = HashSet::new();
+    live.insert((kp.id(), live_agent.id()));
     let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&live));
 
-    assert!(table.lookup("app.example.eu").is_none());
+    assert!(table.signed_agents().contains(&live_agent.id()));
+    assert!(!table.signed_agents().contains(&dead_agent.id()));
+}
+
+#[test]
+fn signed_agents_unfiltered_when_no_liveness() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &["app.example.eu"]);
+    let entries = vec![sign_entry(
+        &kp,
+        1,
+        ConfigOp::UpsertAgent {
+            agent_id: agent.id(),
+        },
+    )];
+
+    let table = RouteTable::from_entries_with_liveness(&entries, &policy, None);
+
     assert!(table.signed_agents().contains(&agent.id()));
 }
 

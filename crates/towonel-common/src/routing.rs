@@ -110,10 +110,28 @@ impl RouteTable {
         let mut tcp_listeners: BTreeMap<u16, TcpListenerBinding> = BTreeMap::new();
         let mut udp_routes: HashMap<UdpRouteKey, HashSet<AgentId>> = HashMap::new();
         let mut udp_listeners: BTreeMap<u16, UdpListenerBinding> = BTreeMap::new();
-        let signed_agents: HashSet<AgentId> = tenant_state
-            .values()
-            .flat_map(|s| s.agents.iter().cloned())
-            .collect();
+        // Intersect with liveness so dead pods drop out automatically;
+        // makes multi-replica safe without tenant-side revocation.
+        let signed_agents: HashSet<AgentId> = live_agents.map_or_else(
+            || {
+                tenant_state
+                    .values()
+                    .flat_map(|s| s.agents.iter().cloned())
+                    .collect()
+            },
+            |live| {
+                tenant_state
+                    .iter()
+                    .flat_map(|(tid, state)| {
+                        state
+                            .agents
+                            .iter()
+                            .filter(|aid| live.contains(&(*tid, (*aid).clone())))
+                            .cloned()
+                    })
+                    .collect()
+            },
+        );
 
         // Sort tenants so cross-tenant port collisions resolve deterministically
         // (lowest `tenant_id` wins). HashMap iteration is randomized.

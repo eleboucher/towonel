@@ -141,6 +141,10 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     }
 
     stateless::register(&ctx).await?;
+    // Heartbeat right after register so liveness is set before the
+    // supervisor's first dial.
+    let heartbeat = stateless::spawn_heartbeat(ctx.clone(), metrics.clone());
+
     stateless::publish_hostnames(&ctx).await?;
     let desired_tcp_bindings: Vec<(String, u16)> = agent_config
         .tcp_services
@@ -154,8 +158,8 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         .map(|s| (s.name.clone(), s.listen_port))
         .collect();
     stateless::publish_udp_services(&ctx, &desired_udp_bindings).await?;
-    stateless::reconcile_agents(&ctx).await?;
-    let heartbeat = stateless::spawn_heartbeat(ctx.clone(), metrics.clone());
+    // No reconcile pass: dead pods are pruned by the hub's heartbeat
+    // TTL. Reconciling here would revoke sibling replicas.
 
     if !agent_config.services.is_empty() {
         let result = publish_tls::publish(
