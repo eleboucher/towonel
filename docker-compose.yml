@@ -7,6 +7,7 @@ services:
       - "443:443"
       - "8443:8443"
       - "9090:9090"
+      - "51820:51820/udp"
     environment:
       RUST_LOG: info
       # TOWONEL_HUB_PUBLIC_URL: https://hub.example.eu
@@ -14,6 +15,7 @@ services:
       # TOWONEL_EDGE_TLS_ACME_EMAIL: ops@example.eu
       # TOWONEL_INVITE_HASH_KEY: ${TOWONEL_INVITE_HASH_KEY}
       # TOWONEL_HUB_DNS_WEBHOOK_URL: https://dns-sidecar.internal/update
+      # TOWONEL_EDGE_IROH_PORT: "51820"  # default; override if the port collides
     volumes:
       - node-data:/data
     restart: unless-stopped

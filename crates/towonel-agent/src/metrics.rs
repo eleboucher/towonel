@@ -27,8 +27,6 @@ pub mod direction {
 
 #[derive(Clone)]
 pub struct AgentMetrics {
-    pub edge_connections_accepted: IntCounter,
-    pub edge_connections_rejected: IntCounter,
     pub edge_session_reconnects: IntCounterVec,
     pub edge_session_state: IntGaugeVec,
     pub streams_accepted: IntCounter,
@@ -46,16 +44,6 @@ impl AgentMetrics {
         let r = Registry::new();
         towonel_common::process_metrics::register(&r);
         Self {
-            edge_connections_accepted: register_counter(
-                &r,
-                "towonel_agent_edge_connections_accepted_total",
-                "iroh connections accepted from trusted edges",
-            ),
-            edge_connections_rejected: register_counter(
-                &r,
-                "towonel_agent_edge_connections_rejected_total",
-                "iroh connections rejected because the remote is not a trusted edge",
-            ),
             edge_session_reconnects: register_counter_vec(
                 &r,
                 "towonel_agent_edge_session_reconnects_total",
@@ -148,8 +136,6 @@ mod tests {
     fn registry_encodes_all_series() {
         let m = AgentMetrics::new();
         m.set_info("test-0.0.0");
-        m.edge_connections_accepted.inc();
-        m.edge_connections_rejected.inc();
         m.streams_accepted.inc();
         m.streams_completed.inc();
         m.record_stream_error(stream_error::ORIGIN_CONNECT);
@@ -165,8 +151,6 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
 
         for name in [
-            "towonel_agent_edge_connections_accepted",
-            "towonel_agent_edge_connections_rejected",
             "towonel_agent_streams_accepted",
             "towonel_agent_streams_completed",
             "towonel_agent_stream_errors",

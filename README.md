@@ -10,12 +10,30 @@ dynamic IPs without opening inbound ports.
 > Status: **alpha**. Functional and covered by integration tests. Wire
 > format and APIs may change between `0.0.x` releases.
 
+## How it works
+
+Two processes, one persistent QUIC tunnel between them:
+
+- **Hub + edge** runs on a public VPS. Accepts TLS on `:443`, peeks the
+  SNI, and forwards the connection over an open QUIC stream to the
+  matching agent. Also serves the hub control plane on `:8443` where
+  agents register their hostnames and TCP/UDP services.
+- **Agent** runs wherever your origin is reachable (homelab, k8s, behind
+  CGNAT). It dials the edge over QUIC, holds the connection open, and
+  forwards traffic to the origin.
+
+Identity is post-quantum (ML-DSA-65) at the tenant level, Ed25519 at the
+iroh transport layer. Agents authenticate to the hub with an invite
+token; clients authenticate to the edge with the regular TLS handshake.
+
 ## Quick start
 
 You need:
 
-- A public VPS for the **hub** (ports `80`, `443`, `8443` open).
-- A machine that can reach your service for the **agent** (homelab, k8s, VM).
+- A public VPS for the **hub** with TCP `443`, TCP `8443`, and UDP
+  `51820` (iroh QUIC) open to the internet.
+- A machine that can reach your service for the **agent** (homelab,
+  k8s, VM). No inbound ports required.
 - A DNS record pointing your hostname at the VPS.
 
 ### 1. Run the hub
@@ -25,9 +43,10 @@ On the VPS:
 ```bash
 docker pull git.erwanleboucher.dev/eleboucher/towonel-node:latest
 docker run -d --name towonel \
-  -p 443:443 -p 8443:8443 \
+  -p 443:443 -p 8443:8443 -p 51820:51820/udp \
   -v towonel-data:/data \
   -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
+  -e TOWONEL_EDGE_ADVERTISED_ADDRESSES=hub.example.eu:443 \
   -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
   git.erwanleboucher.dev/eleboucher/towonel-node:latest
 ```
@@ -37,6 +56,10 @@ to a subpath under it. `node.key`, `operator.key`, and `invite_hash.key`
 are generated on first boot — back up `operator.key` (admin auth) and
 `invite_hash.key` (losing it invalidates every outstanding invite). For
 production, set `TOWONEL_INVITE_HASH_KEY` from a secret manager.
+
+iroh QUIC binds to UDP `51820` by default; override with
+`TOWONEL_EDGE_IROH_PORT` if you need a different port (remember to
+update the `-p` mapping too).
 
 #### Bundled-Caddy variant
 
@@ -50,15 +73,18 @@ restart policy brings the whole thing back.
 
 ```bash
 docker run -d --name towonel \
-  -p 80:80 -p 443:443 -p 8443:8443 \
+  -p 80:80 -p 443:443 -p 8443:8443 -p 51820:51820/udp \
   -v towonel-data:/data \
   -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
+  -e TOWONEL_EDGE_ADVERTISED_ADDRESSES=hub.example.eu:443 \
   -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
   git.erwanleboucher.dev/eleboucher/towonel-hub-caddy:latest
 ```
 
 Replace the baked Caddyfile by mounting one at `/etc/caddy/Caddyfile`.
 The hub API stays at `:8443` direct (not behind Caddy in this image).
+iroh QUIC stays on `:51820/udp` direct as well — Caddy does not proxy
+UDP here.
 
 ### 2. Create an invite
 
@@ -95,8 +121,9 @@ curl https://app.alice.example.eu
 ```
 
 Add more services by extending `TOWONEL_AGENT_SERVICES`. Add replicas by
-running the agent container N times. Add regions by inviting another VPS
-as an edge node (see [Edge nodes](#edge-nodes)).
+running the agent container N times; each registers as an independent
+session and the edge load-balances across them. Add regions by inviting
+another VPS as an edge node (see [Edge nodes](#edge-nodes)).
 
 ## TLS modes
 
@@ -308,7 +335,7 @@ identity at startup.
 | `TOWONEL_EDGE_TLS_ACME_EMAIL`       |                                        | LE account contact (TLS-ALPN-01). **Required** when any `EDGE_TLS_*` var is set                                                                                        |
 | `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert/storage directory                                                                                                                                                 |
 | `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`                                | Use Let's Encrypt staging                                                                                                                                              |
-| `TOWONEL_EDGE_IROH_PORT`            | ephemeral                              | Pin the iroh QUIC UDP port. Required for reverse-dial agents so the operator can open a stable firewall hole. Binds both `0.0.0.0` and `[::]` — IPv6 stack required when set |
+| `TOWONEL_EDGE_IROH_PORT`            | `51820`                                | UDP port for the iroh QUIC socket. Operators forward this port through the firewall. Binds both `0.0.0.0` and `[::]` — IPv6 stack required          |
 
 ### Agent
 
@@ -319,7 +346,6 @@ identity at startup.
 | `TOWONEL_AGENT_TCP_SERVICES`  | JSON array of raw TCP services (see above)                                        |
 | `TOWONEL_AGENT_UDP_SERVICES`  | JSON array of raw UDP services (see above)                                        |
 | `TOWONEL_AGENT_TRUSTED_EDGES` | Optional override for trusted edge IDs                                            |
-| `TOWONEL_AGENT_DIAL_EDGE`     | Set to `true` to dial the edge instead of accepting (see below). Default `false`. |
 
 Service shape:
 
@@ -335,60 +361,6 @@ Service shape:
 
 `proxy_protocol` defaults to `v2` for passthrough services and `none`
 for terminated services.
-
-### iroh relays
-
-Both the edge and the agent default to `relay.towonel.erwanleboucher.dev`
-with n0's EU relay (`euc1-1.relay.n0.iroh-canary.iroh.link`) as fallback.
-Set `TOWONEL_IROH_RELAY_URLS` (comma-separated) on both sides to override:
-
-```bash
-TOWONEL_IROH_RELAY_URLS=https://relay.example.eu/,https://euc1-1.relay.n0.iroh-canary.iroh.link/
-```
-
-### Reverse-dial mode
-
-By default the edge dials the agent and iroh relays bridge NAT. Setting
-`TOWONEL_AGENT_DIAL_EDGE=true` on the agent flips the direction: the
-agent dials each trusted edge and holds the QUIC connection open; the
-edge multiplexes per-request bi-streams over it. Since the edge is
-publicly addressable, iroh-relay is disabled in this mode and the agent
-stops publishing to the n0 DNS (`iroh.link`) discovery service.
-
-On the hub side, set `TOWONEL_EDGE_IROH_PORT` to pin the iroh UDP port
-to a known value (and open it in your firewall / forward it through
-your load balancer). The hub then advertises `<EDGE_ADVERTISED_ADDRESSES
-hostname>:<iroh-port>` to agents — no separate address env var needed.
-
-```bash
-# Hub side
-docker run -d --name towonel \
-  -p 80:80 -p 443:443 -p 8443:8443 -p 51820:51820/udp \
-  -v towonel-data:/data \
-  -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
-  -e TOWONEL_EDGE_ADVERTISED_ADDRESSES=hub.example.eu:443 \
-  -e TOWONEL_EDGE_IROH_PORT=51820 \
-  -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
-  git.erwanleboucher.dev/eleboucher/towonel-node:latest
-
-# Agent side
-docker run -d --name towonel-agent \
-  --network host \
-  -e TOWONEL_INVITE_TOKEN=tt_inv_2_... \
-  -e TOWONEL_AGENT_DIAL_EDGE=true \
-  -e TOWONEL_AGENT_SERVICES='[{"hostname":"app.example.eu","origin":"127.0.0.1:8443"}]' \
-  git.erwanleboucher.dev/eleboucher/towonel-agent:latest
-```
-
-Notes:
-
-- The agent re-resolves hostnames at every redial, so DNS changes apply
-  without a restart.
-- HA: multiple agents using the same invite token each generate distinct
-  identities and register independent sessions; the edge load-balances.
-- If `TOWONEL_EDGE_IROH_PORT` isn't set, the hub won't advertise iroh
-  addresses; agents with `TOWONEL_AGENT_DIAL_EDGE=true` fall back to
-  accept-mode and log a warning at boot.
 
 ### CLI
 

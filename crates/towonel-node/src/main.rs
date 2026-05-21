@@ -365,7 +365,7 @@ async fn run_node() -> anyhow::Result<()> {
                 edge,
                 edge_node_id,
                 bound_socket_strings,
-                bound_iroh_port,
+                iroh_port,
                 endpoint,
             } = build_edge(secret_key, &config.tenants, &config.edge).await?;
 
@@ -376,11 +376,8 @@ async fn run_node() -> anyhow::Result<()> {
             } else {
                 config.edge.public_addresses.clone()
             };
-            let edge_iroh_addresses = derive_edge_iroh_addresses(
-                &public_addresses,
-                bound_iroh_port,
-                &bound_socket_strings,
-            );
+            let edge_iroh_addresses =
+                derive_edge_iroh_addresses(&public_addresses, iroh_port, &bound_socket_strings);
 
             let identity = HubIdentity {
                 node_id,
@@ -559,7 +556,7 @@ struct BuiltEdge {
     edge: edge::Edge,
     edge_node_id: iroh::EndpointId,
     bound_socket_strings: Vec<String>,
-    bound_iroh_port: Option<u16>,
+    iroh_port: u16,
     endpoint: Arc<Endpoint>,
 }
 
@@ -573,29 +570,27 @@ async fn build_edge(
     tenants: &[config::TenantEntry],
     edge_config: &config::EdgeConfig,
 ) -> anyhow::Result<BuiltEdge> {
-    let mut builder = Endpoint::builder(Minimal)
+    let port = edge_config.iroh_port;
+    // clear_ip_transports drops the default unspecified binds so we
+    // don't end up with three sockets after our two explicit binds.
+    let ep = Endpoint::builder(Minimal)
         .secret_key(secret_key)
         .alpns(vec![towonel_common::protocol::ALPN_TUNNEL.to_vec()])
-        .relay_mode(RelayMode::Disabled);
-    if let Some(port) = edge_config.iroh_port {
-        // clear_ip_transports drops the default unspecified binds so we
-        // don't end up with three sockets after our two explicit binds.
-        builder = builder
-            .clear_ip_transports()
-            .bind_addr(format!("0.0.0.0:{port}"))
-            .map_err(|e| anyhow::anyhow!("invalid IPv4 iroh bind addr: {e}"))?
-            .bind_addr(format!("[::]:{port}"))
-            .map_err(|e| anyhow::anyhow!("invalid IPv6 iroh bind addr: {e}"))?;
-    }
-    let ep = builder.bind().await?;
+        .relay_mode(RelayMode::Disabled)
+        .clear_ip_transports()
+        .bind_addr(format!("0.0.0.0:{port}"))
+        .map_err(|e| anyhow::anyhow!("invalid IPv4 iroh bind addr: {e}"))?
+        .bind_addr(format!("[::]:{port}"))
+        .map_err(|e| anyhow::anyhow!("invalid IPv6 iroh bind addr: {e}"))?
+        .bind()
+        .await?;
 
     let edge_node_id = ep.id();
-    let bound_sockets = ep.bound_sockets();
-    let bound_socket_strings: Vec<String> = bound_sockets
+    let bound_socket_strings: Vec<String> = ep
+        .bound_sockets()
         .iter()
         .map(std::string::ToString::to_string)
         .collect();
-    let bound_iroh_port = bound_sockets.first().map(std::net::SocketAddr::port);
 
     info!(
         endpoint_id = %ep.addr().id.fmt_short(),
@@ -629,28 +624,25 @@ async fn build_edge(
         edge,
         edge_node_id,
         bound_socket_strings,
-        bound_iroh_port,
+        iroh_port: port,
         endpoint,
     })
 }
 
 /// For each operator-advertised `host:port`, swap in `iroh_port`. Falls
-/// back to bound sockets filtered to routable addresses. Returns empty
-/// when no iroh port is pinned — reverse-dial agents won't be advertised.
+/// back to bound sockets filtered to routable addresses when no
+/// hostnames are advertised.
 fn derive_edge_iroh_addresses(
     public_addresses: &[String],
-    iroh_port: Option<u16>,
+    iroh_port: u16,
     bound_socket_strings: &[String],
 ) -> Vec<String> {
-    let Some(port) = iroh_port else {
-        return Vec::new();
-    };
     let derived: Vec<String> = public_addresses
         .iter()
         .filter_map(|entry| {
             // rsplit_once so IPv6 `[::1]:443` strips only the trailing port.
             let host = entry.rsplit_once(':').map_or(entry.as_str(), |(h, _)| h);
-            (!host.is_empty()).then(|| format!("{host}:{port}"))
+            (!host.is_empty()).then(|| format!("{host}:{iroh_port}"))
         })
         .collect();
     if !derived.is_empty() {
@@ -694,7 +686,7 @@ mod tests {
     fn derives_from_advertised_hostnames() {
         let got = derive_edge_iroh_addresses(
             &["tunnel.example.com:443".to_string()],
-            Some(51820),
+            51820,
             &["0.0.0.0:51820".to_string()],
         );
         assert_eq!(got, vec!["tunnel.example.com:51820"]);
@@ -707,7 +699,7 @@ mod tests {
                 "a.example.com:443".to_string(),
                 "b.example.com:443".to_string(),
             ],
-            Some(51820),
+            51820,
             &[],
         );
         assert_eq!(got, vec!["a.example.com:51820", "b.example.com:51820"]);
@@ -717,7 +709,7 @@ mod tests {
     fn falls_back_to_routable_bound_sockets() {
         let got = derive_edge_iroh_addresses(
             &[],
-            Some(51820),
+            51820,
             &[
                 "0.0.0.0:51820".to_string(),
                 "127.0.0.1:51820".to_string(),
@@ -728,20 +720,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_when_iroh_port_not_pinned() {
-        let got = derive_edge_iroh_addresses(
-            &["tunnel.example.com:443".to_string()],
-            None,
-            &["203.0.113.4:51820".to_string()],
-        );
-        assert!(got.is_empty());
-    }
-
-    #[test]
     fn empty_when_no_routable_addresses() {
         let got = derive_edge_iroh_addresses(
             &[],
-            Some(51820),
+            51820,
             &["0.0.0.0:51820".to_string(), "127.0.0.1:51820".to_string()],
         );
         assert!(got.is_empty());

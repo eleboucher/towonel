@@ -17,23 +17,10 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
-use iroh::{
-    Endpoint, RelayMode,
-    endpoint::presets::{Minimal, N0},
-};
+use iroh::{Endpoint, RelayMode, endpoint::presets::Minimal};
 use prometheus::{Encoder, TextEncoder};
 use tokio_util::sync::CancellationToken;
-use towonel_common::protocol::ALPN_TUNNEL;
 use tracing::{error, info, warn};
-
-/// Truthy values switch the agent to reverse-dial mode (dials each
-/// trusted edge instead of accepting); disables relay since the edge is
-/// publicly addressable.
-const DIAL_EDGE_ENV: &str = "TOWONEL_AGENT_DIAL_EDGE";
-
-fn dial_edge_enabled() -> bool {
-    std::env::var(DIAL_EDGE_ENV).is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
-}
 
 use crate::metrics::AgentMetrics;
 
@@ -50,11 +37,6 @@ struct Cli {
     /// Write the agent's bound socket addresses (one per line) to this path.
     #[arg(long)]
     addr_out: Option<PathBuf>,
-
-    /// INSECURE. Accept iroh connections from any peer, not just those in
-    /// `trusted_edges`. For local testing and e2e only.
-    #[arg(long, default_value_t = false)]
-    allow_any_edge: bool,
 
     /// Port for the built-in HTTP server exposing `GET /healthz` and
     /// `GET /metrics`. Used by k8s liveness/readiness probes.
@@ -116,28 +98,19 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     );
     service_map.spawn_dns_refresher();
 
-    let dial_edge = dial_edge_enabled() && ctx.edge_contacts.iter().any(|c| !c.addrs.is_empty());
-    if std::env::var(DIAL_EDGE_ENV).is_ok() && !dial_edge {
-        warn!(
-            "{DIAL_EDGE_ENV} set but no edge has advertised addresses; falling back to accept-mode"
+    if ctx.edge_contacts.iter().all(|c| c.addrs.is_empty()) {
+        anyhow::bail!(
+            "no edge advertised an iroh address. Set TOWONEL_EDGE_IROH_PORT on the hub so it can \
+             advertise a reachable endpoint, then restart the agent."
         );
     }
 
-    let endpoint = if dial_edge {
-        Endpoint::builder(Minimal)
-            .secret_key(ctx.iroh_secret_key())
-            .relay_mode(RelayMode::Disabled)
-            .bind()
-            .await
-    } else {
-        Endpoint::builder(N0)
-            .secret_key(ctx.iroh_secret_key())
-            .alpns(vec![ALPN_TUNNEL.to_vec()])
-            .relay_mode(towonel_common::relay::relay_mode_from_env()?)
-            .bind()
-            .await
-    }
-    .context("failed to create iroh endpoint")?;
+    let endpoint = Endpoint::builder(Minimal)
+        .secret_key(ctx.iroh_secret_key())
+        .relay_mode(RelayMode::Disabled)
+        .bind()
+        .await
+        .context("failed to create iroh endpoint")?;
 
     let node_id = endpoint.id();
     info!(%node_id, "agent iroh endpoint ready");
@@ -161,10 +134,9 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
             .with_context(|| format!("failed to write addresses to {}", path.display()))?;
     }
 
-    if ctx.trusted_edges.is_empty() && !cli.allow_any_edge {
+    if ctx.trusted_edges.is_empty() {
         anyhow::bail!(
-            "no trusted edges available. Provision an edge (`towonel-cli edge-invite ...`) or \
-             pass --allow-any-edge for local testing (NOT for production)."
+            "no trusted edges available. Provision an edge with `towonel edge-invite create`."
         );
     }
 
@@ -198,55 +170,32 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         }
     }
 
-    let allow_any = cli.allow_any_edge;
-    let trusted_edges = ctx.trusted_edges.clone();
-
     let health_handle = tokio::spawn(serve_http(cli.health_port, metrics.clone()));
 
-    if dial_edge {
-        info!(
-            edges = ctx.edge_contacts.len(),
-            "dial-edge mode active; spawning reverse-dial supervisors (relay disabled)"
-        );
-        let shutdown = CancellationToken::new();
-        let mut supervisors = edge_session::spawn(
-            &endpoint,
-            &ctx.edge_contacts,
-            &service_map,
-            &metrics,
-            &shutdown,
-        );
-        tokio::select! {
-            () = towonel_common::shutdown::shutdown_signal() => {}
-            // Supervisors retry forever; exit here is catastrophic — let
-            // the container restart policy take over.
-            r = supervisors.join_next() => {
-                error!(?r, "edge supervisor exited unexpectedly; shutting down");
-            }
-        }
-        shutdown.cancel();
-        supervisors.shutdown().await;
-        heartbeat.abort();
-        health_handle.abort();
-        endpoint.close().await;
-        info!("towonel-agent stopped");
-        return Ok(());
-    }
-
-    let relay_watchdog = towonel_common::relay_watchdog::spawn(endpoint.clone());
-
+    info!(
+        edges = ctx.edge_contacts.len(),
+        "spawning reverse-dial supervisors"
+    );
+    let shutdown = CancellationToken::new();
+    let mut supervisors = edge_session::spawn(
+        &endpoint,
+        &ctx.edge_contacts,
+        &service_map,
+        &metrics,
+        &shutdown,
+    );
     tokio::select! {
-        res = tunnel::run(&endpoint, service_map, trusted_edges, allow_any, metrics.clone()) => {
-            if let Err(e) = res {
-                error!("tunnel error: {e}");
-            }
-        }
         () = towonel_common::shutdown::shutdown_signal() => {}
+        // Supervisors retry forever; exit here is catastrophic — let
+        // the container restart policy take over.
+        r = supervisors.join_next() => {
+            error!(?r, "edge supervisor exited unexpectedly; shutting down");
+        }
     }
-
+    shutdown.cancel();
+    supervisors.shutdown().await;
     heartbeat.abort();
     health_handle.abort();
-    relay_watchdog.abort();
     endpoint.close().await;
     info!("towonel-agent stopped");
     Ok(())
