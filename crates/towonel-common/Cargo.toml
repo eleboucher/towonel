@@ -19,6 +19,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 hex = { workspace = true }
 clienthello = { workspace = true }
+httparse = { workspace = true }
+http = { workspace = true }
 anyhow = { workspace = true }
 getrandom = { workspace = true }
 tracing = { workspace = true }

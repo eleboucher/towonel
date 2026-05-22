@@ -66,6 +66,39 @@ impl OriginTarget {
     async fn connect(&self) -> anyhow::Result<TcpStream> {
         connect_tcp_origin(&self.address, &self.resolved).await
     }
+
+    /// Dial the same origin host on port 80. ACME HTTP-01 (and any other
+    /// `:80` traffic the edge routes here) always terminates at the
+    /// origin's HTTP entrypoint, regardless of what port the configured
+    /// `address` points at.
+    async fn connect_http(&self) -> anyhow::Result<TcpStream> {
+        let cached = self.resolved.load();
+        let mut last_err: Option<std::io::Error> = None;
+        for addr in cached.iter() {
+            let mut at_port = *addr;
+            at_port.set_port(80);
+            match TcpStream::connect(at_port).await {
+                Ok(s) => return Ok(s),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if let Some(e) = last_err {
+            debug!(origin = %self.address, error = %e, "cached addrs exhausted on :80, re-resolving");
+        }
+        let host = host_of(&self.address);
+        TcpStream::connect((host, 80))
+            .await
+            .with_context(|| format!("failed to connect to origin {host}:80"))
+    }
+}
+
+fn host_of(address: &str) -> &str {
+    if let Some(rest) = address.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        return rest.get(..end).unwrap_or(address);
+    }
+    address.rsplit_once(':').map_or(address, |(host, _)| host)
 }
 
 /// Like [`OriginTarget`] but without TLS or PROXY-protocol rewriting —
@@ -414,7 +447,14 @@ async fn handle_stream(
     async {
         debug!("forwarding to origin");
 
-        let tcp_stream = match target.connect().await {
+        let is_http_ingress = client_addrs.dst.port() == 80;
+
+        let tcp_stream = if is_http_ingress {
+            target.connect_http().await
+        } else {
+            target.connect().await
+        };
+        let tcp_stream = match tcp_stream {
             Ok(s) => s,
             Err(e) => {
                 metrics.record_stream_error(metrics::stream_error::ORIGIN_CONNECT);
@@ -425,8 +465,10 @@ async fn handle_stream(
             warn!(origin = %target.address, error = %e, "failed to set TCP_NODELAY on origin socket");
         }
 
-        let forward_res = match &target.server_name {
-            Some(sni) => {
+        // `:80` ingress is always cleartext, even if the route configured
+        // `origin_server_name` for the `:443` path.
+        let forward_res = match (&target.server_name, is_http_ingress) {
+            (Some(sni), false) => {
                 forward_tls(
                     tcp_stream,
                     sni.clone(),
@@ -439,7 +481,7 @@ async fn handle_stream(
                 )
                 .await
             }
-            None => {
+            _ => {
                 forward_plain(
                     tcp_stream,
                     target.proxy_protocol,
