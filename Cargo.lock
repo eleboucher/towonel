@@ -5826,6 +5826,7 @@ dependencies = [
 name = "towonel-common"
 version = "0.0.1"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "base64",
  "blake3",
@@ -5869,6 +5870,7 @@ dependencies = [
  "envy",
  "eventsource-stream",
  "fastrand",
+ "fips204",
  "getrandom 0.4.2",
  "hex",
  "humantime",

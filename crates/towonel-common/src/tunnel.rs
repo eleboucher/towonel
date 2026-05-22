@@ -18,6 +18,16 @@ pub const TCP_ROUTE_PREFIX: &str = "tcp:";
 /// is a sequence of [`write_datagram_frame`] frames.
 pub const UDP_ROUTE_PREFIX: &str = "udp:";
 
+/// Raw bytes at the head of an agent → edge control stream.
+///
+/// Unlike [`TCP_ROUTE_PREFIX`] / [`UDP_ROUTE_PREFIX`] (which live in the
+/// PROXY v2 authority TLV), a control stream has no source/dest addresses,
+/// so it skips the PROXY v2 wrap entirely.
+pub const CONTROL_PREFIX: &str = "ctrl:";
+
+pub const CONTROL_STATUS_OK: u8 = 0;
+pub const CONTROL_STATUS_NOT_IMPLEMENTED: u8 = 1;
+
 /// Cap on individual UDP datagram length carried over the QUIC pipe. Matches
 /// the IPv4 datagram limit; anything larger is a sender configuration error.
 pub const MAX_UDP_DATAGRAM: usize = 65_535;
@@ -207,6 +217,35 @@ fn unmap_v4(addr: SocketAddr) -> SocketAddr {
     }
 }
 
+pub async fn write_control_prefix<W: AsyncWrite + Unpin>(stream: &mut W) -> std::io::Result<()> {
+    stream.write_all(CONTROL_PREFIX.as_bytes()).await
+}
+
+pub async fn read_control_prefix<R: AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<()> {
+    let mut buf = [0u8; CONTROL_PREFIX.len()];
+    stream.read_exact(&mut buf).await?;
+    if buf != CONTROL_PREFIX.as_bytes() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "stream does not start with CONTROL_PREFIX",
+        ));
+    }
+    Ok(())
+}
+
+pub async fn write_control_status<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    status: u8,
+) -> std::io::Result<()> {
+    stream.write_all(&[status]).await
+}
+
+pub async fn read_control_status<R: AsyncRead + Unpin>(stream: &mut R) -> std::io::Result<u8> {
+    let mut buf = [0u8; 1];
+    stream.read_exact(&mut buf).await?;
+    Ok(buf[0])
+}
+
 /// Write one length-prefixed UDP datagram (`u16` big-endian length + bytes).
 pub async fn write_datagram_frame<W: AsyncWrite + Unpin>(
     writer: &mut W,
@@ -316,5 +355,28 @@ mod tests {
         };
         let err = write_handshake(&mut buf, "a.b", addrs).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn control_prefix_round_trip() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        write_control_prefix(&mut client).await.unwrap();
+        write_control_status(&mut client, CONTROL_STATUS_NOT_IMPLEMENTED)
+            .await
+            .unwrap();
+        drop(client);
+
+        read_control_prefix(&mut server).await.unwrap();
+        let status = read_control_status(&mut server).await.unwrap();
+        assert_eq!(status, CONTROL_STATUS_NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn read_control_prefix_rejects_other_bytes() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        client.write_all(b"junk!").await.unwrap();
+        drop(client);
+        let err = read_control_prefix(&mut server).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }

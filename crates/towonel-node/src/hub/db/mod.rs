@@ -7,6 +7,7 @@ pub(super) mod entities;
 mod invites;
 mod liveness;
 mod migration;
+mod signing_keys;
 mod types;
 
 pub use liveness::LivenessBump;

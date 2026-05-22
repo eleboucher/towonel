@@ -498,6 +498,11 @@ async fn build_hub_params(
         .invite_hash_key
         .clone()
         .ok_or_else(|| anyhow::anyhow!("invite_hash_key was not loaded during config"))?;
+    let kek = config
+        .hub
+        .hub_kek
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("hub_kek was not loaded during config"))?;
     let public_url = default_public_url(&config.hub);
     Ok(hub::HubParams {
         listen_addr: config.hub.listen_addr.clone(),
@@ -508,6 +513,7 @@ async fn build_hub_params(
         identity,
         operator_api_key,
         invite_hash_key,
+        kek,
         public_url,
     })
 }

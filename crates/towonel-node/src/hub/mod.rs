@@ -2,6 +2,7 @@ pub mod api;
 pub mod auth;
 pub mod db;
 pub mod metrics;
+pub mod signing;
 
 #[cfg(test)]
 mod api_tests;
@@ -18,6 +19,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use tokio::sync::broadcast;
 use towonel_common::identity::{write_key_file, write_key_file_exclusive};
 use towonel_common::invite::InviteHashKey;
+use towonel_common::kek::HubKek;
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
 use tracing::info;
@@ -27,6 +29,7 @@ use tracing::info;
 const OPERATOR_KEY_BYTES: usize = 32;
 
 pub const INVITE_HASH_KEY_ENV: &str = "TOWONEL_INVITE_HASH_KEY";
+pub const HUB_KEK_ENV: &str = "TOWONEL_HUB_KEK";
 
 /// Resolve from env value, else read/generate at `path`, else error.
 pub fn load_or_generate_invite_hash_key(
@@ -76,6 +79,55 @@ fn read_invite_hash_key_file(path: &Path) -> anyhow::Result<InviteHashKey> {
         anyhow::bail!("invite-hash key file {} is empty", path.display());
     }
     InviteHashKey::from_hex(trimmed)
+}
+
+/// Same lifecycle as the invite-hash key: env value wins, else read/generate at `path`.
+/// `TOWONEL_HUB_KEK` must be 32 hex-encoded bytes (`openssl rand -hex 32`).
+pub fn load_or_generate_hub_kek(
+    env_value: Option<&str>,
+    path: Option<&Path>,
+) -> anyhow::Result<HubKek> {
+    if let Some(hex) = env_value.map(str::trim).filter(|s| !s.is_empty()) {
+        return HubKek::from_hex(hex);
+    }
+    if let Some(path) = path {
+        return load_or_generate_hub_kek_at(path);
+    }
+    anyhow::bail!(
+        "{HUB_KEK_ENV} is not set — generate one with \
+         `openssl rand -hex 32` and export it before starting the hub, \
+         or set TOWONEL_HUB_KEK_PATH (or TOWONEL_DATA_DIR) so the hub \
+         can persist a generated key to disk"
+    )
+}
+
+fn load_or_generate_hub_kek_at(path: &Path) -> anyhow::Result<HubKek> {
+    let kek = HubKek::generate();
+    let hex = kek.to_hex();
+    match write_key_file_exclusive(path, hex.as_bytes()) {
+        Ok(()) => {
+            tracing::warn!(
+                path = %path.display(),
+                "generated new hub KEK — BACK THIS UP; losing it bricks every \
+                 row in hub_signing_keys"
+            );
+            Ok(kek)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_hub_kek_file(path),
+        Err(e) => Err(anyhow::anyhow!(
+            "failed to persist hub KEK at {}: {e}",
+            path.display()
+        )),
+    }
+}
+
+fn read_hub_kek_file(path: &Path) -> anyhow::Result<HubKek> {
+    let content = std::fs::read_to_string(path)?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("hub KEK file {} is empty", path.display());
+    }
+    HubKek::from_hex(trimmed)
 }
 
 /// Load the operator API key from `path`, or generate a new random one and
@@ -134,6 +186,7 @@ pub struct HubParams {
     pub identity: HubIdentity,
     pub operator_api_key: zeroize::Zeroizing<String>,
     pub invite_hash_key: Arc<InviteHashKey>,
+    pub kek: Arc<HubKek>,
     pub public_url: String,
 }
 
@@ -170,6 +223,9 @@ impl Hub {
             self.p.database.max_idle(),
         )
         .await?;
+
+        let signer = Arc::new(signing::get_or_create_active_signing_key(&db, &self.p.kek).await?);
+        info!(kid = signer.kid(), "active hub signing key loaded");
 
         let removed: Vec<towonel_common::identity::TenantId> = db.list_tenant_removals().await?;
 
@@ -222,10 +278,12 @@ impl Hub {
             invite_lock: tokio::sync::Mutex::new(()),
             metrics,
             invite_hash_key: Arc::clone(&self.p.invite_hash_key),
-            heartbeat_nonces: api::new_nonce_cache(),
+            signed_request_nonces: api::new_nonce_cache(),
             edge_sub_nonces: api::new_nonce_cache(),
             tcp_port_lock: tokio::sync::Mutex::new(()),
             udp_port_lock: tokio::sync::Mutex::new(()),
+            signer,
+            refresh_limiter: api::new_refresh_limiter(),
         });
 
         spawn_background_loops(&state);

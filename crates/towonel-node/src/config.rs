@@ -146,6 +146,9 @@ pub struct HubConfig {
     /// missing/invalid value fails startup before DB migrations run.
     /// `Arc` so downstream `HubParams` can cheaply share it without re-reading env.
     pub invite_hash_key: Option<std::sync::Arc<towonel_common::invite::InviteHashKey>>,
+    /// AEAD KEK wrapping hub signing-key private bytes in `hub_signing_keys`.
+    /// Loaded from [`crate::hub::HUB_KEK_ENV`].
+    pub hub_kek: Option<std::sync::Arc<towonel_common::kek::HubKek>>,
 }
 
 /// Default UDP port for the iroh QUIC socket. Operators rarely need
@@ -262,6 +265,9 @@ struct RawEnv {
     invite_hash_key: Option<String>,
     invite_hash_key_path: Option<PathBuf>,
 
+    hub_kek: Option<String>,
+    hub_kek_path: Option<PathBuf>,
+
     hub_enabled: Option<bool>,
     hub_listen_addr: Option<String>,
     hub_health_listen_addr: Option<String>,
@@ -317,6 +323,8 @@ impl NodeConfig {
             edge_invite_token,
             invite_hash_key,
             invite_hash_key_path,
+            hub_kek,
+            hub_kek_path,
             hub_enabled,
             hub_listen_addr,
             hub_health_listen_addr,
@@ -382,6 +390,8 @@ impl NodeConfig {
             db_max_idle_conns: hub_db_max_idle_conns,
             invite_hash_key,
             invite_hash_key_path,
+            hub_kek,
+            hub_kek_path,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -461,6 +471,8 @@ struct HubInputs<'a> {
     db_max_idle_conns: Option<u32>,
     invite_hash_key: Option<String>,
     invite_hash_key_path: Option<PathBuf>,
+    hub_kek: Option<String>,
+    hub_kek_path: Option<PathBuf>,
     data_dir: Option<&'a Path>,
 }
 
@@ -477,6 +489,8 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         db_max_idle_conns,
         invite_hash_key,
         invite_hash_key_path,
+        hub_kek,
+        hub_kek_path,
         data_dir,
     } = inputs;
 
@@ -491,6 +505,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         .unwrap_or_else(|| PathBuf::from("operator.key"));
     let invite_hash_key_path =
         invite_hash_key_path.or_else(|| data_dir.map(|d| d.join("invite_hash.key")));
+    let hub_kek_path = hub_kek_path.or_else(|| data_dir.map(|d| d.join("hub_kek.key")));
 
     // Validate the invite-hash key upfront so a missing or malformed value
     // fails startup loudly, before any DB work. Edge-only nodes don't need
@@ -502,6 +517,14 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
                 invite_hash_key_path.as_deref(),
             )?,
         ))
+    } else {
+        None
+    };
+    let hub_kek = if hub_enabled {
+        Some(std::sync::Arc::new(crate::hub::load_or_generate_hub_kek(
+            hub_kek.as_deref(),
+            hub_kek_path.as_deref(),
+        )?))
     } else {
         None
     };
@@ -519,6 +542,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         operator_api_key_path,
         public_url,
         invite_hash_key,
+        hub_kek,
     })
 }
 
@@ -729,6 +753,7 @@ mod tests {
     fn base_raw_env(invite_hex: &str) -> RawEnv {
         RawEnv {
             invite_hash_key: Some(invite_hex.into()),
+            hub_kek: Some(invite_hex.into()),
             ..RawEnv::default()
         }
     }

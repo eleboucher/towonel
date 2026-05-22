@@ -1,4 +1,5 @@
 mod agent_heartbeat;
+mod agent_refresh;
 mod bootstrap;
 mod edge_invites;
 mod entries;
@@ -31,6 +32,7 @@ use tracing::Level;
 
 use super::db;
 use super::metrics::HubMetrics;
+use super::signing::HubSigner;
 use db::Db;
 
 pub(super) use towonel_common::CBOR_CONTENT_TYPE;
@@ -71,6 +73,21 @@ pub fn new_nonce_cache() -> NonceCache {
         .build()
 }
 
+/// Counter per `agent_id`; key auto-expires after 60s. `u32` (not `u8`) so
+/// the counter cannot wrap inside the TTL window and let another burst
+/// through.
+pub type RefreshLimiter = moka::future::Cache<[u8; 32], Arc<std::sync::atomic::AtomicU32>>;
+
+pub const AGENT_REFRESH_MAX_PER_MIN: u32 = 10;
+
+#[must_use]
+pub fn new_refresh_limiter() -> RefreshLimiter {
+    moka::future::Cache::builder()
+        .max_capacity(MAX_NONCE_ENTRIES)
+        .time_to_live(Duration::from_mins(1))
+        .build()
+}
+
 /// Shared application state for all axum handlers.
 pub struct AppState {
     pub db: Db,
@@ -94,10 +111,12 @@ pub struct AppState {
     pub metrics: HubMetrics,
     /// Operator secret used to keyed-hash invite secrets before persistence.
     pub invite_hash_key: Arc<InviteHashKey>,
-    /// Replay cache for heartbeat (`node_id`, `ts_ms`) pairs. Stops an
-    /// attacker with a captured heartbeat from keeping a revoked agent
-    /// looking live within the ±60s clock-skew window.
-    pub heartbeat_nonces: NonceCache,
+    /// Replay cache for signed agent → hub requests (`/agent/heartbeat`,
+    /// `/agent/refresh`), keyed by `(node_id, ts_ms)`. The auth domain in
+    /// the signed message is endpoint-specific so cross-replay across
+    /// endpoints is impossible; this cache only catches in-endpoint replays
+    /// within the ±60s freshness window.
+    pub signed_request_nonces: NonceCache,
     /// Replay cache for edge-subscribe (`node_id`, `ts_ms`) pairs. A captured
     /// `Authorization` header for `GET /v1/routes/subscribe` would otherwise
     /// replay for the full freshness window and let an attacker open a
@@ -109,6 +128,8 @@ pub struct AppState {
     /// live in their own namespace at the OS so a separate lock keeps the
     /// fast path independent of TCP claims.
     pub udp_port_lock: Mutex<()>,
+    pub signer: Arc<HubSigner>,
+    pub refresh_limiter: RefreshLimiter,
 }
 
 impl AppState {
@@ -234,6 +255,7 @@ fn signed_public_routes() -> Router<Arc<AppState>> {
         .route("/v1/entries", post(entries::post_entry))
         .route("/v1/tenants/{id}/entries", get(entries::get_tenant_entries))
         .route("/v1/agent/heartbeat", post(agent_heartbeat::post_heartbeat))
+        .route("/v1/agent/refresh", post(agent_refresh::post_refresh))
         .route("/v1/routes/subscribe", get(subscribe::routes_subscribe))
 }
 

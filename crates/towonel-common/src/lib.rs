@@ -1,9 +1,11 @@
 pub mod auth;
 pub mod config_entry;
+pub mod edge_cred;
 pub mod hostname;
 pub mod hub_error;
 pub mod identity;
 pub mod invite;
+pub mod kek;
 pub mod metrics;
 pub mod ownership;
 pub mod process_metrics;
