@@ -144,6 +144,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     // Heartbeat right after register so liveness is set before the
     // supervisor's first dial.
     let heartbeat = stateless::spawn_heartbeat(ctx.clone(), metrics.clone());
+    let _cred_refresh = stateless::spawn_edge_cred_refresh(ctx.clone());
 
     stateless::publish_hostnames(&ctx).await?;
     let desired_tcp_bindings: Vec<(String, u16)> = agent_config
@@ -187,6 +188,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         &service_map,
         &metrics,
         &shutdown,
+        &ctx.edge_cred,
     );
     tokio::select! {
         () = towonel_common::shutdown::shutdown_signal() => {}

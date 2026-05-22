@@ -43,6 +43,113 @@ pub fn verify_edge_cred(pq_pubkey: &PqPublicKey, cred_cbor: &[u8], sig: &EdgeCre
     verify_pq_signature(pq_pubkey, cred_cbor, sig)
 }
 
+pub const CONTROL_OPCODE_AUTHENTICATE: u8 = 0x01;
+
+/// Wire shape after `CONTROL_PREFIX`:
+/// `opcode:u8 || kid:u32_BE || cred_len:u32_BE || cred || sig_len:u32_BE || sig`.
+#[derive(Debug)]
+pub struct AuthFrame {
+    pub kid: Kid,
+    pub cred_cbor: Vec<u8>,
+    pub sig: EdgeCredSig,
+}
+
+impl AuthFrame {
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + 4 + 4 + self.cred_cbor.len() + 4 + PQ_SIGNATURE_LEN);
+        buf.push(CONTROL_OPCODE_AUTHENTICATE);
+        buf.extend_from_slice(&self.kid.to_be_bytes());
+        buf.extend_from_slice(&u32_be(self.cred_cbor.len()));
+        buf.extend_from_slice(&self.cred_cbor);
+        buf.extend_from_slice(&u32_be(self.sig.len()));
+        buf.extend_from_slice(&self.sig);
+        buf
+    }
+
+    pub fn decode(frame: &[u8]) -> anyhow::Result<Self> {
+        let mut cur = Cursor::new(frame);
+        let opcode = cur.read_u8()?;
+        if opcode != CONTROL_OPCODE_AUTHENTICATE {
+            anyhow::bail!("expected Authenticate opcode, got {opcode:#x}");
+        }
+        let kid = cur.read_u32_be()?;
+        let cred_len = cur.read_u32_be()? as usize;
+        let cred_cbor = cur.read_bytes(cred_len)?.to_vec();
+        let sig_len = cur.read_u32_be()? as usize;
+        if sig_len != PQ_SIGNATURE_LEN {
+            anyhow::bail!("sig_len {sig_len} != {PQ_SIGNATURE_LEN}");
+        }
+        let sig_bytes = cur.read_bytes(sig_len)?;
+        let sig: EdgeCredSig = sig_bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("sig length mismatch"))?;
+        if !cur.is_at_end() {
+            anyhow::bail!("trailing bytes after auth frame");
+        }
+        Ok(Self {
+            kid,
+            cred_cbor,
+            sig,
+        })
+    }
+}
+
+fn u32_be(n: usize) -> [u8; 4] {
+    // Edge caps the whole frame at 64 KiB long before u32::MAX matters.
+    u32::try_from(n).unwrap_or(u32::MAX).to_be_bytes()
+}
+
+struct Cursor<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Cursor<'a> {
+    const fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn read_u8(&mut self) -> anyhow::Result<u8> {
+        let b = self
+            .buf
+            .get(self.pos)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("auth frame: unexpected end at u8"))?;
+        self.pos += 1;
+        Ok(b)
+    }
+
+    fn read_u32_be(&mut self) -> anyhow::Result<u32> {
+        let bytes = self
+            .buf
+            .get(self.pos..self.pos + 4)
+            .ok_or_else(|| anyhow::anyhow!("auth frame: unexpected end at u32"))?;
+        let arr: [u8; 4] = bytes
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("auth frame: u32 slice"))?;
+        self.pos += 4;
+        Ok(u32::from_be_bytes(arr))
+    }
+
+    fn read_bytes(&mut self, n: usize) -> anyhow::Result<&'a [u8]> {
+        let end = self
+            .pos
+            .checked_add(n)
+            .ok_or_else(|| anyhow::anyhow!("auth frame: length overflow"))?;
+        let slice = self
+            .buf
+            .get(self.pos..end)
+            .ok_or_else(|| anyhow::anyhow!("auth frame: unexpected end at {n}-byte payload"))?;
+        self.pos = end;
+        Ok(slice)
+    }
+
+    const fn is_at_end(&self) -> bool {
+        self.pos == self.buf.len()
+    }
+}
+
 mod serde_tenant_id_bytes {
     use super::TenantId;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -96,6 +203,58 @@ mod tests {
         let bytes = cred.to_cbor().unwrap();
         let sig = kp.sign(&bytes);
         assert!(verify_edge_cred(kp.public_key(), &bytes, &sig));
+    }
+
+    #[test]
+    fn auth_frame_round_trip() {
+        let cred = sample_cred();
+        let cred_cbor = cred.to_cbor().unwrap();
+        let sig = [9u8; PQ_SIGNATURE_LEN];
+        let original = AuthFrame {
+            kid: 7,
+            cred_cbor: cred_cbor.clone(),
+            sig,
+        };
+        let bytes = original.encode();
+        let decoded = AuthFrame::decode(&bytes).unwrap();
+        assert_eq!(decoded.kid, 7);
+        assert_eq!(decoded.cred_cbor, cred_cbor);
+        assert_eq!(decoded.sig, sig);
+    }
+
+    #[test]
+    fn auth_frame_rejects_wrong_opcode() {
+        let mut buf = AuthFrame {
+            kid: 1,
+            cred_cbor: vec![0; 10],
+            sig: [0u8; PQ_SIGNATURE_LEN],
+        }
+        .encode();
+        buf[0] = 0x99;
+        AuthFrame::decode(&buf).unwrap_err();
+    }
+
+    #[test]
+    fn auth_frame_rejects_truncated() {
+        let buf = AuthFrame {
+            kid: 1,
+            cred_cbor: vec![0; 10],
+            sig: [0u8; PQ_SIGNATURE_LEN],
+        }
+        .encode();
+        AuthFrame::decode(&buf[..buf.len() - 1]).unwrap_err();
+    }
+
+    #[test]
+    fn auth_frame_rejects_trailing_bytes() {
+        let mut buf = AuthFrame {
+            kid: 1,
+            cred_cbor: vec![0; 10],
+            sig: [0u8; PQ_SIGNATURE_LEN],
+        }
+        .encode();
+        buf.push(0xAA);
+        AuthFrame::decode(&buf).unwrap_err();
     }
 
     #[test]

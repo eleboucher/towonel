@@ -58,7 +58,7 @@ const MAX_CLOCK_SKEW_MS: u64 = 60_000;
 
 /// Bound on the replay-nonce cache. Entries are also evicted by TTL; the cap
 /// only matters under extreme traffic.
-const MAX_NONCE_ENTRIES: u64 = 10_000;
+pub const MAX_NONCE_ENTRIES: u64 = 10_000;
 
 /// Replay-protection cache for `(node_id, ts_ms)` pairs. TTL is 2× the
 /// freshness window so any in-window retry is caught.

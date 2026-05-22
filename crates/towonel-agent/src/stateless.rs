@@ -1,3 +1,8 @@
+#![expect(
+    clippy::map_err_ignore,
+    reason = "TryInto length-mismatch errors carry no info beyond our custom message"
+)]
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,6 +59,19 @@ pub struct EdgeContact {
     pub addrs: Vec<String>,
 }
 
+/// Held under `ArcSwap` so the refresh task can replace it atomically
+/// while edge supervisors read it.
+#[derive(Clone, Debug)]
+pub struct CachedEdgeCred {
+    pub kid: u32,
+    /// CBOR bytes kept verbatim so we re-present what the hub signed.
+    pub cred_cbor: Vec<u8>,
+    /// Detached ML-DSA-65 signature over `cred_cbor`.
+    pub sig: [u8; towonel_common::identity::PQ_SIGNATURE_LEN],
+    /// Mirror of `cred.not_after_ms` so the refresh task skips a CBOR decode.
+    pub not_after_ms: u64,
+}
+
 /// Boot-time context derived from the invite token + hub bootstrap response.
 /// Shared across the register + heartbeat paths and dropped when the agent
 /// shuts down.
@@ -66,6 +84,9 @@ pub struct BootstrapContext {
     pub edge_contacts: Vec<EdgeContact>,
     pub client: reqwest::Client,
     pub hostnames: Vec<String>,
+    /// Empty against a legacy hub that doesn't mint `EdgeCred`s. Shared
+    /// between the refresh task and edge supervisors via `Arc`.
+    pub edge_cred: Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
 }
 
 impl BootstrapContext {
@@ -94,7 +115,7 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         .build()
         .context("failed to build reqwest client")?;
 
-    let resp = post_bootstrap(&client, &token).await?;
+    let resp = post_bootstrap(&client, &token, &agent_kp.id()).await?;
 
     let returned_tenant_id: TenantId = resp
         .tenant_id
@@ -142,6 +163,14 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         "bootstrap complete"
     );
 
+    let edge_cred = Arc::new(
+        resp.cached_cred()
+            .context("decoding edge_cred from bootstrap")?
+            .map_or_else(arc_swap::ArcSwapOption::empty, |c| {
+                arc_swap::ArcSwapOption::from(Some(Arc::new(c)))
+            }),
+    );
+
     Ok(BootstrapContext {
         tenant_kp,
         agent_kp,
@@ -151,6 +180,7 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         edge_contacts,
         client,
         hostnames: resp.hostnames,
+        edge_cred,
     })
 }
 
@@ -522,6 +552,109 @@ pub async fn publish_udp_services(
     publish_services(ctx, desired, ServiceProtocol::Udp).await
 }
 
+/// Tighter than a full TTL so a transient hub blip doesn't extend exposure.
+const REFRESH_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+pub fn spawn_edge_cred_refresh(ctx: Arc<BootstrapContext>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let Some(current) = ctx.edge_cred.load_full() else {
+                // Legacy hub didn't mint a cred; re-check in case that changes.
+                tokio::time::sleep(REFRESH_RETRY_DELAY).await;
+                continue;
+            };
+            let now = towonel_common::time::now_ms();
+            let delay = compute_refresh_delay(current.not_after_ms, now);
+            tokio::time::sleep(delay).await;
+            match call_refresh(&ctx).await {
+                Ok(new_cred) => {
+                    info!(kid = new_cred.kid, "EdgeCred refreshed");
+                    ctx.edge_cred.store(Some(Arc::new(new_cred)));
+                }
+                Err(e) => {
+                    warn!(error = %e, "EdgeCred refresh failed; retrying");
+                    tokio::time::sleep(REFRESH_RETRY_DELAY).await;
+                }
+            }
+        }
+    })
+}
+
+/// 50–75 % of remaining TTL ± 5 min jitter. Integer math so concurrent
+/// agents don't all wake at the same fractional moment.
+fn compute_refresh_delay(not_after_ms: u64, now_ms: u64) -> Duration {
+    let remaining_ms = not_after_ms.saturating_sub(now_ms);
+    if remaining_ms == 0 {
+        return Duration::ZERO;
+    }
+    let pct = fastrand::u64(50..=75);
+    let target_ms = remaining_ms.saturating_mul(pct) / 100;
+    let jitter_ms = fastrand::i64(-300_000..=300_000);
+    let signed = i64::try_from(target_ms)
+        .unwrap_or(i64::MAX)
+        .saturating_add(jitter_ms)
+        .max(0);
+    Duration::from_millis(u64::try_from(signed).unwrap_or(0))
+}
+
+async fn call_refresh(ctx: &BootstrapContext) -> anyhow::Result<CachedEdgeCred> {
+    #[derive(Serialize)]
+    struct Body {
+        tenant_id: TenantId,
+        agent_id: AgentId,
+    }
+    #[derive(Deserialize)]
+    struct RefreshResp {
+        kid: u32,
+        edge_cred_b64: String,
+        edge_cred_sig_b64: String,
+    }
+
+    let body = Body {
+        tenant_id: ctx.tenant_id,
+        agent_id: ctx.agent_id(),
+    };
+    let mut buf = Vec::new();
+    ciborium::into_writer(&body, &mut buf).context("encode refresh body")?;
+
+    let auth = sign_auth_header(
+        ctx.agent_kp.signing_key(),
+        "towonel/agent-refresh/v1",
+        towonel_common::time::now_ms(),
+        &buf,
+    );
+    let url = format!("{}/v1/agent/refresh", ctx.hub_url.trim_end_matches('/'));
+    let resp = ctx
+        .client
+        .post(&url)
+        .header(reqwest::header::AUTHORIZATION, auth)
+        .header(reqwest::header::CONTENT_TYPE, CBOR_CONTENT_TYPE)
+        .body(buf)
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let body = check_response(resp).await?;
+    let parsed: RefreshResp =
+        serde_json::from_slice(&body).context("hub returned malformed refresh response")?;
+    let cred_cbor = B64
+        .decode(&parsed.edge_cred_b64)
+        .context("edge_cred_b64 invalid base64url")?;
+    let sig_vec = B64
+        .decode(&parsed.edge_cred_sig_b64)
+        .context("edge_cred_sig_b64 invalid base64url")?;
+    let sig: [u8; towonel_common::identity::PQ_SIGNATURE_LEN] = sig_vec
+        .try_into()
+        .map_err(|_| anyhow!("edge_cred_sig has wrong length"))?;
+    let decoded = towonel_common::edge_cred::EdgeCred::from_cbor(&cred_cbor)
+        .context("edge_cred_b64 is not a valid EdgeCred CBOR")?;
+    Ok(CachedEdgeCred {
+        kid: parsed.kid,
+        cred_cbor,
+        sig,
+        not_after_ms: decoded.not_after_ms,
+    })
+}
+
 /// Spawn the heartbeat task. Returns the `JoinHandle` so the caller can
 /// abort on shutdown (not strictly necessary -- the hub reaps stale
 /// heartbeats -- but keeps shutdown logs clean).
@@ -596,21 +729,58 @@ struct BootstrapResponse {
     edge_node_id: Option<EndpointId>,
     #[serde(default)]
     iroh_endpoints: Vec<IrohEndpoint>,
+    #[serde(flatten, default)]
+    edge_cred: Option<EdgeCredWire>,
+}
+
+#[derive(Deserialize)]
+struct EdgeCredWire {
+    kid: u32,
+    edge_cred_b64: String,
+    edge_cred_sig_b64: String,
+}
+
+impl BootstrapResponse {
+    fn cached_cred(&self) -> anyhow::Result<Option<CachedEdgeCred>> {
+        let Some(wire) = self.edge_cred.as_ref() else {
+            return Ok(None);
+        };
+        let cred_cbor = B64
+            .decode(&wire.edge_cred_b64)
+            .context("edge_cred_b64 invalid base64url")?;
+        let sig_vec = B64
+            .decode(&wire.edge_cred_sig_b64)
+            .context("edge_cred_sig_b64 invalid base64url")?;
+        let sig: [u8; towonel_common::identity::PQ_SIGNATURE_LEN] = sig_vec
+            .try_into()
+            .map_err(|_| anyhow!("edge_cred_sig has wrong length"))?;
+        let decoded = towonel_common::edge_cred::EdgeCred::from_cbor(&cred_cbor)
+            .context("edge_cred_b64 is not a valid EdgeCred CBOR")?;
+        Ok(Some(CachedEdgeCred {
+            kid: wire.kid,
+            cred_cbor,
+            sig,
+            not_after_ms: decoded.not_after_ms,
+        }))
+    }
 }
 
 async fn post_bootstrap(
     client: &reqwest::Client,
     token: &InviteToken,
+    agent_id: &AgentId,
 ) -> anyhow::Result<BootstrapResponse> {
     #[derive(Serialize)]
     struct BootstrapRequest {
         invite_id: String,
         invite_secret: String,
+        agent_id: String,
     }
 
     let req = BootstrapRequest {
         invite_id: B64.encode(token.invite_id),
         invite_secret: B64.encode(token.invite_secret),
+        agent_id: agent_id.to_string(),
     };
     let url = format!("{}/v1/bootstrap", token.hub_url.trim_end_matches('/'));
     let resp = client

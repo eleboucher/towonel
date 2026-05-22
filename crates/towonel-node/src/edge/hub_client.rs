@@ -1,5 +1,6 @@
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::Arc;
+use std::sync::{Mutex, OnceLock};
 
 use tokio::sync::broadcast;
 use tokio_stream::Stream;
@@ -15,6 +16,16 @@ pub type RouteStream = Pin<Box<dyn Stream<Item = RouteTable> + Send + 'static>>;
 /// `(status_byte, response_body)` written back on the same QUIC stream.
 pub type ControlResponse = (u8, Vec<u8>);
 
+/// Hub-side handler. Until the cell is set, control frames get
+/// `NOT_IMPLEMENTED` — gives the boot sequence room to wire `AppState`
+/// after the edge has already started accepting streams.
+#[async_trait::async_trait]
+pub trait ControlFrameHandler: Send + Sync {
+    async fn handle(&self, frame: Vec<u8>) -> anyhow::Result<ControlResponse>;
+}
+
+pub type ControlHandlerCell = Arc<OnceLock<Arc<dyn ControlFrameHandler>>>;
+
 #[async_trait::async_trait]
 pub trait HubClient: Send + Sync {
     fn subscribe_routes(&self) -> RouteStream;
@@ -26,14 +37,16 @@ pub trait HubClient: Send + Sync {
 pub struct InProcessHubClient {
     rx: Mutex<Option<broadcast::Receiver<RouteTable>>>,
     tx: broadcast::Sender<RouteTable>,
+    control_handler: ControlHandlerCell,
 }
 
 impl InProcessHubClient {
-    pub fn new(tx: broadcast::Sender<RouteTable>) -> Self {
+    pub fn new(tx: broadcast::Sender<RouteTable>, control_handler: ControlHandlerCell) -> Self {
         let rx = tx.subscribe();
         Self {
             rx: Mutex::new(Some(rx)),
             tx,
+            control_handler,
         }
     }
 }
@@ -58,8 +71,11 @@ impl HubClient for InProcessHubClient {
         }))
     }
 
-    async fn handle_control_frame(&self, _frame: Vec<u8>) -> anyhow::Result<ControlResponse> {
-        Ok((CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new()))
+    async fn handle_control_frame(&self, frame: Vec<u8>) -> anyhow::Result<ControlResponse> {
+        match self.control_handler.get() {
+            Some(handler) => handler.handle(frame).await,
+            None => Ok((CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new())),
+        }
     }
 }
 
@@ -70,7 +86,7 @@ mod tests {
     #[tokio::test]
     async fn replays_pre_subscribe_broadcast() {
         let (tx, _) = broadcast::channel(8);
-        let client = InProcessHubClient::new(tx.clone());
+        let client = InProcessHubClient::new(tx.clone(), Arc::new(OnceLock::new()));
 
         tx.send(RouteTable::from_raw(std::collections::HashMap::new()))
             .unwrap();
@@ -85,7 +101,7 @@ mod tests {
     #[tokio::test]
     async fn handle_control_frame_returns_not_implemented_by_default() {
         let (tx, _) = broadcast::channel(8);
-        let client = InProcessHubClient::new(tx);
+        let client = InProcessHubClient::new(tx, Arc::new(OnceLock::new()));
         let (status, body) = client
             .handle_control_frame(b"anything".to_vec())
             .await
@@ -97,7 +113,7 @@ mod tests {
     #[tokio::test]
     async fn second_subscribe_only_sees_new_updates() {
         let (tx, _) = broadcast::channel(8);
-        let client = InProcessHubClient::new(tx.clone());
+        let client = InProcessHubClient::new(tx.clone(), Arc::new(OnceLock::new()));
 
         let _consumed = client.subscribe_routes();
         let mut second = client.subscribe_routes();
