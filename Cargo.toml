@@ -91,6 +91,7 @@ members = [
   "crates/towonel-common",
   "crates/towonel-agent",
   "crates/towonel-node",
+  "crates/e2e-runner",
 ]
 
 [profile.release]
