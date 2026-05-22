@@ -95,3 +95,9 @@ jobs:
         with:
           tool: taplo-cli
       - run: taplo fmt --check
+
+  e2e:
+    runs-on: docker
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - run: make e2e

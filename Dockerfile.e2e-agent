@@ -1,0 +1,26 @@
+# syntax=docker/dockerfile:1.24
+#
+# The production agent image is distroless. This e2e variant rebases on
+# debian-slim so the entrypoint can poll the test-runner's token broker
+# before exec'ing the agent.
+
+FROM rust:1.95-bookworm AS builder
+WORKDIR /app
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY src/ src/
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/app/target,sharing=locked \
+    cargo build --release -p towonel-agent \
+    && cp target/release/towonel-agent /usr/local/bin/towonel-agent
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /usr/local/bin/towonel-agent /usr/local/bin/towonel-agent
+COPY tests/e2e/agent-entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

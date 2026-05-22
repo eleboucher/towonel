@@ -32,9 +32,9 @@ down:
 	docker compose down
 
 e2e:
-	docker compose -f docker-compose.e2e.yml down -v
-	docker compose -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
-	docker compose -f docker-compose.e2e.yml down -v
+	docker compose --env-file .env.e2e -f docker-compose.e2e.yml down -v
+	docker compose --env-file .env.e2e -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
+	docker compose --env-file .env.e2e -f docker-compose.e2e.yml down -v
 
 release:
 	@test -n "$(V)" || (echo "usage: make release V=0.1.0" && exit 1)
@@ -43,4 +43,4 @@ release:
 
 clean:
 	cargo clean
-	docker compose -f docker-compose.e2e.yml down -v 2>/dev/null || true
+	docker compose --env-file .env.e2e -f docker-compose.e2e.yml down -v 2>/dev/null || true

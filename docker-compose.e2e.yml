@@ -1,0 +1,98 @@
+name: towonel-e2e
+
+services:
+  hub-node:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    container_name: towonel-e2e-hub
+    environment:
+      RUST_LOG: info
+      TOWONEL_IDENTITY_KEY_PATH: /data/node.key
+      TOWONEL_HUB_ENABLED: "true"
+      TOWONEL_HUB_DB_DRIVER: sqlite
+      TOWONEL_HUB_DB_DSN: /data/hub.sqlite
+      TOWONEL_INVITE_HASH_KEY: ${E2E_INVITE_HASH_KEY}
+      TOWONEL_HUB_LISTEN_ADDR: 0.0.0.0:8443
+      TOWONEL_EDGE_LISTEN_ADDR: 0.0.0.0:4443
+      TOWONEL_EDGE_IROH_PORT: "51820"
+      TOWONEL_EDGE_ADVERTISED_ADDRESSES: hub-node:4443
+      TOWONEL_EDGE_PROXY_PROTOCOL: "true"
+      TOWONEL_HUB_PUBLIC_URL: http://hub-node:8443
+    volumes:
+      - hub-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--max-time", "2", "-fsS", "http://127.0.0.1:8443/v1/health"]
+      interval: 2s
+      timeout: 3s
+      start_period: 5s
+      retries: 30
+
+  origin:
+    image: alpine:3.21
+    container_name: towonel-e2e-origin
+    command:
+      - sh
+      - -ec
+      - |
+        apk add --no-cache socat openssl >/dev/null
+        socat -d TCP-LISTEN:9000,reuseaddr,fork EXEC:"/bin/cat" &
+        socat -d \
+          OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/certs/origin-tls.pem,key=/certs/origin-tls.key,verify=0 \
+          EXEC:"/bin/cat" &
+        wait
+    volumes:
+      - ./tests/e2e/fixtures:/certs:ro
+    healthcheck:
+      test: ["CMD", "sh", "-c", "nc -z 127.0.0.1 9000"]
+      interval: 2s
+      timeout: 2s
+      start_period: 3s
+      retries: 10
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-runner
+    container_name: towonel-e2e-runner
+    depends_on:
+      hub-node:
+        condition: service_healthy
+      origin:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info,e2e_runner=debug
+      E2E_HUB_BASE: http://hub-node:8443
+      E2E_EDGE_HOST: hub-node
+      E2E_EDGE_PORT: "4443"
+      E2E_OPERATOR_KEY_FILE: /hub-data/operator.key
+      E2E_TENANT_HOSTNAME: ${E2E_TENANT_HOSTNAME}
+      E2E_ORIGIN_HOST: origin
+      E2E_ORIGIN_TCP_PORT: "9000"
+      E2E_ORIGIN_TLS_PORT: "9443"
+      E2E_BROKER_LISTEN: 0.0.0.0:7777
+      E2E_AGENT_CONTAINER: towonel-e2e-agent
+      E2E_LIVENESS_BUDGET_SECS: "150"
+    volumes:
+      - ./tests/e2e/fixtures:/fixtures:ro
+      - hub-data:/hub-data:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-agent
+    container_name: towonel-e2e-agent
+    depends_on:
+      test-runner:
+        condition: service_started
+    environment:
+      RUST_LOG: info
+      BROKER_URL: http://test-runner:7777/token
+      TOWONEL_AGENT_SERVICES: |
+        [{"hostname":"app.e2e.local","origin":"origin:9443","proxy_protocol":"none"}]
+      TOWONEL_AGENT_TCP_SERVICES: |
+        [{"name":"echo","origin":"origin:9000","listen_port":9000}]
+
+volumes:
+  hub-data:

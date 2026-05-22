@@ -1,0 +1,25 @@
+[package]
+name = "e2e-runner"
+version.workspace = true
+edition = "2024"
+publish = false
+
+[dependencies]
+towonel-common = { path = "../towonel-common" }
+anyhow = { workspace = true }
+ciborium = { workspace = true }
+ppp = { workspace = true }
+bollard = "0.18"
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+axum = { workspace = true }
+
+[lints]
+workspace = true
