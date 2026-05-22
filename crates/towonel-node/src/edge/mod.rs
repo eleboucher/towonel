@@ -20,9 +20,10 @@ use towonel_common::http_host::extract_host_header;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
-    CONTROL_STATUS_NOT_IMPLEMENTED, COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX,
-    UDP_ROUTE_PREFIX, forward_quic_to_writer, read_control_prefix, read_datagram_frame,
-    write_control_status, write_datagram_frame, write_handshake,
+    CONTROL_STATUS_INTERNAL_ERROR, CONTROL_STATUS_INVALID, CONTROL_STATUS_NOT_IMPLEMENTED,
+    COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX,
+    forward_quic_to_writer, read_control_prefix, read_datagram_frame, write_control_status,
+    write_datagram_frame, write_handshake,
 };
 
 use self::acme::AcmeManager;
@@ -208,8 +209,9 @@ impl Edge {
             let sessions = Arc::clone(&self.sessions);
             let router = Arc::clone(&self.router);
             let metrics = self.metrics.clone();
+            let hub_client = self.hub_client.clone();
             tasks.push(tokio::spawn(iroh_accept_loop(
-                endpoint, sessions, router, metrics,
+                endpoint, sessions, router, metrics, hub_client,
             )));
         }
 
@@ -244,6 +246,7 @@ async fn iroh_accept_loop(
     sessions: Arc<SessionRegistry>,
     router: Arc<Router>,
     metrics: EdgeMetrics,
+    hub_client: Option<Arc<dyn HubClient>>,
 ) {
     info!("edge iroh accept loop ready");
     loop {
@@ -254,8 +257,11 @@ async fn iroh_accept_loop(
         let sessions = Arc::clone(&sessions);
         let router = Arc::clone(&router);
         let metrics = metrics.clone();
+        let hub_client = hub_client.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_inbound_agent(incoming, sessions, router, metrics).await {
+            if let Err(e) =
+                handle_inbound_agent(incoming, sessions, router, metrics, hub_client).await
+            {
                 debug!(error = %e, "inbound agent connection ended with error");
             }
         });
@@ -267,6 +273,7 @@ async fn handle_inbound_agent(
     sessions: Arc<SessionRegistry>,
     router: Arc<Router>,
     metrics: EdgeMetrics,
+    hub_client: Option<Arc<dyn HubClient>>,
 ) -> anyhow::Result<()> {
     let conn = match incoming.await {
         Ok(c) => c,
@@ -299,7 +306,8 @@ async fn handle_inbound_agent(
         let conn = conn.clone();
         async move {
             while let Ok((send, recv)) = conn.accept_bi().await {
-                tokio::spawn(handle_agent_stream(send, recv, agent_id));
+                let hub_client = hub_client.clone();
+                tokio::spawn(handle_agent_stream(send, recv, agent_id, hub_client));
             }
         }
     };
@@ -312,36 +320,100 @@ async fn handle_inbound_agent(
     Ok(())
 }
 
+const CONTROL_FRAME_MAX_BYTES: usize = 64 * 1024;
+/// 10 s — caps slowloris dribblers; generous for a 64 KiB frame.
+const CONTROL_STREAM_TIMEOUT: Duration = Duration::from_secs(10);
+const CONTROL_RESET_BODY_WRITE_FAILED: u32 = 1;
+
 async fn handle_agent_stream(
+    send: iroh::endpoint::SendStream,
+    recv: iroh::endpoint::RecvStream,
+    agent_id: iroh::EndpointId,
+    hub_client: Option<Arc<dyn HubClient>>,
+) {
+    match tokio::time::timeout(
+        CONTROL_STREAM_TIMEOUT,
+        run_control_stream(send, recv, agent_id, hub_client),
+    )
+    .await
+    {
+        Ok(()) => {}
+        Err(_) => {
+            warn!(
+                agent = %agent_id.fmt_short(),
+                timeout_secs = CONTROL_STREAM_TIMEOUT.as_secs(),
+                "control stream exceeded deadline; dropping"
+            );
+        }
+    }
+}
+
+async fn run_control_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     agent_id: iroh::EndpointId,
+    hub_client: Option<Arc<dyn HubClient>>,
 ) {
-    match read_control_prefix(&mut recv).await {
-        Ok(()) => {
-            if let Err(e) = write_control_status(&mut send, CONTROL_STATUS_NOT_IMPLEMENTED).await {
-                debug!(
-                    agent = %agent_id.fmt_short(),
-                    error = %e,
-                    "writing control NOT_IMPLEMENTED failed"
-                );
-                return;
-            }
-            if let Err(e) = send.finish() {
-                debug!(
-                    agent = %agent_id.fmt_short(),
-                    error = %e,
-                    "finishing control stream failed"
-                );
-            }
-        }
+    if let Err(e) = read_control_prefix(&mut recv).await {
+        debug!(
+            agent = %agent_id.fmt_short(),
+            error = %e,
+            "agent-initiated stream did not start with CONTROL_PREFIX; dropping"
+        );
+        return;
+    }
+
+    // Agent half-closes its send to mark "request complete"; we read to EOF.
+    let frame = match recv.read_to_end(CONTROL_FRAME_MAX_BYTES).await {
+        Ok(buf) => buf,
         Err(e) => {
-            debug!(
+            warn!(
                 agent = %agent_id.fmt_short(),
                 error = %e,
-                "agent-initiated stream did not start with CONTROL_PREFIX; dropping"
+                cap_bytes = CONTROL_FRAME_MAX_BYTES,
+                "control frame exceeded cap or stream errored"
             );
+            if let Err(e) = write_control_status(&mut send, CONTROL_STATUS_INVALID).await {
+                debug!(agent = %agent_id.fmt_short(), error = %e, "writing INVALID status failed");
+            }
+            if let Err(e) = send.finish() {
+                debug!(agent = %agent_id.fmt_short(), error = %e, "finishing stream after INVALID failed");
+            }
+            return;
         }
+    };
+
+    let (status, body) = match hub_client.as_deref() {
+        Some(client) => match client.handle_control_frame(frame).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                warn!(
+                    agent = %agent_id.fmt_short(),
+                    error = %e,
+                    "hub control handler returned error"
+                );
+                (CONTROL_STATUS_INTERNAL_ERROR, Vec::new())
+            }
+        },
+        None => (CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new()),
+    };
+
+    if let Err(e) = write_control_status(&mut send, status).await {
+        debug!(agent = %agent_id.fmt_short(), error = %e, "writing control status failed");
+        return;
+    }
+    if !body.is_empty()
+        && let Err(e) = send.write_all(&body).await
+    {
+        debug!(agent = %agent_id.fmt_short(), error = %e, "writing control response body failed");
+        // Reset (not finish) so the agent distinguishes truncation from EOF.
+        if let Err(e) = send.reset(CONTROL_RESET_BODY_WRITE_FAILED.into()) {
+            debug!(agent = %agent_id.fmt_short(), error = %e, "resetting stream failed");
+        }
+        return;
+    }
+    if let Err(e) = send.finish() {
+        debug!(agent = %agent_id.fmt_short(), error = %e, "finishing control stream failed");
     }
 }
 

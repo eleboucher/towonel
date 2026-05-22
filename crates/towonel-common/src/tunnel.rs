@@ -27,6 +27,9 @@ pub const CONTROL_PREFIX: &str = "ctrl:";
 
 pub const CONTROL_STATUS_OK: u8 = 0;
 pub const CONTROL_STATUS_NOT_IMPLEMENTED: u8 = 1;
+pub const CONTROL_STATUS_INVALID: u8 = 2;
+/// Distinct from `NOT_IMPLEMENTED` so agent clients retry instead of giving up.
+pub const CONTROL_STATUS_INTERNAL_ERROR: u8 = 3;
 
 /// Cap on individual UDP datagram length carried over the QUIC pipe. Matches
 /// the IPv4 datagram limit; anything larger is a sender configuration error.
