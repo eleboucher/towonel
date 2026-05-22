@@ -58,7 +58,6 @@ impl TestHub {
             metrics: super::metrics::HubMetrics::new(),
             invite_hash_key: std::sync::Arc::new(towonel_common::invite::InviteHashKey::generate()),
             signed_request_nonces: new_nonce_cache(),
-            edge_sub_nonces: new_nonce_cache(),
             tcp_port_lock: tokio::sync::Mutex::new(()),
             udp_port_lock: tokio::sync::Mutex::new(()),
             signer,

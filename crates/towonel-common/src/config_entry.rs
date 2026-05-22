@@ -316,10 +316,6 @@ mod tests {
                 hostname: "test.example.eu".into(),
                 mode: TlsMode::Passthrough,
             },
-            ConfigOp::SetHostnameTls {
-                hostname: "test.example.eu".into(),
-                mode: TlsMode::Terminate,
-            },
             ConfigOp::UpsertTcpService {
                 service: "forgejo-ssh".into(),
                 listen_port: 2222,

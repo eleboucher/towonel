@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use ipnet::IpNet;
 use serde::Deserialize;
-use towonel_common::invite::EdgeInviteToken;
 
 /// Which database driver the hub talks to. `sqlite` is the single-node
 /// default; `postgres` is for multi-node deployments.
@@ -104,32 +103,18 @@ pub struct NodeConfig {
 }
 
 #[derive(Debug)]
-pub enum IdentitySource {
-    KeyFile(PathBuf),
-    /// Seed extracted from `TOWONEL_EDGE_INVITE_TOKEN`. Wrapped in
-    /// [`zeroize::Zeroizing`] so the plaintext bytes are wiped when the
-    /// config is dropped.
-    EdgeInviteSeed(zeroize::Zeroizing<[u8; 32]>),
-}
-
-#[derive(Debug)]
 pub struct IdentityConfig {
-    pub source: IdentitySource,
+    pub key_path: PathBuf,
 }
 
 impl IdentityConfig {
     pub async fn load_secret_key_async(&self) -> anyhow::Result<iroh::SecretKey> {
-        match &self.source {
-            IdentitySource::KeyFile(path) => {
-                let path = path.clone();
-                tokio::task::spawn_blocking(move || {
-                    towonel_common::identity::load_or_generate_secret_key(&path)
-                })
-                .await
-                .context("identity-load task panicked")?
-            }
-            IdentitySource::EdgeInviteSeed(seed) => Ok(iroh::SecretKey::from_bytes(seed)),
-        }
+        let path = self.key_path.clone();
+        tokio::task::spawn_blocking(move || {
+            towonel_common::identity::load_or_generate_secret_key(&path)
+        })
+        .await
+        .context("identity-load task panicked")?
     }
 }
 
@@ -153,6 +138,9 @@ pub struct HubConfig {
     pub link_listen_addr: Option<String>,
     /// Must match `TOWONEL_EDGE_HUB_LINK_PSK` on every edge.
     pub link_psk: Option<std::sync::Arc<[u8; 32]>>,
+    /// When set, the hub serves its API over TLS-ALPN-01 ACME on
+    /// `listen_addr`. Operators set `TOWONEL_HUB_TLS_ACME_EMAIL` to enable.
+    pub tls: Option<TlsConfig>,
 }
 
 /// Default UDP port for the iroh QUIC socket. Operators rarely need
@@ -163,18 +151,13 @@ pub const DEFAULT_IROH_PORT: u16 = 51820;
 pub struct EdgeConfig {
     pub enabled: bool,
     pub listen_addr: String,
-    pub http_listen_addr: String,
     pub health_listen_addr: String,
-    pub hub_url: Option<String>,
-    /// When set, the edge runs route subscription + session events over
-    /// the hub link instead of the legacy SSE federation path.
     pub hub_link_addr: Option<String>,
     pub hub_link_psk: Option<std::sync::Arc<[u8; 32]>>,
     pub public_addresses: Vec<String>,
     /// Pinned UDP port for the iroh QUIC socket. Operators forward this
     /// port through their firewall so agents can reach the edge.
     pub iroh_port: u16,
-    pub tls: Option<TlsConfig>,
     /// Number of TCP accept workers sharing `listen_addr` via `SO_REUSEPORT`
     /// on Unix. Raise to scale accept across cores under bursty load.
     pub listen_workers: usize,
@@ -269,7 +252,6 @@ struct RawEnv {
     data_dir: Option<PathBuf>,
 
     identity_key_path: Option<PathBuf>,
-    edge_invite_token: Option<String>,
 
     invite_hash_key: Option<String>,
     invite_hash_key_path: Option<PathBuf>,
@@ -291,12 +273,7 @@ struct RawEnv {
 
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
-    edge_http_listen_addr: Option<String>,
     edge_health_listen_addr: Option<String>,
-    edge_hub_url: Option<String>,
-    /// Deprecated alias for `edge_hub_url`; kept so existing deployments
-    /// still boot. Prefer `TOWONEL_EDGE_HUB_URL` (no `S`).
-    edge_hub_urls: Option<String>,
     edge_hub_link_addr: Option<String>,
     edge_hub_link_psk: Option<String>,
     /// `host:port` advertised to agents/clients — the reverse proxy's
@@ -308,9 +285,10 @@ struct RawEnv {
     edge_listen_workers: Option<usize>,
     edge_proxy_protocol: Option<bool>,
     edge_proxy_protocol_trusted: Option<String>,
-    edge_tls_cert_dir: Option<PathBuf>,
-    edge_tls_acme_email: Option<String>,
-    edge_tls_acme_staging: Option<bool>,
+
+    hub_tls_cert_dir: Option<PathBuf>,
+    hub_tls_acme_email: Option<String>,
+    hub_tls_acme_staging: Option<bool>,
 
     tenants: Option<String>,
 }
@@ -320,9 +298,7 @@ impl NodeConfig {
     /// (`TOWONEL_TENANTS`) are JSON. The README lists every knob.
     pub fn load() -> anyhow::Result<Self> {
         let raw: RawEnv = envy::prefixed("TOWONEL_").from_env()?;
-        let c = Self::from_raw(raw)?;
-        c.validate()?;
-        Ok(c)
+        Self::from_raw(raw)
     }
 
     #[expect(
@@ -330,11 +306,10 @@ impl NodeConfig {
         reason = "single linear flat-env destructure; splitting hides which fields feed which struct"
     )]
     fn from_raw(r: RawEnv) -> anyhow::Result<Self> {
-        let tls = build_tls(&r);
+        let hub_tls = build_hub_tls(&r);
         let RawEnv {
             data_dir,
             identity_key_path,
-            edge_invite_token,
             invite_hash_key,
             invite_hash_key_path,
             hub_kek,
@@ -352,10 +327,7 @@ impl NodeConfig {
             hub_link_psk,
             edge_enabled,
             edge_listen_addr,
-            edge_http_listen_addr,
             edge_health_listen_addr,
-            edge_hub_url,
-            edge_hub_urls,
             edge_hub_link_addr,
             edge_hub_link_psk,
             edge_advertised_addresses,
@@ -368,34 +340,15 @@ impl NodeConfig {
             ..
         } = r;
 
-        let edge_invite = edge_invite_token
-            .as_deref()
-            .map(|raw| {
-                EdgeInviteToken::decode(raw.trim())
-                    .map_err(|e| anyhow::anyhow!("invalid TOWONEL_EDGE_INVITE_TOKEN: {e}"))
-            })
-            .transpose()?;
-
-        let identity_key_path =
-            identity_key_path.or_else(|| data_dir.as_ref().map(|d| d.join("node.key")));
-
-        let identity = IdentityConfig {
-            source: match (&edge_invite, identity_key_path) {
-                (Some(token), _) => {
-                    IdentitySource::EdgeInviteSeed(zeroize::Zeroizing::new(token.node_seed))
-                }
-                (None, Some(path)) => IdentitySource::KeyFile(path),
-                (None, None) => {
-                    anyhow::bail!(
-                        "identity source missing: set TOWONEL_IDENTITY_KEY_PATH, \
-                         TOWONEL_DATA_DIR (defaults to ${{DATA_DIR}}/node.key), \
-                         or provide a TOWONEL_EDGE_INVITE_TOKEN issued by the hub"
-                    );
-                }
-            },
-        };
-
-        let hub_url = resolve_hub_url(edge_hub_url, edge_hub_urls, edge_invite.as_ref());
+        let key_path = identity_key_path
+            .or_else(|| data_dir.as_ref().map(|d| d.join("node.key")))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "identity source missing: set TOWONEL_IDENTITY_KEY_PATH or \
+                     TOWONEL_DATA_DIR (defaults to ${{DATA_DIR}}/node.key)"
+                )
+            })?;
+        let identity = IdentityConfig { key_path };
 
         let hub_link_psk = hub_link_psk
             .as_deref()
@@ -419,6 +372,7 @@ impl NodeConfig {
             hub_kek_path,
             link_listen_addr: hub_link_listen_addr,
             link_psk: hub_link_psk,
+            tls: hub_tls,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -446,15 +400,12 @@ impl NodeConfig {
         let edge = EdgeConfig {
             enabled: edge_enabled.unwrap_or(true),
             listen_addr: edge_listen_addr.unwrap_or_else(|| "0.0.0.0:443".to_string()),
-            http_listen_addr: edge_http_listen_addr.unwrap_or_else(|| "0.0.0.0:80".to_string()),
             health_listen_addr: edge_health_listen_addr
                 .unwrap_or_else(|| "0.0.0.0:9090".to_string()),
-            hub_url,
             hub_link_addr: edge_hub_link_addr,
             hub_link_psk: edge_hub_link_psk,
             public_addresses,
             iroh_port: edge_iroh_port.unwrap_or(DEFAULT_IROH_PORT),
-            tls,
             listen_workers: edge_listen_workers.unwrap_or(1),
             proxy_protocol,
         };
@@ -468,19 +419,12 @@ impl NodeConfig {
             tenants,
         })
     }
-
-    fn validate(&self) -> anyhow::Result<()> {
-        if let Some(url) = &self.edge.hub_url {
-            require_https(url, "hub_url")?;
-        }
-        Ok(())
-    }
 }
 
-fn build_tls(r: &RawEnv) -> Option<TlsConfig> {
-    let any = r.edge_tls_cert_dir.is_some()
-        || r.edge_tls_acme_email.is_some()
-        || r.edge_tls_acme_staging.is_some();
+fn build_hub_tls(r: &RawEnv) -> Option<TlsConfig> {
+    let any = r.hub_tls_cert_dir.is_some()
+        || r.hub_tls_acme_email.is_some()
+        || r.hub_tls_acme_staging.is_some();
     if !any {
         return None;
     }
@@ -489,9 +433,9 @@ fn build_tls(r: &RawEnv) -> Option<TlsConfig> {
         .as_ref()
         .map_or_else(|| PathBuf::from("/data/certs"), |d| d.join("certs"));
     Some(TlsConfig {
-        cert_dir: r.edge_tls_cert_dir.clone().unwrap_or(default_cert_dir),
-        acme_email: r.edge_tls_acme_email.clone(),
-        acme_staging: r.edge_tls_acme_staging.unwrap_or(false),
+        cert_dir: r.hub_tls_cert_dir.clone().unwrap_or(default_cert_dir),
+        acme_email: r.hub_tls_acme_email.clone(),
+        acme_staging: r.hub_tls_acme_staging.unwrap_or(false),
     })
 }
 
@@ -511,6 +455,7 @@ struct HubInputs<'a> {
     hub_kek_path: Option<PathBuf>,
     link_listen_addr: Option<String>,
     link_psk: Option<std::sync::Arc<[u8; 32]>>,
+    tls: Option<TlsConfig>,
     data_dir: Option<&'a Path>,
 }
 
@@ -531,6 +476,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         hub_kek_path,
         link_listen_addr,
         link_psk,
+        tls,
         data_dir,
     } = inputs;
 
@@ -585,6 +531,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         hub_kek,
         link_listen_addr,
         link_psk,
+        tls,
     })
 }
 
@@ -597,24 +544,6 @@ fn parse_psk_hex(raw: &str, label: &str) -> anyhow::Result<[u8; 32]> {
         .try_into()
         .map_err(|_e| anyhow::anyhow!("{label} must be exactly 32 bytes (64 hex chars)"))?;
     Ok(arr)
-}
-
-fn resolve_hub_url(
-    primary: Option<String>,
-    deprecated_alias: Option<String>,
-    edge_invite: Option<&EdgeInviteToken>,
-) -> Option<String> {
-    let explicit = primary
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            let alias = deprecated_alias
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())?;
-            tracing::warn!("TOWONEL_EDGE_HUB_URLS is deprecated; rename to TOWONEL_EDGE_HUB_URL");
-            Some(alias)
-        });
-    explicit.or_else(|| edge_invite.map(|t| t.hub_url.trim_end_matches('/').to_string()))
 }
 
 fn resolve_advertised_addresses(
@@ -660,13 +589,6 @@ fn parse_json_opt<T: serde::de::DeserializeOwned>(
 ) -> anyhow::Result<Option<T>> {
     raw.map(|s| serde_json::from_str::<T>(s).map_err(|e| anyhow::anyhow!("{key}: {e}")))
         .transpose()
-}
-
-fn require_https(url: &str, context: &str) -> anyhow::Result<()> {
-    if !url.starts_with("https://") {
-        anyhow::bail!("{context} must use https://: got {url:?}");
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -816,21 +738,18 @@ mod tests {
         let dir = unique_data_dir("cascade");
         let cfg = NodeConfig::from_raw(RawEnv {
             data_dir: Some(dir.clone()),
-            edge_tls_acme_email: Some("ops@example.com".into()),
+            hub_tls_acme_email: Some("ops@example.com".into()),
             ..base_raw_env(&"11".repeat(32))
         })
         .unwrap();
 
-        match cfg.identity.source {
-            IdentitySource::KeyFile(p) => assert_eq!(p, dir.join("node.key")),
-            IdentitySource::EdgeInviteSeed(_) => panic!("expected KeyFile"),
-        }
+        assert_eq!(cfg.identity.key_path, dir.join("node.key"));
         assert_eq!(
             cfg.hub.database.dsn.as_deref(),
             Some(dir.join("hub.db").to_string_lossy().as_ref()),
         );
         assert_eq!(cfg.hub.operator_api_key_path, dir.join("operator.key"));
-        let tls = cfg.edge.tls.expect("TLS expected when acme_email set");
+        let tls = cfg.hub.tls.expect("TLS expected when acme_email set");
         assert_eq!(tls.cert_dir, dir.join("certs"));
         drop(std::fs::remove_dir_all(&dir));
     }
@@ -843,22 +762,19 @@ mod tests {
             identity_key_path: Some(PathBuf::from("/custom/node.key")),
             hub_db_dsn: Some("/custom/hub.db".into()),
             hub_operator_api_key_path: Some(PathBuf::from("/custom/operator.key")),
-            edge_tls_cert_dir: Some(PathBuf::from("/custom/certs")),
-            edge_tls_acme_email: Some("ops@example.com".into()),
+            hub_tls_cert_dir: Some(PathBuf::from("/custom/certs")),
+            hub_tls_acme_email: Some("ops@example.com".into()),
             ..base_raw_env(&"22".repeat(32))
         })
         .unwrap();
 
-        match cfg.identity.source {
-            IdentitySource::KeyFile(p) => assert_eq!(p, PathBuf::from("/custom/node.key")),
-            IdentitySource::EdgeInviteSeed(_) => panic!("expected KeyFile"),
-        }
+        assert_eq!(cfg.identity.key_path, PathBuf::from("/custom/node.key"));
         assert_eq!(cfg.hub.database.dsn.as_deref(), Some("/custom/hub.db"));
         assert_eq!(
             cfg.hub.operator_api_key_path,
             PathBuf::from("/custom/operator.key")
         );
-        let tls = cfg.edge.tls.unwrap();
+        let tls = cfg.hub.tls.unwrap();
         assert_eq!(tls.cert_dir, PathBuf::from("/custom/certs"));
         drop(std::fs::remove_dir_all(&dir));
     }
@@ -903,7 +819,7 @@ mod tests {
             PathBuf::from("operator.key"),
             "operator key path cwd-relative when DATA_DIR unset"
         );
-        assert!(cfg.edge.tls.is_none(), "TLS stays off without TLS envs");
+        assert!(cfg.hub.tls.is_none(), "TLS stays off without TLS envs");
     }
 
     #[test]

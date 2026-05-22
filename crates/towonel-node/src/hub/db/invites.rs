@@ -6,10 +6,9 @@ use sea_orm::{
 use towonel_common::identity::{PqPublicKey, TenantId};
 use towonel_common::invite::INVITE_ID_LEN;
 
-use super::entities::{edge_invites, invite_hostnames, invites, tenant_removals};
+use super::entities::{invite_hostnames, invites, tenant_removals};
 use super::{
-    Db, EdgeInviteRow, InviteRow, InviteStatus, PendingEdgeInvite, PendingInvite, RedeemedTenant,
-    bytes_to_array, tenant_id_bytes,
+    Db, InviteRow, InviteStatus, PendingInvite, RedeemedTenant, bytes_to_array, tenant_id_bytes,
 };
 
 impl Db {
@@ -168,71 +167,6 @@ impl Db {
             })
             .collect()
     }
-
-    pub async fn insert_edge_invite(&self, invite: &PendingEdgeInvite<'_>) -> anyhow::Result<()> {
-        edge_invites::ActiveModel {
-            invite_id: ActiveValue::Set(invite.invite_id.to_vec()),
-            name: ActiveValue::Set(invite.name.to_string()),
-            secret_hash: ActiveValue::Set(invite.secret_hash.to_vec()),
-            status: ActiveValue::Set(InviteStatus::Pending.as_str().to_string()),
-            edge_node_id: ActiveValue::Set(invite.edge_node_id.to_vec()),
-            created_at_ms: ActiveValue::Set(invite.created_at_ms.cast_signed()),
-        }
-        .insert(&self.conn)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn list_edge_invites(&self) -> anyhow::Result<Vec<EdgeInviteRow>> {
-        let rows = edge_invites::Entity::find()
-            .order_by_desc(edge_invites::Column::CreatedAtMs)
-            .all(&self.conn)
-            .await?;
-        rows.into_iter().map(model_to_edge_invite_row).collect()
-    }
-
-    /// Revoke a pending edge invite. The next call to
-    /// [`Self::edge_is_registered`] for that `node_id` returns false
-    /// because the invite row is now `revoked`. Returns false if the
-    /// invite was not pending (already revoked or missing).
-    pub async fn revoke_edge_invite(
-        &self,
-        invite_id: &[u8; INVITE_ID_LEN],
-    ) -> anyhow::Result<bool> {
-        let result = edge_invites::Entity::update_many()
-            .col_expr(
-                edge_invites::Column::Status,
-                sea_orm::sea_query::Expr::value(InviteStatus::Revoked.as_str()),
-            )
-            .filter(edge_invites::Column::InviteId.eq(invite_id.to_vec()))
-            .filter(edge_invites::Column::Status.eq(InviteStatus::Pending.as_str()))
-            .exec(&self.conn)
-            .await?;
-        Ok(result.rows_affected == 1)
-    }
-
-    pub async fn edge_is_registered(&self, edge_node_id: &[u8; 32]) -> anyhow::Result<bool> {
-        let Some(invite) = edge_invites::Entity::find()
-            .filter(edge_invites::Column::EdgeNodeId.eq(edge_node_id.to_vec()))
-            .one(&self.conn)
-            .await?
-        else {
-            return Ok(false);
-        };
-        Ok(invite.status == InviteStatus::Pending.as_str())
-    }
-
-    /// Oldest-first so the first element is stable across scans.
-    pub async fn list_trusted_edge_ids(&self) -> anyhow::Result<Vec<[u8; 32]>> {
-        let rows = edge_invites::Entity::find()
-            .filter(edge_invites::Column::Status.ne(InviteStatus::Revoked.as_str()))
-            .order_by_asc(edge_invites::Column::CreatedAtMs)
-            .all(&self.conn)
-            .await?;
-        rows.into_iter()
-            .map(|m| bytes_to_array::<32>(m.edge_node_id, "edge_node_id"))
-            .collect()
-    }
 }
 
 async fn insert_hostnames(
@@ -281,17 +215,6 @@ fn model_to_invite_row(model: invites::Model, hostnames: Vec<String>) -> anyhow:
         expires_at_ms: model.expires_at_ms.map(i64::cast_unsigned),
         status: InviteStatus::parse(&model.status)?,
         tenant_id: TenantId::from_bytes(&tenant_arr),
-        created_at_ms: model.created_at_ms.cast_unsigned(),
-    })
-}
-
-fn model_to_edge_invite_row(model: edge_invites::Model) -> anyhow::Result<EdgeInviteRow> {
-    Ok(EdgeInviteRow {
-        invite_id: bytes_to_array(model.invite_id, "invite_id")?,
-        name: model.name,
-        secret_hash: bytes_to_array(model.secret_hash, "secret_hash")?,
-        status: InviteStatus::parse(&model.status)?,
-        edge_node_id: bytes_to_array::<32>(model.edge_node_id, "edge_node_id")?,
         created_at_ms: model.created_at_ms.cast_unsigned(),
     })
 }

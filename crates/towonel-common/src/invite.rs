@@ -15,11 +15,8 @@ pub const INVITE_ID_LEN: usize = 16;
 pub const INVITE_SECRET_LEN: usize = 32;
 /// Length of the embedded tenant ML-DSA-65 seed in bytes.
 pub const TENANT_SEED_LEN: usize = 32;
-/// Length of the embedded edge ed25519 seed in bytes.
-pub const EDGE_SEED_LEN: usize = 32;
 
 const TENANT_TOKEN_PREFIX: &str = "tt_inv_2_";
-const EDGE_TOKEN_PREFIX: &str = "tt_edge_2_";
 
 #[derive(Debug, thiserror::Error)]
 pub enum InviteTokenError {
@@ -37,8 +34,6 @@ pub enum InviteTokenError {
     BadInviteSecretLen(usize),
     #[error("tenant_seed must be exactly {TENANT_SEED_LEN} bytes, got {0}")]
     BadTenantSeedLen(usize),
-    #[error("node_seed must be exactly {EDGE_SEED_LEN} bytes, got {0}")]
-    BadNodeSeedLen(usize),
 }
 
 /// A parsed tenant invite token.
@@ -163,127 +158,6 @@ impl InviteToken {
     }
 }
 
-/// A parsed edge invite token.
-///
-/// v2 format: `tt_edge_2_<b64(hub_url)>.<b64(invite_id)>.<b64(invite_secret)>.<b64(node_seed)>`.
-/// The ed25519 node seed is embedded directly so a fresh VPS pod can derive
-/// its iroh identity locally and start running without a separate redemption
-/// step -- the hub pre-registers the edge's `node_id` at invite creation time.
-///
-/// Edge invites are non-expiring by design; operators revoke an invite to
-/// cut off access (revocation takes effect on the next reconnect).
-///
-/// `invite_secret` and `node_seed` are zeroed on drop and redacted by the
-/// [`fmt::Debug`] impl. Not `Clone` -- see [`InviteToken`] for the rationale.
-#[derive(PartialEq, Eq)]
-pub struct EdgeInviteToken {
-    pub hub_url: String,
-    pub invite_id: [u8; INVITE_ID_LEN],
-    pub invite_secret: [u8; INVITE_SECRET_LEN],
-    pub node_seed: [u8; EDGE_SEED_LEN],
-}
-
-impl fmt::Debug for EdgeInviteToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EdgeInviteToken")
-            .field("hub_url", &self.hub_url)
-            .field("invite_id", &hex::encode(self.invite_id))
-            .field("invite_secret", &"<redacted>")
-            .field("node_seed", &"<redacted>")
-            .finish()
-    }
-}
-
-impl Drop for EdgeInviteToken {
-    fn drop(&mut self) {
-        self.invite_secret.zeroize();
-        self.node_seed.zeroize();
-    }
-}
-
-impl EdgeInviteToken {
-    #[must_use]
-    pub fn new(
-        hub_url: impl Into<String>,
-        invite_id: [u8; INVITE_ID_LEN],
-        invite_secret: [u8; INVITE_SECRET_LEN],
-        node_seed: [u8; EDGE_SEED_LEN],
-    ) -> Self {
-        Self {
-            hub_url: hub_url.into(),
-            invite_id,
-            invite_secret,
-            node_seed,
-        }
-    }
-
-    #[must_use]
-    pub fn generate(hub_url: impl Into<String>) -> Self {
-        let invite_id = fresh_bytes::<INVITE_ID_LEN>();
-        let invite_secret = fresh_bytes::<INVITE_SECRET_LEN>();
-        let node_seed = fresh_bytes::<EDGE_SEED_LEN>();
-        Self::new(hub_url, invite_id, invite_secret, node_seed)
-    }
-
-    #[must_use]
-    pub fn encode(&self) -> Zeroizing<String> {
-        Zeroizing::new(format!(
-            "{EDGE_TOKEN_PREFIX}{}.{}.{}.{}",
-            B64.encode(self.hub_url.as_bytes()),
-            B64.encode(self.invite_id),
-            B64.encode(self.invite_secret),
-            B64.encode(self.node_seed),
-        ))
-    }
-
-    pub fn decode(s: &str) -> Result<Self, InviteTokenError> {
-        let body = s
-            .strip_prefix(EDGE_TOKEN_PREFIX)
-            .ok_or(InviteTokenError::WrongPrefix {
-                expected: EDGE_TOKEN_PREFIX,
-            })?;
-        let parts: Vec<&str> = body.split('.').collect();
-        let [hub_url_b64, id_b64, secret_b64, seed_b64] = parts.as_slice() else {
-            return Err(InviteTokenError::WrongSegmentCount {
-                expected: 4,
-                got: parts.len(),
-            });
-        };
-
-        let hub_url = String::from_utf8(B64.decode(hub_url_b64)?)?;
-
-        let id_bytes = B64.decode(id_b64)?;
-        let invite_id: [u8; INVITE_ID_LEN] = id_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| InviteTokenError::BadInviteIdLen(id_bytes.len()))?;
-
-        let secret_bytes = Zeroizing::new(B64.decode(secret_b64)?);
-        let invite_secret: [u8; INVITE_SECRET_LEN] = secret_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| InviteTokenError::BadInviteSecretLen(secret_bytes.len()))?;
-
-        let seed_bytes = Zeroizing::new(B64.decode(seed_b64)?);
-        let node_seed: [u8; EDGE_SEED_LEN] = seed_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| InviteTokenError::BadNodeSeedLen(seed_bytes.len()))?;
-
-        Ok(Self {
-            hub_url,
-            invite_id,
-            invite_secret,
-            node_seed,
-        })
-    }
-
-    #[must_use]
-    pub fn invite_id_b64(&self) -> String {
-        B64.encode(self.invite_id)
-    }
-}
-
 /// Operator secret for keyed hashing of invite secrets before DB storage.
 /// Rotating invalidates every outstanding invite hash; treat as long-lived.
 ///
@@ -364,67 +238,6 @@ mod tests {
     }
 
     #[test]
-    fn edge_v2_encode_decode_roundtrip() {
-        let token = EdgeInviteToken::new(
-            "https://node.towonel.example.eu:8443",
-            [3u8; INVITE_ID_LEN],
-            [4u8; INVITE_SECRET_LEN],
-            [5u8; EDGE_SEED_LEN],
-        );
-        let encoded = token.encode();
-        assert!(encoded.starts_with(EDGE_TOKEN_PREFIX));
-        assert_eq!(EdgeInviteToken::decode(&encoded).unwrap(), token);
-    }
-
-    #[test]
-    fn edge_v1_tokens_rejected() {
-        assert!(matches!(
-            EdgeInviteToken::decode("tt_edge_1_aaa.bbb.ccc"),
-            Err(InviteTokenError::WrongPrefix { .. })
-        ));
-    }
-
-    #[test]
-    fn edge_rejects_bad_node_seed_len() {
-        let encoded = format!(
-            "{EDGE_TOKEN_PREFIX}{}.{}.{}.{}",
-            B64.encode(b"https://hub"),
-            B64.encode([1u8; INVITE_ID_LEN]),
-            B64.encode([2u8; INVITE_SECRET_LEN]),
-            B64.encode([3u8; 16]),
-        );
-        assert!(matches!(
-            EdgeInviteToken::decode(&encoded),
-            Err(InviteTokenError::BadNodeSeedLen(16))
-        ));
-    }
-
-    #[test]
-    fn tenant_and_edge_tokens_dont_cross_decode() {
-        let tenant = InviteToken::new(
-            "https://h",
-            [1u8; INVITE_ID_LEN],
-            [2u8; INVITE_SECRET_LEN],
-            [5u8; TENANT_SEED_LEN],
-        );
-        let edge = EdgeInviteToken::new(
-            "https://h",
-            [1u8; INVITE_ID_LEN],
-            [2u8; INVITE_SECRET_LEN],
-            [6u8; EDGE_SEED_LEN],
-        );
-
-        assert!(matches!(
-            EdgeInviteToken::decode(&tenant.encode()),
-            Err(InviteTokenError::WrongPrefix { .. })
-        ));
-        assert!(matches!(
-            InviteToken::decode(&edge.encode()),
-            Err(InviteTokenError::WrongPrefix { .. })
-        ));
-    }
-
-    #[test]
     fn tenant_v1_tokens_rejected() {
         assert!(matches!(
             InviteToken::decode("tt_inv_1_aaa.bbb.ccc"),
@@ -498,11 +311,6 @@ mod tests {
         assert_ne!(a.invite_id, b.invite_id);
         assert_ne!(a.invite_secret, b.invite_secret);
         assert_ne!(a.tenant_seed, b.tenant_seed);
-
-        let c = EdgeInviteToken::generate("https://hub");
-        let d = EdgeInviteToken::generate("https://hub");
-        assert_ne!(c.invite_id, d.invite_id);
-        assert_ne!(c.node_seed, d.node_seed);
     }
 
     #[test]

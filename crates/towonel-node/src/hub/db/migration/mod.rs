@@ -7,6 +7,7 @@ mod m20260428_000001_agent_liveness;
 mod m20260428_000002_edge_invite_v2;
 mod m20260428_000003_drop_federation_push_state;
 mod m20260522_000000_hub_signing_keys;
+mod m20260524_000000_drop_edge_invites;
 
 pub struct Migrator;
 
@@ -21,6 +22,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260428_000002_edge_invite_v2::Migration),
             Box::new(m20260428_000003_drop_federation_push_state::Migration),
             Box::new(m20260522_000000_hub_signing_keys::Migration),
+            Box::new(m20260524_000000_drop_edge_invites::Migration),
         ]
     }
 }

@@ -442,6 +442,10 @@ fn materialize_tenant(
 struct TenantState {
     hostnames: HashSet<String>,
     agents: HashSet<AgentId>,
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "TlsMode is single-variant today; future variants would re-expand the table"
+    )]
     tls: HashMap<String, TlsMode>,
     /// `service_name -> listen_port`, last-write-wins per service.
     tcp_services: HashMap<String, u16>,

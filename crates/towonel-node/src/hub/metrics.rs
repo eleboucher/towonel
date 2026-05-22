@@ -30,7 +30,6 @@ pub mod reject_reason {
 pub struct HubMetrics {
     pub entries_accepted: IntCounter,
     pub entries_rejected: IntCounterVec,
-    pub sse_subscribers_connected: IntGauge,
     pub tenants_total: IntGauge,
     pub requests_total: IntCounterVec,
     registry: Arc<Registry>,
@@ -51,11 +50,6 @@ impl HubMetrics {
                 "towonel_hub_entries_rejected_total",
                 "Signed config entries rejected by the hub, by reason",
                 &["reason"],
-            ),
-            sse_subscribers_connected: register_gauge(
-                &r,
-                "towonel_hub_sse_subscribers_connected",
-                "Currently connected /v1/routes/subscribe clients",
             ),
             tenants_total: register_gauge(
                 &r,

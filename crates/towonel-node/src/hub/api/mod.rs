@@ -1,10 +1,8 @@
 mod agent_refresh;
 mod bootstrap;
-mod edge_invites;
 mod entries;
 mod invites;
 mod metrics_handler;
-mod subscribe;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -116,11 +114,6 @@ pub struct AppState {
     /// this cache only catches in-endpoint replays within the ±60s freshness
     /// window.
     pub signed_request_nonces: NonceCache,
-    /// Replay cache for edge-subscribe (`node_id`, `ts_ms`) pairs. A captured
-    /// `Authorization` header for `GET /v1/routes/subscribe` would otherwise
-    /// replay for the full freshness window and let an attacker open a
-    /// second SSE stream to observe the route table.
-    pub edge_sub_nonces: NonceCache,
     /// Serializes the check+insert window for `UpsertTcpService`.
     pub tcp_port_lock: Mutex<()>,
     /// Same role as `tcp_port_lock` but for `UpsertUdpService`. UDP ports
@@ -238,14 +231,6 @@ fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/v1/invites/{id}", delete(invites::delete_invite))
         .route("/v1/tenants/{id}", delete(entries::delete_tenant))
-        .route(
-            "/v1/edge-invites",
-            post(edge_invites::post_edge_invite).get(edge_invites::list_edge_invites_route),
-        )
-        .route(
-            "/v1/edge-invites/{id}",
-            delete(edge_invites::delete_edge_invite),
-        )
         .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
 }
 
@@ -258,7 +243,6 @@ fn signed_public_routes() -> Router<Arc<AppState>> {
         .route("/v1/entries", post(entries::post_entry))
         .route("/v1/tenants/{id}/entries", get(entries::get_tenant_entries))
         .route("/v1/agent/refresh", post(agent_refresh::post_refresh))
-        .route("/v1/routes/subscribe", get(subscribe::routes_subscribe))
 }
 
 fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<Arc<AppState>> {
@@ -437,17 +421,4 @@ async fn operator_auth(
 pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     use subtle::ConstantTimeEq;
     a.ct_eq(b).into()
-}
-
-pub(super) async fn load_trusted_edges(state: &AppState) -> anyhow::Result<Vec<iroh::EndpointId>> {
-    state
-        .db
-        .list_trusted_edge_ids()
-        .await?
-        .iter()
-        .map(|bytes| {
-            iroh::EndpointId::from_bytes(bytes)
-                .map_err(|e| anyhow::anyhow!("corrupt edge_node_id in edge_invites: {e}"))
-        })
-        .collect()
 }

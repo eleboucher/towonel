@@ -73,24 +73,3 @@ pub struct RedeemedTenant {
     pub hostnames: Vec<String>,
     pub pq_public_key: PqPublicKey,
 }
-
-/// `edge_node_id` is derived from the seed in the token and bound at
-/// creation time. Edge invites don't carry an expiry: revoke to cut
-/// access.
-pub struct PendingEdgeInvite<'a> {
-    pub invite_id: [u8; INVITE_ID_LEN],
-    pub name: &'a str,
-    pub secret_hash: [u8; 32],
-    pub edge_node_id: [u8; 32],
-    pub created_at_ms: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EdgeInviteRow {
-    pub invite_id: [u8; INVITE_ID_LEN],
-    pub name: String,
-    pub secret_hash: [u8; 32],
-    pub status: InviteStatus,
-    pub edge_node_id: [u8; 32],
-    pub created_at_ms: u64,
-}

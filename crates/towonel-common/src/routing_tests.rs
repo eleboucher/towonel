@@ -573,14 +573,6 @@ fn lookup_with_tls_matches_lookup_plus_tls_mode() {
                 agent_id: agent.id(),
             },
         ),
-        sign_entry(
-            &kp,
-            4,
-            ConfigOp::SetHostnameTls {
-                hostname: "*.bob.example.eu".into(),
-                mode: TlsMode::Terminate,
-            },
-        ),
     ];
     let table = RouteTable::from_entries(&entries, &policy);
 
@@ -590,131 +582,9 @@ fn lookup_with_tls_matches_lookup_plus_tls_mode() {
 
     let (wagents, wtls) = table.lookup_with_tls("foo.bob.example.eu").unwrap();
     assert_eq!(wagents, table.lookup("foo.bob.example.eu").unwrap());
-    assert_eq!(wtls, TlsMode::Terminate);
+    assert_eq!(wtls, TlsMode::Passthrough);
 
     assert!(table.lookup_with_tls("missing.example.eu").is_none());
-}
-
-#[test]
-fn set_hostname_tls_populates_policy() {
-    use crate::tls_policy::TlsMode;
-
-    let kp = TenantKeypair::generate();
-    let agent = AgentKeypair::generate();
-    let policy = policy_for(&kp, &["*.bob.example.eu"]);
-    let entries = vec![
-        sign_entry(
-            &kp,
-            1,
-            ConfigOp::UpsertHostname {
-                hostname: "*.bob.example.eu".into(),
-            },
-        ),
-        sign_entry(
-            &kp,
-            2,
-            ConfigOp::UpsertAgent {
-                agent_id: agent.id(),
-            },
-        ),
-        sign_entry(
-            &kp,
-            3,
-            ConfigOp::SetHostnameTls {
-                hostname: "*.bob.example.eu".into(),
-                mode: TlsMode::Terminate,
-            },
-        ),
-    ];
-    let table = RouteTable::from_entries(&entries, &policy);
-    assert!(matches!(
-        table.tls_mode("foo.bob.example.eu"),
-        TlsMode::Terminate
-    ));
-    // Routes remain intact.
-    assert!(table.lookup("foo.bob.example.eu").is_some());
-}
-
-#[test]
-fn set_hostname_tls_rejected_for_unowned_hostname() {
-    use crate::tls_policy::TlsMode;
-
-    let kp = TenantKeypair::generate();
-    let agent = AgentKeypair::generate();
-    let policy = policy_for(&kp, &["allowed.example.eu"]);
-    let entries = vec![
-        sign_entry(
-            &kp,
-            1,
-            ConfigOp::UpsertHostname {
-                hostname: "allowed.example.eu".into(),
-            },
-        ),
-        sign_entry(
-            &kp,
-            2,
-            ConfigOp::UpsertAgent {
-                agent_id: agent.id(),
-            },
-        ),
-        sign_entry(
-            &kp,
-            3,
-            ConfigOp::SetHostnameTls {
-                hostname: "not-mine.example.eu".into(),
-                mode: TlsMode::Terminate,
-            },
-        ),
-    ];
-    let table = RouteTable::from_entries(&entries, &policy);
-    assert_eq!(
-        table.tls_mode("not-mine.example.eu"),
-        TlsMode::Passthrough,
-        "TLS policy for unowned hostname must be ignored"
-    );
-}
-
-#[test]
-fn delete_hostname_clears_tls_policy() {
-    use crate::tls_policy::TlsMode;
-
-    let kp = TenantKeypair::generate();
-    let agent = AgentKeypair::generate();
-    let policy = policy_for(&kp, &["app.example.eu"]);
-    let entries = vec![
-        sign_entry(
-            &kp,
-            1,
-            ConfigOp::UpsertHostname {
-                hostname: "app.example.eu".into(),
-            },
-        ),
-        sign_entry(
-            &kp,
-            2,
-            ConfigOp::UpsertAgent {
-                agent_id: agent.id(),
-            },
-        ),
-        sign_entry(
-            &kp,
-            3,
-            ConfigOp::SetHostnameTls {
-                hostname: "app.example.eu".into(),
-                mode: TlsMode::Terminate,
-            },
-        ),
-        sign_entry(
-            &kp,
-            4,
-            ConfigOp::DeleteHostname {
-                hostname: "app.example.eu".into(),
-            },
-        ),
-    ];
-    let table = RouteTable::from_entries(&entries, &policy);
-    assert!(table.is_empty());
-    assert_eq!(table.tls_mode("app.example.eu"), TlsMode::Passthrough);
 }
 
 #[test]

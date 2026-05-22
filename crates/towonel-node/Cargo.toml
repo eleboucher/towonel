@@ -29,6 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
+axum-server = { workspace = true }
 ed25519-dalek = { workspace = true }
 fips204 = { workspace = true }
 hex = { workspace = true }
@@ -39,13 +40,10 @@ base64 = { workspace = true }
 getrandom = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
-async-stream = { workspace = true }
-# Used by the SSE route-subscriber client in edge-only mode (and by hub API tests).
+# Used by hub API tests + admin CLI as an HTTP client.
 reqwest = { workspace = true }
-eventsource-stream = { workspace = true }
 tower_governor = { workspace = true }
 subtle = { workspace = true }
-tokio-rustls = { workspace = true }
 rustls = { workspace = true }
 certon = { workspace = true }
 rcgen = { workspace = true }

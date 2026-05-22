@@ -15,8 +15,8 @@ use towonel_common::time::now_ms;
 
 use super::db::InviteStatus;
 use super::{
-    AppState, constant_time_eq, gone, internal_error, invalid_request, json_ok, load_trusted_edges,
-    not_found, parse_invite_id, unauthorized,
+    AppState, constant_time_eq, gone, internal_error, invalid_request, json_ok, not_found,
+    parse_invite_id, unauthorized,
 };
 
 /// 1 h — caps the worst-case revocation lag for an issued `EdgeCred`.
@@ -102,18 +102,8 @@ pub(super) async fn post_bootstrap(
         return gone("invite has expired");
     }
 
-    let mut trusted_edges = match load_trusted_edges(&state).await {
-        Ok(edges) => edges,
-        Err(e) => {
-            warn!(error = %e, "failed to list trusted edges for bootstrap");
-            return internal_error();
-        }
-    };
-    // When the hub runs an in-process edge, agents have no way to mint
-    // an invite for it (it's the same process), so auto-trust it.
-    if let Some(self_edge) = state.identity.edge_node_id
-        && !trusted_edges.contains(&self_edge)
-    {
+    let mut trusted_edges: Vec<iroh::EndpointId> = Vec::new();
+    if let Some(self_edge) = state.identity.edge_node_id {
         trusted_edges.push(self_edge);
     }
 

@@ -37,17 +37,9 @@ pub enum ProxyProtocol {
 }
 
 impl ProxyProtocol {
-    /// Default for a service when the user didn't pin `proxy_protocol`.
-    /// Derived from [`TlsMode`]:
-    /// - [`TlsMode::Passthrough`] → [`ProxyProtocol::V2`] (the only L4 mechanism
-    ///   left to convey the client IP once envoy terminates TLS itself)
-    /// - [`TlsMode::Terminate`] → [`ProxyProtocol::None`] (edge already
-    ///   handshook; bytes reaching origin are HTTP — a PROXY prefix would
-    ///   corrupt envoy's HTTP listener)
     pub const fn default_for_tls_mode(mode: TlsMode) -> Self {
         match mode {
             TlsMode::Passthrough => Self::V2,
-            TlsMode::Terminate => Self::None,
         }
     }
 }
@@ -168,7 +160,7 @@ mod tests {
     use towonel_common::tls_policy::TlsMode;
 
     #[test]
-    fn services_json_env_var_parses_tls_mode() {
+    fn services_json_env_var_legacy_terminate_maps_to_passthrough() {
         let json = r#"[
             {"hostname":"*.bob.example.eu","origin":"127.0.0.1:8080",
              "tls_mode":{"mode":"terminate"}},
@@ -176,7 +168,7 @@ mod tests {
         ]"#;
         let services: Vec<ServiceConfig> = serde_json::from_str(json).unwrap();
         assert_eq!(services.len(), 2);
-        assert!(matches!(services[0].tls_mode, TlsMode::Terminate));
+        assert_eq!(services[0].tls_mode, TlsMode::Passthrough);
         assert_eq!(services[1].tls_mode, TlsMode::Passthrough);
     }
 
@@ -198,12 +190,6 @@ mod tests {
         let svc_passthrough: ServiceConfig =
             serde_json::from_str(r#"{"hostname":"a.example","origin":"127.0.0.1:443"}"#).unwrap();
         assert_eq!(svc_passthrough.resolved_proxy_protocol(), ProxyProtocol::V2);
-
-        let svc_terminate: ServiceConfig = serde_json::from_str(
-            r#"{"hostname":"b.example","origin":"127.0.0.1:80","tls_mode":{"mode":"terminate"}}"#,
-        )
-        .unwrap();
-        assert_eq!(svc_terminate.resolved_proxy_protocol(), ProxyProtocol::None);
     }
 
     #[test]

@@ -1,24 +1,61 @@
+#![expect(
+    clippy::zero_sized_map_values,
+    reason = "TlsMode is single-variant today; future variants would re-expand the table"
+)]
+
 use crate::hostname::{wildcard_lookup, wildcard_lookup_ascii_lower};
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "mode")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TlsMode {
     #[default]
     Passthrough,
-    Terminate,
 }
 
 impl TlsMode {
     /// Human-readable label for logging/metrics.
     #[must_use]
-    pub const fn label(&self) -> &'static str {
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Passthrough => "passthrough",
-            Self::Terminate => "terminate",
+        }
+    }
+}
+
+impl Serialize for TlsMode {
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(rename_all = "snake_case", tag = "mode")]
+        enum Wire {
+            Passthrough,
+        }
+        match self {
+            Self::Passthrough => Wire::Passthrough.serialize(ser),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TlsMode {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Wire {
+            mode: String,
+        }
+        let wire = Wire::deserialize(de)?;
+        match wire.mode.as_str() {
+            "passthrough" => Ok(Self::Passthrough),
+            "terminate" => {
+                tracing::warn!(
+                    "tls_mode=terminate is no longer supported; treating as passthrough"
+                );
+                Ok(Self::Passthrough)
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "unknown tls_mode {other:?}"
+            ))),
         }
     }
 }
@@ -81,30 +118,9 @@ mod tests {
     }
 
     #[test]
-    fn exact_match() {
-        let mut table = TlsPolicyTable::new();
-        table.insert("app.example.com", TlsMode::Terminate);
-        assert!(matches!(
-            table.lookup("app.example.com"),
-            TlsMode::Terminate
-        ));
-    }
-
-    #[test]
-    fn wildcard_match() {
-        let mut table = TlsPolicyTable::new();
-        table.insert("*.bob.example.eu", TlsMode::Terminate);
-        assert!(matches!(
-            table.lookup("foo.bob.example.eu"),
-            TlsMode::Terminate
-        ));
-        assert_eq!(table.lookup("bob.example.eu"), TlsMode::Passthrough);
-    }
-
-    #[test]
-    fn case_insensitive() {
-        let mut table = TlsPolicyTable::new();
-        table.insert("APP.Example.COM", TlsMode::Passthrough);
-        assert_eq!(table.lookup("app.example.com"), TlsMode::Passthrough);
+    fn legacy_terminate_value_maps_to_passthrough() {
+        let table: TlsPolicyTable =
+            serde_json::from_str(r#"{"policies":{"app.test":{"mode":"terminate"}}}"#).unwrap();
+        assert_eq!(table.lookup("app.test"), TlsMode::Passthrough);
     }
 }

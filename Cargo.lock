@@ -369,6 +369,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-server"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1ab4a3ec9ea8a657c72d99a03a824af695bd0fb5ec639ccbd9cd3543b41a5f9"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "fs-err",
+ "http",
+ "http-body",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+]
+
+[[package]]
 name = "backon"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1137,7 +1159,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1522,17 +1544,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "eventsource-stream"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74fef4569247a5f429d9156b9d0a2599914385dd189c539334c625d8099d90ab"
-dependencies = [
- "futures-core",
- "nom",
- "pin-project-lite",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1624,6 +1635,16 @@ checksum = "8835f84f38484cc86f110a805655697908257fb9a7af005234060891557198e9"
 dependencies = [
  "nonempty",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73fde052dbfc920003cfd2c8e2c6e6d4cc7c1091538c3a24226cec0665ab08c0"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -5861,9 +5882,9 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "argon2",
- "async-stream",
  "async-trait",
  "axum",
+ "axum-server",
  "backon",
  "base64",
  "certon",
@@ -5871,7 +5892,6 @@ dependencies = [
  "clap",
  "ed25519-dalek 2.2.0",
  "envy",
- "eventsource-stream",
  "fastrand",
  "fips204",
  "getrandom 0.4.2",
@@ -5897,7 +5917,6 @@ dependencies = [
  "subtle",
  "tabled",
  "tokio",
- "tokio-rustls",
  "tokio-stream",
  "tokio-util",
  "tower",

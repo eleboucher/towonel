@@ -142,6 +142,7 @@ hex = "0.4"
 clienthello = "0.1"
 anyhow = "1"
 axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = [
   "trace",

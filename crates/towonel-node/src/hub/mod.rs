@@ -1,3 +1,4 @@
+pub mod acme;
 pub mod api;
 pub mod auth;
 pub mod control;
@@ -194,6 +195,7 @@ pub struct HubParams {
     pub public_url: String,
     pub link_listen_addr: Option<String>,
     pub link_psk: Option<Arc<[u8; 32]>>,
+    pub tls: Option<crate::config::TlsConfig>,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -314,7 +316,6 @@ impl Hub {
             metrics,
             invite_hash_key: Arc::clone(&self.p.invite_hash_key),
             signed_request_nonces: api::new_nonce_cache(),
-            edge_sub_nonces: api::new_nonce_cache(),
             tcp_port_lock: tokio::sync::Mutex::new(()),
             udp_port_lock: tokio::sync::Mutex::new(()),
             signer,
@@ -344,7 +345,29 @@ impl Hub {
         let health_app = api::health_router(Arc::clone(&state));
 
         let api_listener = tokio::net::TcpListener::bind(&self.p.listen_addr).await?;
-        info!(listen = %self.p.listen_addr, "hub API listening");
+        let acme = if let Some(tls) = self.p.tls.as_ref() {
+            let email = tls.acme_email.clone().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "TOWONEL_HUB_TLS_ACME_EMAIL is required when any \
+                     TOWONEL_HUB_TLS_* is set"
+                )
+            })?;
+            let mgr = acme::AcmeManager::new(&tls.cert_dir, email, tls.acme_staging)?;
+            if let Some(host) = url::Url::parse(&self.p.public_url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_lowercase))
+            {
+                mgr.trigger_obtain(&host);
+            }
+            Some(mgr)
+        } else {
+            None
+        };
+        info!(
+            listen = %self.p.listen_addr,
+            tls = acme.is_some(),
+            "hub API listening"
+        );
 
         let health_listener = tokio::net::TcpListener::bind(&self.p.health_listen_addr).await?;
         info!(listen = %self.p.health_listen_addr, "hub health/metrics listening");
@@ -371,9 +394,19 @@ impl Hub {
             (None, None) => None,
         };
 
-        let serve_result = tokio::select! {
-            res = axum::serve(api_listener, api_app) => res.map_err(anyhow::Error::from),
-            res = axum::serve(health_listener, health_app) => res.map_err(anyhow::Error::from),
+        let serve_result = if let Some(mgr) = acme {
+            let rustls_cfg =
+                axum_server::tls_rustls::RustlsConfig::from_config(mgr.server_config());
+            let api_std = api_listener.into_std()?;
+            tokio::select! {
+                res = axum_server::from_tcp_rustls(api_std, rustls_cfg).serve(api_app) => res.map_err(anyhow::Error::from),
+                res = axum::serve(health_listener, health_app) => res.map_err(anyhow::Error::from),
+            }
+        } else {
+            tokio::select! {
+                res = axum::serve(api_listener, api_app) => res.map_err(anyhow::Error::from),
+                res = axum::serve(health_listener, health_app) => res.map_err(anyhow::Error::from),
+            }
         };
 
         link_shutdown.cancel();

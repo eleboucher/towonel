@@ -62,12 +62,6 @@ enum Command {
         #[command(subcommand)]
         action: InviteAction,
     },
-    /// Operator-only: manage edge-node invite tokens (`tt_edge_2_...`).
-    /// The node boots by reading the token from `TOWONEL_EDGE_INVITE_TOKEN`.
-    EdgeInvite {
-        #[command(subcommand)]
-        action: EdgeInviteAction,
-    },
 }
 
 #[derive(Subcommand)]
@@ -204,37 +198,6 @@ enum InviteAction {
     },
 }
 
-#[derive(Subcommand)]
-enum EdgeInviteAction {
-    /// Create a new edge-node invite token. Edge tokens never expire;
-    /// revoke with `edge-invite revoke` when the edge should lose access.
-    Create {
-        #[arg(long)]
-        hub_url: Option<String>,
-        #[arg(long)]
-        api_key: Option<String>,
-        /// Human-readable edge name (e.g. "charlie-fra1"). Random if omitted.
-        #[arg(long)]
-        name: Option<String>,
-    },
-    /// List edge-node invites on the hub.
-    List {
-        #[arg(long)]
-        hub_url: Option<String>,
-        #[arg(long)]
-        api_key: Option<String>,
-    },
-    /// Revoke a pending edge invite.
-    Revoke {
-        #[arg(long)]
-        hub_url: Option<String>,
-        #[arg(long)]
-        api_key: Option<String>,
-        #[arg(long)]
-        id: String,
-    },
-}
-
 #[expect(
     clippy::large_futures,
     reason = "top-level main future is large; boxing it provides no benefit"
@@ -316,21 +279,6 @@ async fn main() -> anyhow::Result<()> {
                 id,
             } => admin::invite::cmd_invite_revoke(hub_url, api_key, id).await,
         },
-        Some(Command::EdgeInvite { action }) => match action {
-            EdgeInviteAction::Create {
-                hub_url,
-                api_key,
-                name,
-            } => admin::invite::cmd_edge_invite_create(hub_url, api_key, name).await,
-            EdgeInviteAction::List { hub_url, api_key } => {
-                admin::invite::cmd_edge_invite_list(hub_url, api_key).await
-            }
-            EdgeInviteAction::Revoke {
-                hub_url,
-                api_key,
-                id,
-            } => admin::invite::cmd_edge_invite_revoke(hub_url, api_key, id).await,
-        },
     }
 }
 
@@ -377,7 +325,7 @@ async fn run_node() -> anyhow::Result<()> {
                 ..
             } = build_edge(secret_key, &config.tenants, &config.edge).await?;
 
-            let edge = configure_hub_self_route(edge, &config.hub).with_hub_client(hub_client);
+            let edge = edge.with_hub_client(hub_client);
 
             let public_addresses = if config.edge.public_addresses.is_empty() {
                 bound_socket_strings.clone()
@@ -428,9 +376,7 @@ async fn run_node() -> anyhow::Result<()> {
             }
         }
         (false, true) => {
-            let subscriber_key = secret_key.clone();
             let BuiltEdge {
-                router,
                 edge,
                 edge_node_id,
                 bound_socket_strings,
@@ -439,62 +385,41 @@ async fn run_node() -> anyhow::Result<()> {
                 ..
             } = build_edge(secret_key, &config.tenants, &config.edge).await?;
 
-            let link_shutdown = tokio_util::sync::CancellationToken::new();
-            let (edge, link_task) = match (
+            let (Some(link_addr), Some(link_psk)) = (
                 config.edge.hub_link_addr.clone(),
                 config.edge.hub_link_psk.clone(),
-            ) {
-                (Some(addr), Some(psk)) => {
-                    let handle = edge::hub_link::HubLinkHandle::new(64);
-                    let public_addresses = if config.edge.public_addresses.is_empty() {
-                        bound_socket_strings.clone()
-                    } else {
-                        config.edge.public_addresses.clone()
-                    };
-                    let iroh_endpoints = derive_edge_iroh_addresses(
-                        &public_addresses,
-                        iroh_port,
-                        &bound_socket_strings,
-                    );
-                    let cfg = edge::hub_link::HubLinkConfig {
-                        addr,
-                        psk,
-                        edge_id: *edge_node_id.as_bytes(),
-                        iroh_endpoints,
-                        software_version: SOFTWARE_VERSION.to_string(),
-                    };
-                    let hub_client: Arc<dyn edge::hub_client::HubClient> =
-                        Arc::new(edge::hub_client::RemoteHubClient::new(handle.clone()));
-                    let edge_with_client = edge.with_hub_client(hub_client);
-                    let shutdown = link_shutdown.clone();
-                    let task = tokio::spawn(async move {
-                        edge::hub_link::run_supervisor(cfg, handle, shutdown).await;
-                    });
-                    (edge_with_client, Some(task))
-                }
-                (Some(_), None) | (None, Some(_)) => {
-                    tracing::warn!(
-                        "TOWONEL_EDGE_HUB_LINK_ADDR and TOWONEL_EDGE_HUB_LINK_PSK must both be set; \
-                         hub_link disabled — falling back to the legacy SSE subscriber if TOWONEL_EDGE_HUB_URL is set"
-                    );
-                    (edge, None)
-                }
-                (None, None) => (edge, None),
+            ) else {
+                anyhow::bail!(
+                    "edge-only mode requires TOWONEL_EDGE_HUB_LINK_ADDR and \
+                     TOWONEL_EDGE_HUB_LINK_PSK"
+                );
             };
+            let handle = edge::hub_link::HubLinkHandle::new(64);
+            let public_addresses = if config.edge.public_addresses.is_empty() {
+                bound_socket_strings.clone()
+            } else {
+                config.edge.public_addresses.clone()
+            };
+            let iroh_endpoints =
+                derive_edge_iroh_addresses(&public_addresses, iroh_port, &bound_socket_strings);
+            let cfg = edge::hub_link::HubLinkConfig {
+                addr: link_addr,
+                psk: link_psk,
+                edge_id: *edge_node_id.as_bytes(),
+                iroh_endpoints,
+                software_version: SOFTWARE_VERSION.to_string(),
+            };
+            let hub_client: Arc<dyn edge::hub_client::HubClient> =
+                Arc::new(edge::hub_client::RemoteHubClient::new(handle.clone()));
+            let edge = edge.with_hub_client(hub_client);
 
-            // Legacy SSE fallback when hub_link isn't configured.
-            if link_task.is_none()
-                && let Some(hub_url) = config.edge.hub_url.clone()
-            {
-                let router_for_sub = Arc::clone(&router);
+            let link_shutdown = tokio_util::sync::CancellationToken::new();
+            let link_task = {
+                let shutdown = link_shutdown.clone();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        edge::subscribe::run(hub_url, subscriber_key, router_for_sub).await
-                    {
-                        error!("route subscriber exited: {e}");
-                    }
-                });
-            }
+                    edge::hub_link::run_supervisor(cfg, handle, shutdown).await;
+                })
+            };
 
             tokio::select! {
                 res = edge.run() => {
@@ -503,9 +428,7 @@ async fn run_node() -> anyhow::Result<()> {
                 () = towonel_common::shutdown::shutdown_signal() => {}
             }
             link_shutdown.cancel();
-            if let Some(task) = link_task
-                && let Err(e) = task.await
-            {
+            if let Err(e) = link_task.await {
                 tracing::debug!(error = %e, "hub_link supervisor join error");
             }
             endpoint.close().await;
@@ -525,25 +448,6 @@ fn default_public_url(hub: &config::HubConfig) -> String {
     hub.public_url
         .clone()
         .unwrap_or_else(|| format!("https://{}", hub.listen_addr))
-}
-
-fn host_from_url(url: &str) -> Option<String> {
-    url::Url::parse(url).ok()?.host_str().map(str::to_lowercase)
-}
-
-fn configure_hub_self_route(edge: edge::Edge, hub: &config::HubConfig) -> edge::Edge {
-    let public_url = default_public_url(hub);
-    let Some(host) = host_from_url(&public_url) else {
-        return edge;
-    };
-    let edge = edge.with_hub_self_route(edge::HubSelfRoute {
-        hostname: host.clone(),
-        local_addr: hub.listen_addr.clone(),
-    });
-    if let Some(acme) = edge.acme() {
-        acme.trigger_obtain(&host);
-    }
-    edge
 }
 
 /// Build [`hub::HubParams`] from the node config and an identity.
@@ -582,6 +486,11 @@ async fn build_hub_params(
         public_url,
         link_listen_addr: config.hub.link_listen_addr.clone(),
         link_psk: config.hub.link_psk.clone(),
+        tls: config.hub.tls.as_ref().map(|t| crate::config::TlsConfig {
+            cert_dir: t.cert_dir.clone(),
+            acme_email: t.acme_email.clone(),
+            acme_staging: t.acme_staging,
+        }),
     })
 }
 
@@ -623,7 +532,6 @@ fn build_ownership_policy(tenants: &[config::TenantEntry]) -> anyhow::Result<Own
 }
 
 struct BuiltEdge {
-    router: Arc<edge::router::Router>,
     edge: edge::Edge,
     edge_node_id: iroh::EndpointId,
     bound_socket_strings: Vec<String>,
@@ -671,28 +579,16 @@ async fn build_edge(
     let endpoint = Arc::new(ep);
     let router = Arc::new(edge::router::Router::load_from_config(tenants)?);
 
-    let mut edge = edge::Edge::new(
-        Arc::clone(&router),
+    let edge = edge::Edge::new(
+        router,
         Arc::clone(&endpoint),
         edge_config.listen_addr.clone(),
-        edge_config.http_listen_addr.clone(),
         edge_config.health_listen_addr.clone(),
     )
     .with_listen_workers(edge_config.listen_workers)
     .with_proxy_protocol(edge_config.proxy_protocol.clone());
 
-    if let Some(tls) = &edge_config.tls {
-        let email = tls.acme_email.clone().ok_or_else(|| {
-            anyhow::anyhow!(
-                "TLS termination requires TOWONEL_EDGE_TLS_ACME_EMAIL (ACME-managed certs only)"
-            )
-        })?;
-        let manager = edge::acme::AcmeManager::new(&tls.cert_dir, email, tls.acme_staging)?;
-        edge = edge.with_tls(manager);
-    }
-
     Ok(BuiltEdge {
-        router,
         edge,
         edge_node_id,
         bound_socket_strings,

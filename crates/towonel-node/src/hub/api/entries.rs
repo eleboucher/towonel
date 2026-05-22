@@ -13,8 +13,8 @@ use towonel_common::time::now_ms;
 use super::super::metrics::reject_reason;
 use super::{
     AppState, PROTOCOL_VERSION, cbor_response, hostname_not_owned, internal_error, invalid_request,
-    invalid_signature, json_ok, load_trusted_edges, rebuild_and_broadcast_routes,
-    sequence_conflict, tenant_not_allowed, unsupported_op, unsupported_version,
+    invalid_signature, json_ok, rebuild_and_broadcast_routes, sequence_conflict,
+    tenant_not_allowed, unsupported_op, unsupported_version,
 };
 
 #[derive(Serialize)]
@@ -426,17 +426,16 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
         edges: Vec<EdgeEntry<'a>>,
     }
 
-    let mut node_ids = match load_trusted_edges(&state).await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, "failed to list edges");
-            return internal_error();
-        }
-    };
-    if let Some(self_edge) = state.identity.edge_node_id
-        && !node_ids.contains(&self_edge)
-    {
+    let mut node_ids: Vec<iroh::EndpointId> = Vec::new();
+    if let Some(self_edge) = state.identity.edge_node_id {
         node_ids.push(self_edge);
+    }
+    for (edge_id, _) in state.live_edges.snapshot() {
+        if let Ok(node_id) = iroh::EndpointId::from_bytes(&edge_id)
+            && !node_ids.contains(&node_id)
+        {
+            node_ids.push(node_id);
+        }
     }
 
     let empty: &[String] = &[];
