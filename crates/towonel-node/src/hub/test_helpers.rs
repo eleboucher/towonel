@@ -7,10 +7,12 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use towonel_common::identity::TenantKeypair;
 use towonel_common::invite::InviteToken;
+use towonel_common::kek::HubKek;
 use towonel_common::ownership::OwnershipPolicy;
 
-use super::api::{AppState, health_router, new_nonce_cache, router_unlimited};
+use super::api::{AppState, health_router, new_nonce_cache, new_refresh_limiter, router_unlimited};
 use super::db::temp_db;
+use super::signing::get_or_create_active_signing_key;
 
 pub(super) const OPERATOR_KEY: &str = "test-operator-api-key";
 
@@ -32,6 +34,13 @@ impl TestHub {
         let (route_tx, _route_rx) = broadcast::channel(16);
         let policy = arc_swap::ArcSwap::from_pointee(OwnershipPolicy::new());
 
+        let kek = HubKek::generate();
+        let signer = Arc::new(
+            get_or_create_active_signing_key(&db, &kek)
+                .await
+                .expect("generate test signing key"),
+        );
+
         let state = Arc::new(AppState {
             db,
             route_tx,
@@ -48,10 +57,12 @@ impl TestHub {
             invite_lock: tokio::sync::Mutex::new(()),
             metrics: super::metrics::HubMetrics::new(),
             invite_hash_key: std::sync::Arc::new(towonel_common::invite::InviteHashKey::generate()),
-            heartbeat_nonces: new_nonce_cache(),
+            signed_request_nonces: new_nonce_cache(),
             edge_sub_nonces: new_nonce_cache(),
             tcp_port_lock: tokio::sync::Mutex::new(()),
             udp_port_lock: tokio::sync::Mutex::new(()),
+            signer,
+            refresh_limiter: new_refresh_limiter(),
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

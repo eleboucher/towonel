@@ -30,6 +30,7 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
 ed25519-dalek = { workspace = true }
+fips204 = { workspace = true }
 hex = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }

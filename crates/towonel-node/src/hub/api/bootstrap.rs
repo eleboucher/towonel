@@ -5,6 +5,8 @@ use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
+use towonel_common::edge_cred::{EDGE_CRED_NONCE_LEN, EDGE_CRED_VERSION, EdgeCred, Kid};
+use towonel_common::identity::AgentId;
 use towonel_common::invite::hash_invite_secret;
 use tracing::warn;
 use zeroize::Zeroizing;
@@ -17,10 +19,16 @@ use super::{
     not_found, parse_invite_id, unauthorized,
 };
 
+/// 1 h — caps the worst-case revocation lag for an issued `EdgeCred`.
+const EDGE_CRED_TTL_MS: u64 = 60 * 60 * 1_000;
+
 #[derive(Debug, Deserialize)]
 pub(super) struct BootstrapRequest {
     invite_id: String,
     invite_secret: String,
+    /// Hex-encoded agent ed25519 public key.
+    #[serde(default)]
+    agent_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +48,15 @@ pub(super) struct BootstrapResponse {
     edge_node_id: Option<iroh::EndpointId>,
     edge_addresses: Vec<String>,
     iroh_endpoints: Vec<IrohEndpoint>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kid: Option<Kid>,
+    /// base64url-no-pad of the detached ML-DSA-65 signature.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_cred_sig_b64: Option<String>,
+    /// base64url-no-pad of the CBOR-encoded [`EdgeCred`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    edge_cred_b64: Option<String>,
 }
 
 pub(super) async fn post_bootstrap(
@@ -112,6 +129,14 @@ pub(super) async fn post_bootstrap(
         _ => Vec::new(),
     };
 
+    let (kid, edge_cred_b64, edge_cred_sig_b64) = match req.agent_id.as_deref() {
+        Some(hex) => match mint_edge_cred(&state, hex, &invite.tenant_id) {
+            Ok((k, c, s)) => (Some(k), Some(c), Some(s)),
+            Err(resp) => return *resp,
+        },
+        None => (None, None, None),
+    };
+
     json_ok(BootstrapResponse {
         status: "ok",
         tenant_id: invite.tenant_id.to_string(),
@@ -121,5 +146,38 @@ pub(super) async fn post_bootstrap(
         edge_node_id,
         edge_addresses: state.identity.edge_addresses.clone(),
         iroh_endpoints,
+        kid,
+        edge_cred_b64,
+        edge_cred_sig_b64,
     })
+}
+
+pub(super) fn mint_edge_cred(
+    state: &AppState,
+    agent_id_hex: &str,
+    tenant_id: &towonel_common::identity::TenantId,
+) -> Result<(Kid, String, String), Box<Response>> {
+    let agent_id: AgentId = agent_id_hex.parse().map_err(|e| {
+        Box::new(invalid_request(format!(
+            "agent_id is not a valid ed25519 public key: {e}"
+        )))
+    })?;
+    let mut nonce = [0u8; EDGE_CRED_NONCE_LEN];
+    if let Err(e) = getrandom::fill(&mut nonce) {
+        warn!(error = %e, "OS RNG failure while minting EdgeCred");
+        return Err(Box::new(internal_error()));
+    }
+    let cred = EdgeCred {
+        version: EDGE_CRED_VERSION,
+        kid: state.signer.kid(),
+        agent_id,
+        tenant_id: *tenant_id,
+        not_after_ms: now_ms() + EDGE_CRED_TTL_MS,
+        nonce,
+    };
+    let (cred_bytes, sig) = state.signer.sign_edge_cred(&cred).map_err(|e| {
+        warn!(error = %e, "EdgeCred CBOR encoding failed");
+        Box::new(internal_error())
+    })?;
+    Ok((cred.kid, B64.encode(&cred_bytes), B64.encode(sig)))
 }

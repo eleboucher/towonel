@@ -26,6 +26,7 @@ zeroize = { workspace = true }
 prometheus = { workspace = true }
 petname = { workspace = true }
 ppp = { workspace = true }
+aes-gcm = { workspace = true }
 
 [lints]
 workspace = true

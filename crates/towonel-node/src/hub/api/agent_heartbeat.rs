@@ -63,7 +63,7 @@ pub(super) async fn post_heartbeat(
     };
 
     let fresh = state
-        .heartbeat_nonces
+        .signed_request_nonces
         .entry((node_id_bytes, ts_ms))
         .or_insert_with(async {})
         .await

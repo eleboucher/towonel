@@ -19,8 +19,9 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
-    COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX,
-    forward_quic_to_writer, read_datagram_frame, write_datagram_frame, write_handshake,
+    CONTROL_STATUS_NOT_IMPLEMENTED, COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX,
+    UDP_ROUTE_PREFIX, forward_quic_to_writer, read_control_prefix, read_datagram_frame,
+    write_control_status, write_datagram_frame, write_handshake,
 };
 
 use self::acme::AcmeManager;
@@ -278,9 +279,55 @@ async fn handle_inbound_agent(
 
     let session = Arc::new(AgentSession::new(agent_id, conn.clone()));
     sessions.register(&session);
-    let _close = conn.closed().await;
+
+    let accept_loop = {
+        let conn = conn.clone();
+        async move {
+            while let Ok((send, recv)) = conn.accept_bi().await {
+                tokio::spawn(handle_agent_stream(send, recv, agent_id));
+            }
+        }
+    };
+
+    tokio::select! {
+        () = accept_loop => {}
+        _close = conn.closed() => {}
+    }
     sessions.remove_if_current(&session);
     Ok(())
+}
+
+async fn handle_agent_stream(
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    agent_id: iroh::EndpointId,
+) {
+    match read_control_prefix(&mut recv).await {
+        Ok(()) => {
+            if let Err(e) = write_control_status(&mut send, CONTROL_STATUS_NOT_IMPLEMENTED).await {
+                debug!(
+                    agent = %agent_id.fmt_short(),
+                    error = %e,
+                    "writing control NOT_IMPLEMENTED failed"
+                );
+                return;
+            }
+            if let Err(e) = send.finish() {
+                debug!(
+                    agent = %agent_id.fmt_short(),
+                    error = %e,
+                    "finishing control stream failed"
+                );
+            }
+        }
+        Err(e) => {
+            debug!(
+                agent = %agent_id.fmt_short(),
+                error = %e,
+                "agent-initiated stream did not start with CONTROL_PREFIX; dropping"
+            );
+        }
+    }
 }
 
 /// One accept loop — shared by all reuseport workers.

@@ -689,6 +689,96 @@ async fn bootstrap_rejects_wrong_secret() {
 }
 
 #[tokio::test]
+async fn bootstrap_without_agent_id_omits_edge_cred() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/bootstrap"),
+        json!({
+            "invite_id": B64.encode(token.invite_id),
+            "invite_secret": B64.encode(token.invite_secret),
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        body.get("kid").is_none(),
+        "kid must be absent for legacy clients"
+    );
+    assert!(body.get("edge_cred_b64").is_none());
+    assert!(body.get("edge_cred_sig_b64").is_none());
+}
+
+#[tokio::test]
+async fn bootstrap_with_agent_id_returns_signed_edge_cred() {
+    use towonel_common::edge_cred::{EdgeCred, verify_edge_cred};
+    use towonel_common::identity::AgentKeypair;
+
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let expected_tenant = tenant_from_token(&token);
+    let agent_kp = AgentKeypair::generate();
+    let agent_id_hex = agent_kp.id().to_string();
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/bootstrap"),
+        json!({
+            "invite_id": B64.encode(token.invite_id),
+            "invite_secret": B64.encode(token.invite_secret),
+            "agent_id": &agent_id_hex,
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "bootstrap: {body}");
+
+    let kid = body["kid"].as_u64().expect("kid");
+    let cred_b64 = body["edge_cred_b64"].as_str().expect("edge_cred_b64");
+    let sig_b64 = body["edge_cred_sig_b64"]
+        .as_str()
+        .expect("edge_cred_sig_b64");
+    let cred_bytes = B64.decode(cred_b64).unwrap();
+    let sig_bytes: [u8; towonel_common::identity::PQ_SIGNATURE_LEN] =
+        B64.decode(sig_b64).unwrap().try_into().expect("sig length");
+
+    let cred = EdgeCred::from_cbor(&cred_bytes).unwrap();
+    assert_eq!(u64::from(cred.kid), kid);
+    assert_eq!(cred.agent_id, agent_kp.id());
+    assert_eq!(cred.tenant_id, expected_tenant.id());
+    assert!(cred.not_after_ms > towonel_common::time::now_ms());
+    assert!(verify_edge_cred(
+        hub.state.signer.public_key(),
+        &cred_bytes,
+        &sig_bytes
+    ));
+}
+
+#[tokio::test]
+async fn bootstrap_with_garbage_agent_id_400s() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/bootstrap"),
+        json!({
+            "invite_id": B64.encode(token.invite_id),
+            "invite_secret": B64.encode(token.invite_secret),
+            "agent_id": "not-hex",
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+#[tokio::test]
 async fn bootstrap_rejects_missing_invite() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
@@ -1153,4 +1243,253 @@ async fn unknown_op_variant_returns_unsupported_op() {
 
     assert_eq!(status, 400, "got body: {body}");
     assert_eq!(body["error"]["code"], "unsupported_op", "got body: {body}");
+}
+
+// POST /v1/agent/refresh
+
+#[derive(Serialize)]
+struct RefreshBody {
+    tenant_id: TenantId,
+    agent_id: towonel_common::identity::AgentId,
+}
+
+fn encode_refresh(tenant_id: TenantId, agent_id: towonel_common::identity::AgentId) -> Vec<u8> {
+    let mut buf = Vec::new();
+    ciborium::into_writer(
+        &RefreshBody {
+            tenant_id,
+            agent_id,
+        },
+        &mut buf,
+    )
+    .unwrap();
+    buf
+}
+
+async fn register_agent_for_refresh(
+    hub: &TestHub,
+    client: &reqwest::Client,
+    tenant: &TenantKeypair,
+    agent: &AgentKeypair,
+) {
+    for (seq, op) in [
+        (
+            1,
+            ConfigOp::UpsertHostname {
+                hostname: "app.alice.test".into(),
+            },
+        ),
+        (
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ] {
+        let payload = ConfigPayload {
+            version: 1,
+            tenant_id: tenant.id(),
+            sequence: seq,
+            timestamp: 1_700_000_000_000,
+            op,
+        };
+        let entry = SignedConfigEntry::sign(&payload, tenant).unwrap();
+        let mut body = Vec::new();
+        ciborium::into_writer(&entry, &mut body).unwrap();
+        let resp = client
+            .post(hub.url("/v1/entries"))
+            .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "registering agent for refresh test");
+    }
+}
+
+async fn post_refresh_signed(
+    hub: &TestHub,
+    client: &reqwest::Client,
+    tenant_id: TenantId,
+    agent: &AgentKeypair,
+) -> (reqwest::StatusCode, Value) {
+    let body_bytes = encode_refresh(tenant_id, agent.id());
+    let auth = towonel_common::auth::sign_auth_header(
+        agent.signing_key(),
+        "towonel/agent-refresh/v1",
+        towonel_common::time::now_ms(),
+        &body_bytes,
+    );
+    let resp = client
+        .post(hub.url("/v1/agent/refresh"))
+        .header(reqwest::header::AUTHORIZATION, auth)
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body_bytes)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let value = resp.json::<Value>().await.unwrap_or(Value::Null);
+    (status, value)
+}
+
+#[tokio::test]
+async fn refresh_returns_fresh_edge_cred_for_signed_agent() {
+    use towonel_common::edge_cred::{EdgeCred, verify_edge_cred};
+
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let agent = AgentKeypair::generate();
+    register_agent_for_refresh(&hub, &client, &tenant, &agent).await;
+
+    let (status, body) = post_refresh_signed(&hub, &client, tenant.id(), &agent).await;
+    assert_eq!(status, 200, "{body}");
+
+    let cred_bytes = B64.decode(body["edge_cred_b64"].as_str().unwrap()).unwrap();
+    let sig_bytes: [u8; towonel_common::identity::PQ_SIGNATURE_LEN] = B64
+        .decode(body["edge_cred_sig_b64"].as_str().unwrap())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let cred = EdgeCred::from_cbor(&cred_bytes).unwrap();
+    assert_eq!(cred.agent_id, agent.id());
+    assert_eq!(cred.tenant_id, tenant.id());
+    assert_eq!(u64::from(cred.kid), body["kid"].as_u64().unwrap(),);
+    assert!(verify_edge_cred(
+        hub.state.signer.public_key(),
+        &cred_bytes,
+        &sig_bytes,
+    ));
+}
+
+#[tokio::test]
+async fn refresh_rejects_agent_not_in_signed_agents() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let agent = AgentKeypair::generate();
+    // Deliberately skip register_agent_for_refresh.
+
+    let (status, body) = post_refresh_signed(&hub, &client, tenant.id(), &agent).await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn refresh_rejects_revoked_agent() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let agent = AgentKeypair::generate();
+    register_agent_for_refresh(&hub, &client, &tenant, &agent).await;
+
+    // Submit RevokeAgent at next sequence; the rebuild must drop it from
+    // signed_agents and the next refresh must reject.
+    let payload = ConfigPayload {
+        version: 1,
+        tenant_id: tenant.id(),
+        sequence: 3,
+        timestamp: 1_700_000_000_000,
+        op: ConfigOp::RevokeAgent {
+            agent_id: agent.id(),
+        },
+    };
+    let entry = SignedConfigEntry::sign(&payload, &tenant).unwrap();
+    let mut body = Vec::new();
+    ciborium::into_writer(&entry, &mut body).unwrap();
+    let resp = client
+        .post(hub.url("/v1/entries"))
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "submitting RevokeAgent");
+
+    let (status, body) = post_refresh_signed(&hub, &client, tenant.id(), &agent).await;
+    assert_eq!(status, 401, "{body}");
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn refresh_rejects_mismatched_agent_id() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let agent = AgentKeypair::generate();
+    let attacker = AgentKeypair::generate();
+    register_agent_for_refresh(&hub, &client, &tenant, &agent).await;
+
+    // Body claims `agent`, but the signature is from `attacker`.
+    let body_bytes = encode_refresh(tenant.id(), agent.id());
+    let auth = towonel_common::auth::sign_auth_header(
+        attacker.signing_key(),
+        "towonel/agent-refresh/v1",
+        towonel_common::time::now_ms(),
+        &body_bytes,
+    );
+    let resp = client
+        .post(hub.url("/v1/agent/refresh"))
+        .header(reqwest::header::AUTHORIZATION, auth)
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body_bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn refresh_rate_limits_per_agent() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let agent = AgentKeypair::generate();
+    register_agent_for_refresh(&hub, &client, &tenant, &agent).await;
+
+    // Each refresh must use a unique ts_ms so the nonce cache doesn't reject
+    // it as a replay before the per-agent limiter even fires.
+    let base_ts = towonel_common::time::now_ms();
+    let body_bytes = encode_refresh(tenant.id(), agent.id());
+    for i in 0..super::api::AGENT_REFRESH_MAX_PER_MIN {
+        let auth = towonel_common::auth::sign_auth_header(
+            agent.signing_key(),
+            "towonel/agent-refresh/v1",
+            base_ts + u64::from(i),
+            &body_bytes,
+        );
+        let resp = client
+            .post(hub.url("/v1/agent/refresh"))
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+            .body(body_bytes.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "call #{i} should succeed");
+    }
+
+    let auth = towonel_common::auth::sign_auth_header(
+        agent.signing_key(),
+        "towonel/agent-refresh/v1",
+        base_ts + u64::from(super::api::AGENT_REFRESH_MAX_PER_MIN),
+        &body_bytes,
+    );
+    let resp = client
+        .post(hub.url("/v1/agent/refresh"))
+        .header(reqwest::header::AUTHORIZATION, auth)
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body_bytes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "rate_limited");
 }
