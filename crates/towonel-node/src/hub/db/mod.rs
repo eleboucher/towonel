@@ -5,12 +5,10 @@
 
 pub(super) mod entities;
 mod invites;
-mod liveness;
 mod migration;
 mod signing_keys;
 mod types;
 
-pub use liveness::LivenessBump;
 pub use types::*;
 
 use sea_orm::{

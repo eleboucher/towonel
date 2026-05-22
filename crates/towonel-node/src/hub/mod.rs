@@ -259,7 +259,7 @@ impl Hub {
         .await?;
 
         let liveness: liveness::SharedLivenessStore =
-            Arc::new(liveness::DbBackedLivenessStore::new(db.clone()));
+            Arc::new(liveness::InMemoryLivenessStore::new());
 
         let signer = Arc::new(signing::get_or_create_active_signing_key(&db, &self.p.kek).await?);
         info!(kid = signer.kid(), "active hub signing key loaded");
@@ -277,20 +277,13 @@ impl Hub {
             policy.register_tenant(&tenant.tenant_id, tenant.pq_public_key, tenant.hostnames);
         }
 
-        // Initial broadcast: intersect with surviving liveness rows from the
-        // previous process, so edges don't briefly see zombie agents after
-        // a hub restart. The prune loop sweeps stale rows every 30 s;
-        // anything still present at boot is either a currently-alive pod
-        // (about to bump its heartbeat) or within the TTL window.
-        let initial_cutoff = towonel_common::time::now_ms().saturating_sub(api::AGENT_LIVE_TTL_MS);
-        let live = liveness.live_agents(initial_cutoff).await
-            .inspect_err(|e| tracing::error!(error = %e, "failed to load live agents at startup; initial route table will be empty"))
-            .unwrap_or_default();
         match db.get_all_entries().await {
             Ok(entries) => {
-                let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&live));
-                // No edges have subscribed yet at startup; the broadcast
-                // just primes the channel buffer.
+                let table = RouteTable::from_entries_with_liveness(
+                    &entries,
+                    &policy,
+                    Some(&std::collections::HashSet::new()),
+                );
                 if self.p.route_tx.send(table).is_err() {
                     tracing::debug!("startup route broadcast: no subscribers yet");
                 }
@@ -422,9 +415,7 @@ impl Hub {
     }
 }
 
-/// Periodically prune stale `agent_liveness` rows and trigger a route
-/// rebuild if any row was dropped. Keeps the edge view fresh even when a pod
-/// dies without sending SIGTERM (OOM-kill, node failure).
+/// Catches sessions whose `SessionRemoved` never arrived (crashed pod, OOM-kill).
 async fn agent_liveness_prune_loop(state: Arc<api::AppState>) {
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

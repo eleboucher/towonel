@@ -5,8 +5,6 @@ use std::sync::RwLock;
 use async_trait::async_trait;
 use towonel_common::identity::{AgentId, TenantId};
 
-use super::db::{Db, LivenessBump};
-
 #[async_trait]
 pub trait LivenessStore: Send + Sync {
     async fn bump(
@@ -14,58 +12,18 @@ pub trait LivenessStore: Send + Sync {
         tenant_id: &TenantId,
         agent_id: &AgentId,
         now_ms: u64,
-    ) -> anyhow::Result<LivenessBump>;
+    ) -> anyhow::Result<()>;
 
     async fn live_agents(&self, cutoff_ms: u64) -> anyhow::Result<HashSet<(TenantId, AgentId)>>;
 
     async fn prune(&self, older_than_ms: u64) -> anyhow::Result<u64>;
 }
 
-/// Liveness persisted in the `agent_liveness` table; survives hub restart.
-pub struct DbBackedLivenessStore {
-    db: Db,
-}
-
-impl DbBackedLivenessStore {
-    #[must_use]
-    pub const fn new(db: Db) -> Self {
-        Self { db }
-    }
-}
-
-#[async_trait]
-impl LivenessStore for DbBackedLivenessStore {
-    async fn bump(
-        &self,
-        tenant_id: &TenantId,
-        agent_id: &AgentId,
-        now_ms: u64,
-    ) -> anyhow::Result<LivenessBump> {
-        self.db
-            .bump_agent_liveness(tenant_id, agent_id, now_ms)
-            .await
-    }
-
-    async fn live_agents(&self, cutoff_ms: u64) -> anyhow::Result<HashSet<(TenantId, AgentId)>> {
-        self.db.live_agents(cutoff_ms).await
-    }
-
-    async fn prune(&self, older_than_ms: u64) -> anyhow::Result<u64> {
-        self.db.prune_agent_liveness(older_than_ms).await
-    }
-}
-
-/// Volatile single-hub impl. Wiped on hub restart; repopulates from
-/// edge-emitted session events.
 #[derive(Default)]
 pub struct InMemoryLivenessStore {
     inner: RwLock<HashMap<(TenantId, AgentId), u64>>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "becomes default after DB cutover")
-)]
 impl InMemoryLivenessStore {
     #[must_use]
     pub fn new() -> Self {
@@ -80,22 +38,15 @@ impl LivenessStore for InMemoryLivenessStore {
         tenant_id: &TenantId,
         agent_id: &AgentId,
         now_ms: u64,
-    ) -> anyhow::Result<LivenessBump> {
-        let outcome = {
+    ) -> anyhow::Result<()> {
+        {
             let mut guard = self
                 .inner
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if guard
-                .insert((*tenant_id, agent_id.clone()), now_ms)
-                .is_some()
-            {
-                LivenessBump::Refreshed
-            } else {
-                LivenessBump::Inserted
-            }
-        };
-        Ok(outcome)
+            guard.insert((*tenant_id, agent_id.clone()), now_ms);
+        }
+        Ok(())
     }
 
     async fn live_agents(&self, cutoff_ms: u64) -> anyhow::Result<HashSet<(TenantId, AgentId)>> {
@@ -136,22 +87,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_inserts_then_refreshes() {
-        let store = InMemoryLivenessStore::new();
-        let tenant = make_tenant();
-        let agent = AgentKeypair::generate().id();
-        assert_eq!(
-            store.bump(&tenant, &agent, 100).await.unwrap(),
-            LivenessBump::Inserted
-        );
-        assert_eq!(
-            store.bump(&tenant, &agent, 200).await.unwrap(),
-            LivenessBump::Refreshed
-        );
-    }
-
-    #[tokio::test]
-    async fn in_memory_live_agents_respects_cutoff() {
+    async fn bump_then_live_agents_respects_cutoff() {
         let store = InMemoryLivenessStore::new();
         let tenant = make_tenant();
         let a1 = AgentKeypair::generate().id();
@@ -166,7 +102,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_memory_prune_drops_stale_rows() {
+    async fn prune_drops_stale_rows() {
         let store = InMemoryLivenessStore::new();
         let tenant = make_tenant();
         let a1 = AgentKeypair::generate().id();

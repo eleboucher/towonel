@@ -762,34 +762,32 @@ async fn prune_stale_liveness_drops_agent_from_route_table() {
 
     let now = towonel_common::time::now_ms();
     hub.state
-        .db
-        .bump_agent_liveness(&tenant.id(), &agent.id(), now)
+        .liveness
+        .bump(&tenant.id(), &agent.id(), now)
         .await
         .unwrap();
     super::api::rebuild_and_broadcast_routes(&hub.state)
         .await
         .unwrap();
 
-    // The pod's iroh key appears in the freshly-rebuilt route table.
-    let live = hub.state.db.live_agents(0).await.unwrap();
+    let live = hub.state.liveness.live_agents(0).await.unwrap();
     assert!(live.contains(&(tenant.id(), agent.id())));
 
-    // Age the liveness row past the prune cutoff (5 min), then prune.
     let ancient = now.saturating_sub(10 * 60 * 1_000);
     hub.state
-        .db
-        .bump_agent_liveness(&tenant.id(), &agent.id(), ancient)
+        .liveness
+        .bump(&tenant.id(), &agent.id(), ancient)
         .await
         .unwrap();
     let pruned = hub
         .state
-        .db
-        .prune_agent_liveness(now.saturating_sub(5 * 60 * 1_000))
+        .liveness
+        .prune(now.saturating_sub(5 * 60 * 1_000))
         .await
         .unwrap();
     assert_eq!(pruned, 1);
 
-    let live_after = hub.state.db.live_agents(0).await.unwrap();
+    let live_after = hub.state.liveness.live_agents(0).await.unwrap();
     assert!(!live_after.contains(&(tenant.id(), agent.id())));
 }
 
