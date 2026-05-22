@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
 
+use towonel_common::http_host::extract_host_header;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
@@ -65,6 +66,7 @@ pub struct Edge {
     endpoint: Arc<Endpoint>,
     sessions: Arc<SessionRegistry>,
     listen_addr: String,
+    http_listen_addr: String,
     health_listen_addr: String,
     listen_workers: usize,
     tls: Option<TlsState>,
@@ -89,6 +91,7 @@ impl Edge {
         router: Arc<Router>,
         endpoint: Arc<Endpoint>,
         listen_addr: String,
+        http_listen_addr: String,
         health_listen_addr: String,
     ) -> Self {
         let metrics = EdgeMetrics::new();
@@ -98,6 +101,7 @@ impl Edge {
             endpoint,
             sessions,
             listen_addr,
+            http_listen_addr,
             health_listen_addr,
             listen_workers: 1,
             tls: None,
@@ -174,6 +178,17 @@ impl Edge {
         for listener in listeners {
             let ctx = Arc::clone(&ctx);
             tasks.push(tokio::spawn(accept_loop(listener, ctx)));
+        }
+
+        let http_listeners = bind_listeners(&self.http_listen_addr, self.listen_workers).await?;
+        info!(
+            listen = %self.http_listen_addr,
+            workers = http_listeners.len(),
+            "edge http listening"
+        );
+        for listener in http_listeners {
+            let ctx = Arc::clone(&ctx);
+            tasks.push(tokio::spawn(accept_http_loop(listener, ctx)));
         }
 
         {
@@ -845,6 +860,186 @@ async fn pipe_to_local_hub(
         }
     };
     Ok((c2h, h2c))
+}
+
+async fn peek_http_request(tcp: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    for attempt in 0..PEEK_MAX_ATTEMPTS {
+        let n = tcp.peek(buf).await?;
+        let peeked = buf.get(..n).unwrap_or(buf);
+        if peeked.windows(4).any(|w| w == b"\r\n\r\n") || n >= buf.len() {
+            return Ok(n);
+        }
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "client closed before sending HTTP request",
+            ));
+        }
+        if attempt + 1 < PEEK_MAX_ATTEMPTS {
+            tokio::time::sleep(PEEK_RETRY_DELAY).await;
+        }
+    }
+    tcp.peek(buf).await
+}
+
+async fn accept_http_loop(listener: TcpListener, ctx: Arc<ConnCtx>) {
+    loop {
+        let (tcp_stream, peer_addr) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                warn!("HTTP accept error: {e}");
+                continue;
+            }
+        };
+        if let Err(e) = tcp_stream.set_nodelay(true) {
+            debug!(%peer_addr, error = %e, "failed to set TCP_NODELAY on http client socket");
+        }
+        debug!(%peer_addr, "accepted HTTP connection");
+
+        let ctx = Arc::clone(&ctx);
+        #[expect(
+            clippy::large_futures,
+            reason = "tokio::spawn already boxes the future"
+        )]
+        tokio::spawn(async move {
+            if let Err(e) = handle_http_connection(tcp_stream, peer_addr, &ctx).await {
+                debug!(%peer_addr, error = %e, "HTTP connection handling failed");
+            }
+        });
+    }
+}
+
+#[expect(
+    clippy::large_futures,
+    reason = "spawned via tokio::spawn which already boxes"
+)]
+async fn handle_http_connection(
+    tcp_stream: TcpStream,
+    peer_addr: std::net::SocketAddr,
+    ctx: &ConnCtx,
+) -> anyhow::Result<()> {
+    ctx.metrics.total_connections.inc();
+    ctx.metrics.active_connections.inc();
+    let result = handle_http_connection_inner(tcp_stream, peer_addr, ctx).await;
+    ctx.metrics.active_connections.dec();
+    if let Err(ref e) = result {
+        debug!(%peer_addr, error = %e, "HTTP connection ended with error");
+    }
+    result
+}
+
+#[expect(
+    clippy::large_futures,
+    reason = "spawned via tokio::spawn which already boxes"
+)]
+async fn handle_http_connection_inner(
+    mut tcp_stream: TcpStream,
+    immediate_peer: std::net::SocketAddr,
+    ctx: &ConnCtx,
+) -> anyhow::Result<()> {
+    let peer_addr = match resolve_peer_addr(&mut tcp_stream, immediate_peer, ctx).await {
+        Ok(a) => a,
+        Err(e) => {
+            drop(tcp_stream.shutdown().await);
+            return Err(e);
+        }
+    };
+
+    let span = info_span!("http_conn", peer = %peer_addr);
+    async move {
+        let start = Instant::now();
+
+        let hostname = match peek_http_hostname(&tcp_stream).await {
+            Ok(h) => h,
+            Err(e) => {
+                drop(tcp_stream.shutdown().await);
+                return Err(e);
+            }
+        };
+
+        if let Some(self_route) = ctx.hub_self_route.as_ref()
+            && self_route.hostname.eq_ignore_ascii_case(&hostname)
+        {
+            let (bytes_in, bytes_out) =
+                pipe_http_to_local_hub(tcp_stream, &hostname, &self_route.local_addr).await?;
+            ctx.metrics.total_bytes_in.inc_by(bytes_in);
+            ctx.metrics.total_bytes_out.inc_by(bytes_out);
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "connection won't last 584 million years"
+            )]
+            let duration_ms = start.elapsed().as_millis() as u64;
+            debug!(%hostname, bytes_in, bytes_out, duration_ms, "hub self-route http closed");
+            return Ok(());
+        }
+
+        let (candidates, _policy) = ctx
+            .router
+            .route(&hostname)
+            .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
+        debug!(%hostname, candidates = candidates.len(), "http route matched");
+
+        let (agent_addr, send_stream, recv_stream) =
+            pick_agent_and_open_stream(ctx, candidates).await?;
+        let agent_short = agent_addr.id.fmt_short();
+
+        let client_addrs = ClientAddrs {
+            src: peer_addr,
+            dst: tcp_stream.local_addr()?,
+        };
+        let (bytes_in, bytes_out) = pipe_passthrough(
+            tcp_stream,
+            &hostname,
+            client_addrs,
+            send_stream,
+            recv_stream,
+        )
+        .await?;
+
+        ctx.metrics.total_bytes_in.inc_by(bytes_in);
+        ctx.metrics.total_bytes_out.inc_by(bytes_out);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "connection won't last 584 million years"
+        )]
+        let duration_ms = start.elapsed().as_millis() as u64;
+        debug!(
+            %hostname,
+            agent = %agent_short,
+            bytes_in,
+            bytes_out,
+            duration_ms,
+            "http connection closed"
+        );
+        Ok(())
+    }
+    .instrument(span)
+    .await
+}
+
+async fn peek_http_hostname(tcp: &TcpStream) -> anyhow::Result<String> {
+    let mut peek_buf = [0u8; PEEK_BUF_SIZE];
+    let n = peek_http_request(tcp, &mut peek_buf).await?;
+    let peeked = peek_buf.get(..n).unwrap_or(&peek_buf);
+    extract_host_header(peeked).ok_or_else(|| anyhow::anyhow!("no Host header in HTTP request"))
+}
+
+async fn pipe_http_to_local_hub(
+    mut tcp_stream: TcpStream,
+    hostname: &str,
+    local_addr: &str,
+) -> anyhow::Result<(u64, u64)> {
+    let mut local = TcpStream::connect(local_addr).await.map_err(|e| {
+        anyhow::anyhow!("hub self-route: connect to local hub at {local_addr} failed: {e}")
+    })?;
+    drop(local.set_nodelay(true));
+    match tokio::io::copy_bidirectional(&mut tcp_stream, &mut local).await {
+        Ok(v) => Ok(v),
+        Err(e) => {
+            warn!(%hostname, "hub self-route http copy failed: {e}");
+            Ok((0, 0))
+        }
+    }
 }
 
 /// Open a bi-stream on the agent's registered session. Returns an error

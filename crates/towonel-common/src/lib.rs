@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config_entry;
 pub mod edge_cred;
 pub mod hostname;
+pub mod http_host;
 pub mod hub_error;
 pub mod identity;
 pub mod invite;

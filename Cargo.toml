@@ -201,3 +201,5 @@ petname = { version = "3", default-features = false, features = [
 envy = "0.4"
 tabled = "0.20"
 ipnet = "2"
+httparse = "1"
+http = "1"

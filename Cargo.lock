@@ -5836,6 +5836,8 @@ dependencies = [
  "fips204",
  "getrandom 0.4.2",
  "hex",
+ "http",
+ "httparse",
  "iroh",
  "petname",
  "ppp",

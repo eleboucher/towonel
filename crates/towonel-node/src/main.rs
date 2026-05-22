@@ -608,6 +608,7 @@ async fn build_edge(
         Arc::clone(&router),
         Arc::clone(&endpoint),
         edge_config.listen_addr.clone(),
+        edge_config.http_listen_addr.clone(),
         edge_config.health_listen_addr.clone(),
     )
     .with_listen_workers(edge_config.listen_workers)

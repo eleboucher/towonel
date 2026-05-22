@@ -159,6 +159,7 @@ pub const DEFAULT_IROH_PORT: u16 = 51820;
 pub struct EdgeConfig {
     pub enabled: bool,
     pub listen_addr: String,
+    pub http_listen_addr: String,
     pub health_listen_addr: String,
     pub hub_url: Option<String>,
     pub public_addresses: Vec<String>,
@@ -280,6 +281,7 @@ struct RawEnv {
 
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
+    edge_http_listen_addr: Option<String>,
     edge_health_listen_addr: Option<String>,
     edge_hub_url: Option<String>,
     /// Deprecated alias for `edge_hub_url`; kept so existing deployments
@@ -336,6 +338,7 @@ impl NodeConfig {
             hub_db_max_idle_conns,
             edge_enabled,
             edge_listen_addr,
+            edge_http_listen_addr,
             edge_health_listen_addr,
             edge_hub_url,
             edge_hub_urls,
@@ -413,6 +416,7 @@ impl NodeConfig {
         let edge = EdgeConfig {
             enabled: edge_enabled.unwrap_or(true),
             listen_addr: edge_listen_addr.unwrap_or_else(|| "0.0.0.0:443".to_string()),
+            http_listen_addr: edge_http_listen_addr.unwrap_or_else(|| "0.0.0.0:80".to_string()),
             health_listen_addr: edge_health_listen_addr
                 .unwrap_or_else(|| "0.0.0.0:9090".to_string()),
             hub_url,
