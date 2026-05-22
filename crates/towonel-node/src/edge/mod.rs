@@ -1056,9 +1056,11 @@ async fn handle_http_connection_inner(
             pick_agent_and_open_stream(ctx, candidates).await?;
         let agent_short = agent_addr.id.fmt_short();
 
+        let mut dst = tcp_stream.local_addr()?;
+        dst.set_port(80);
         let client_addrs = ClientAddrs {
             src: peer_addr,
-            dst: tcp_stream.local_addr()?,
+            dst,
         };
         let (bytes_in, bytes_out) = pipe_passthrough(
             tcp_stream,
