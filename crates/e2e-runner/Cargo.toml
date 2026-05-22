@@ -9,7 +9,7 @@ towonel-common = { path = "../towonel-common" }
 anyhow = { workspace = true }
 ciborium = { workspace = true }
 ppp = { workspace = true }
-bollard = "0.18"
+bollard = "0.21"
 tokio = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
