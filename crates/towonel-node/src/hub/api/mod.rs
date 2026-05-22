@@ -130,6 +130,7 @@ pub struct AppState {
     pub udp_port_lock: Mutex<()>,
     pub signer: Arc<HubSigner>,
     pub refresh_limiter: RefreshLimiter,
+    pub live_edges: Arc<super::live_edges::LiveEdges>,
 }
 
 impl AppState {

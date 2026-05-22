@@ -149,6 +149,10 @@ pub struct HubConfig {
     /// AEAD KEK wrapping hub signing-key private bytes in `hub_signing_keys`.
     /// Loaded from [`crate::hub::HUB_KEK_ENV`].
     pub hub_kek: Option<std::sync::Arc<towonel_common::kek::HubKek>>,
+    /// When unset, the hub does not accept remote edges.
+    pub link_listen_addr: Option<String>,
+    /// Must match `TOWONEL_EDGE_HUB_LINK_PSK` on every edge.
+    pub link_psk: Option<std::sync::Arc<[u8; 32]>>,
 }
 
 /// Default UDP port for the iroh QUIC socket. Operators rarely need
@@ -162,6 +166,10 @@ pub struct EdgeConfig {
     pub http_listen_addr: String,
     pub health_listen_addr: String,
     pub hub_url: Option<String>,
+    /// When set, the edge runs route subscription + session events over
+    /// the hub link instead of the legacy SSE federation path.
+    pub hub_link_addr: Option<String>,
+    pub hub_link_psk: Option<std::sync::Arc<[u8; 32]>>,
     pub public_addresses: Vec<String>,
     /// Pinned UDP port for the iroh QUIC socket. Operators forward this
     /// port through their firewall so agents can reach the edge.
@@ -278,6 +286,8 @@ struct RawEnv {
     hub_db_dsn: Option<String>,
     hub_db_max_open_conns: Option<u32>,
     hub_db_max_idle_conns: Option<u32>,
+    hub_link_listen_addr: Option<String>,
+    hub_link_psk: Option<String>,
 
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
@@ -287,6 +297,8 @@ struct RawEnv {
     /// Deprecated alias for `edge_hub_url`; kept so existing deployments
     /// still boot. Prefer `TOWONEL_EDGE_HUB_URL` (no `S`).
     edge_hub_urls: Option<String>,
+    edge_hub_link_addr: Option<String>,
+    edge_hub_link_psk: Option<String>,
     /// `host:port` advertised to agents/clients — the reverse proxy's
     /// public address when one fronts the edge, not the edge's listen addr.
     edge_advertised_addresses: Vec<String>,
@@ -336,12 +348,16 @@ impl NodeConfig {
             hub_db_dsn,
             hub_db_max_open_conns,
             hub_db_max_idle_conns,
+            hub_link_listen_addr,
+            hub_link_psk,
             edge_enabled,
             edge_listen_addr,
             edge_http_listen_addr,
             edge_health_listen_addr,
             edge_hub_url,
             edge_hub_urls,
+            edge_hub_link_addr,
+            edge_hub_link_psk,
             edge_advertised_addresses,
             edge_public_addresses,
             edge_iroh_port,
@@ -381,6 +397,12 @@ impl NodeConfig {
 
         let hub_url = resolve_hub_url(edge_hub_url, edge_hub_urls, edge_invite.as_ref());
 
+        let hub_link_psk = hub_link_psk
+            .as_deref()
+            .map(|raw| parse_psk_hex(raw, "TOWONEL_HUB_LINK_PSK"))
+            .transpose()?
+            .map(std::sync::Arc::new);
+
         let hub = build_hub_config(HubInputs {
             enabled: hub_enabled,
             listen_addr: hub_listen_addr,
@@ -395,6 +417,8 @@ impl NodeConfig {
             invite_hash_key_path,
             hub_kek,
             hub_kek_path,
+            link_listen_addr: hub_link_listen_addr,
+            link_psk: hub_link_psk,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -413,6 +437,12 @@ impl NodeConfig {
             hub_public_url.as_deref(),
         );
 
+        let edge_hub_link_psk = edge_hub_link_psk
+            .as_deref()
+            .map(|raw| parse_psk_hex(raw, "TOWONEL_EDGE_HUB_LINK_PSK"))
+            .transpose()?
+            .map(std::sync::Arc::new);
+
         let edge = EdgeConfig {
             enabled: edge_enabled.unwrap_or(true),
             listen_addr: edge_listen_addr.unwrap_or_else(|| "0.0.0.0:443".to_string()),
@@ -420,6 +450,8 @@ impl NodeConfig {
             health_listen_addr: edge_health_listen_addr
                 .unwrap_or_else(|| "0.0.0.0:9090".to_string()),
             hub_url,
+            hub_link_addr: edge_hub_link_addr,
+            hub_link_psk: edge_hub_link_psk,
             public_addresses,
             iroh_port: edge_iroh_port.unwrap_or(DEFAULT_IROH_PORT),
             tls,
@@ -477,6 +509,8 @@ struct HubInputs<'a> {
     invite_hash_key_path: Option<PathBuf>,
     hub_kek: Option<String>,
     hub_kek_path: Option<PathBuf>,
+    link_listen_addr: Option<String>,
+    link_psk: Option<std::sync::Arc<[u8; 32]>>,
     data_dir: Option<&'a Path>,
 }
 
@@ -495,6 +529,8 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         invite_hash_key_path,
         hub_kek,
         hub_kek_path,
+        link_listen_addr,
+        link_psk,
         data_dir,
     } = inputs;
 
@@ -547,7 +583,20 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         public_url,
         invite_hash_key,
         hub_kek,
+        link_listen_addr,
+        link_psk,
     })
+}
+
+fn parse_psk_hex(raw: &str, label: &str) -> anyhow::Result<[u8; 32]> {
+    let trimmed = raw.trim();
+    let bytes =
+        hex::decode(trimmed).map_err(|e| anyhow::anyhow!("{label} is not valid hex: {e}"))?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_e| anyhow::anyhow!("{label} must be exactly 32 bytes (64 hex chars)"))?;
+    Ok(arr)
 }
 
 fn resolve_hub_url(

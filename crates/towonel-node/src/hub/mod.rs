@@ -2,6 +2,8 @@ pub mod api;
 pub mod auth;
 pub mod control;
 pub mod db;
+pub mod edge_link;
+pub mod live_edges;
 pub mod metrics;
 pub mod signing;
 
@@ -189,6 +191,8 @@ pub struct HubParams {
     pub invite_hash_key: Arc<InviteHashKey>,
     pub kek: Arc<HubKek>,
     pub public_url: String,
+    pub link_listen_addr: Option<String>,
+    pub link_psk: Option<Arc<[u8; 32]>>,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -222,6 +226,10 @@ impl Hub {
     }
 
     /// Run the hub. Opens the DB and starts the HTTP management API.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear startup sequence: DB open + state build + listeners + edge_link spawn"
+    )]
     pub async fn run(&self) -> anyhow::Result<()> {
         let db_url = self.p.database.connection_url()?;
         info!(
@@ -299,6 +307,7 @@ impl Hub {
             udp_port_lock: tokio::sync::Mutex::new(()),
             signer,
             refresh_limiter: api::new_refresh_limiter(),
+            live_edges: Arc::new(live_edges::LiveEdges::new()),
         });
 
         spawn_background_loops(&state);
@@ -321,11 +330,43 @@ impl Hub {
         let health_listener = tokio::net::TcpListener::bind(&self.p.health_listen_addr).await?;
         info!(listen = %self.p.health_listen_addr, "hub health/metrics listening");
 
-        tokio::select! {
-            res = axum::serve(api_listener, api_app) => res?,
-            res = axum::serve(health_listener, health_app) => res?,
+        let link_shutdown = tokio_util::sync::CancellationToken::new();
+        let link_task = match (self.p.link_listen_addr.clone(), self.p.link_psk.clone()) {
+            (Some(addr), Some(psk)) => {
+                let server = edge_link::EdgeLinkServer::bind(
+                    &addr,
+                    psk,
+                    *self.p.identity.node_id.as_bytes(),
+                    Arc::clone(&state),
+                )
+                .await?;
+                let shutdown = link_shutdown.clone();
+                Some(tokio::spawn(async move { server.run(shutdown).await }))
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                tracing::warn!(
+                    "edge_link listen_addr and psk must both be set; edge_link disabled"
+                );
+                None
+            }
+            (None, None) => None,
+        };
+
+        let serve_result = tokio::select! {
+            res = axum::serve(api_listener, api_app) => res.map_err(anyhow::Error::from),
+            res = axum::serve(health_listener, health_app) => res.map_err(anyhow::Error::from),
+        };
+
+        link_shutdown.cancel();
+        if let Some(task) = link_task {
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::warn!(error = %e, "edge_link server exited with error"),
+                Err(e) => tracing::debug!(error = %e, "edge_link task join error"),
+            }
         }
-        Ok(())
+
+        serve_result
     }
 }
 

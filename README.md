@@ -271,6 +271,48 @@ The edge token deterministically derives the edge's iroh identity, so
 the new edge starts immediately with no redemption step and no persistent
 key file. Revoke via `towonel edge-invite revoke --id <invite-id>`.
 
+## Hub↔edge control link
+
+For multi-VPS deployments where the hub runs separately from the edges,
+hubs accept an optional persistent TCP control link from each remote
+edge. The link carries:
+
+- The route table — hubs push `RouteSnapshot` whenever tenants or agents
+  change, so edges converge without polling.
+- Hub signing pubkeys — distributed on link establishment so the edge
+  can locally verify `EdgeCred`s presented by agents (no per-connection
+  hub round-trip).
+- Session events — the edge reports `SessionAdded` / `SessionRemoved`
+  to keep `agent_liveness` fresh from QUIC session presence.
+- Iroh endpoint aggregation — every connected edge reports its public
+  iroh endpoints over the link; `POST /v1/bootstrap` returns the union
+  so agents reach every reachable edge.
+
+Enable on both ends by setting matching PSKs (`openssl rand -hex 32`):
+
+```bash
+# on the hub VPS
+docker run … \
+  -e TOWONEL_HUB_LINK_LISTEN_ADDR=0.0.0.0:51444 \
+  -e TOWONEL_HUB_LINK_PSK=$(cat hub.link.psk) \
+  …
+
+# on each edge VPS
+docker run … \
+  -e TOWONEL_EDGE_HUB_LINK_ADDR=hub.example.eu:51444 \
+  -e TOWONEL_EDGE_HUB_LINK_PSK=$(cat hub.link.psk) \
+  …
+```
+
+The link is plain TCP — colocate hub and edges on a private overlay
+(WireGuard / Tailscale) or a VPC, or stand up `stunnel`/`spiped` in
+front. The current build does not wrap the link in TLS itself.
+
+When `TOWONEL_EDGE_HUB_LINK_*` are unset, edge-only nodes fall back to
+the legacy SSE federation transport via `TOWONEL_EDGE_HUB_URL`. The SSE
+path will be removed in a future release; new deployments should use
+the control link.
+
 ## Deployment
 
 ### Docker Compose
@@ -321,6 +363,10 @@ identity at startup.
 | `TOWONEL_HUB_DB_DSN`                 | `${DATA_DIR}/hub.db` or `hub.db` (sqlite)    | Connection string. **Required** for `postgres`                               |
 | `TOWONEL_HUB_DB_MAX_OPEN_CONNS`      | `4` / `25`                                   | Pool size                                                                    |
 | `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS` | `false`                                      | Allow tenants to claim TCP/UDP ports below 1024                              |
+| `TOWONEL_HUB_KEK`                    | derived from `HUB_KEK_PATH`                  | 32-byte hex KEK that seals hub signing-key seeds. Must match across all hubs in a cluster |
+| `TOWONEL_HUB_KEK_PATH`               | `${DATA_DIR}/hub_kek.key`                    | Where the hub reads/generates the KEK                                        |
+| `TOWONEL_HUB_LINK_LISTEN_ADDR`       |                                              | Bind address for the optional hub↔edge control link (see [Hub↔edge control link](#hubedge-control-link)) |
+| `TOWONEL_HUB_LINK_PSK`               |                                              | 32-byte hex PSK authenticating remote edges. Must match `TOWONEL_EDGE_HUB_LINK_PSK` on every edge |
 
 ### Edge
 
@@ -336,6 +382,8 @@ identity at startup.
 | `TOWONEL_EDGE_TLS_CERT_DIR`         | `${DATA_DIR}/certs` or `/data/certs`   | Cert/storage directory                                                                                                                                                 |
 | `TOWONEL_EDGE_TLS_ACME_STAGING`     | `false`                                | Use Let's Encrypt staging                                                                                                                                              |
 | `TOWONEL_EDGE_IROH_PORT`            | `51820`                                | UDP port for the iroh QUIC socket. Operators forward this port through the firewall. Binds both `0.0.0.0` and `[::]` — IPv6 stack required          |
+| `TOWONEL_EDGE_HUB_LINK_ADDR`        |                                        | `host:port` of the hub's control-link listener. Enables the modern control plane in place of SSE federation (see [Hub↔edge control link](#hubedge-control-link)) |
+| `TOWONEL_EDGE_HUB_LINK_PSK`         |                                        | 32-byte hex PSK shared with the hub                                                                                                                                  |
 
 ### Agent
 

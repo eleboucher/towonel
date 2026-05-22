@@ -1,0 +1,270 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use subtle::ConstantTimeEq;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
+use tracing::{Instrument, info, info_span, warn};
+
+use towonel_common::edge_link::{
+    EdgeToHub, HubSigningKey, HubToEdge, read_edge_to_hub, write_hub_to_edge,
+};
+use towonel_common::identity::AgentId;
+use towonel_common::routing::RouteTable;
+use towonel_common::time::now_ms;
+
+use super::api::AppState;
+use super::live_edges::EdgeId;
+
+const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+pub type LinkPsk = [u8; 32];
+
+pub struct EdgeLinkServer {
+    pub listener: TcpListener,
+    pub psk: Arc<LinkPsk>,
+    pub hub_id: [u8; 32],
+    pub state: Arc<AppState>,
+}
+
+impl EdgeLinkServer {
+    /// Bind synchronously during startup so a bad `listen_addr` fails the
+    /// hub instead of silently degrading inside a spawned task.
+    pub async fn bind(
+        listen_addr: &str,
+        psk: Arc<LinkPsk>,
+        hub_id: [u8; 32],
+        state: Arc<AppState>,
+    ) -> anyhow::Result<Self> {
+        let listener = TcpListener::bind(listen_addr).await?;
+        info!(listen = %listen_addr, "hub edge_link listening");
+        Ok(Self {
+            listener,
+            psk,
+            hub_id,
+            state,
+        })
+    }
+
+    pub async fn run(self, shutdown: CancellationToken) -> anyhow::Result<()> {
+        let Self {
+            listener,
+            psk,
+            hub_id,
+            state,
+        } = self;
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => {
+                    info!("hub edge_link shutting down");
+                    return Ok(());
+                }
+                accept = listener.accept() => {
+                    let (stream, peer) = accept?;
+                    let psk_clone = Arc::clone(&psk);
+                    let state_clone = Arc::clone(&state);
+                    let route_rx = state.route_tx.subscribe();
+                    let shutdown = shutdown.clone();
+                    tokio::spawn(async move {
+                        let span = info_span!("edge_link", peer = %peer);
+                        if let Err(e) = handle_connection(
+                            stream, peer, &psk_clone, hub_id, state_clone, route_rx, shutdown,
+                        )
+                        .instrument(span)
+                        .await
+                        {
+                            warn!(peer = %peer, error = %e, "edge_link connection ended");
+                        }
+                    });
+                }
+            }
+        }
+    }
+}
+
+async fn handle_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    expected_psk: &LinkPsk,
+    hub_id: [u8; 32],
+    state: Arc<AppState>,
+    route_rx: broadcast::Receiver<RouteTable>,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()> {
+    if let Err(e) = stream.set_nodelay(true) {
+        tracing::debug!(error = %e, "edge_link set_nodelay failed");
+    }
+    let (read_half, write_half) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(read_half);
+
+    let hello = match tokio::time::timeout(HELLO_TIMEOUT, read_edge_to_hub(&mut reader)).await {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(e)) => anyhow::bail!("read Hello: {e}"),
+        Err(_) => anyhow::bail!("hello timed out"),
+    };
+
+    let (edge_id, iroh_endpoints, software_version) = match hello {
+        EdgeToHub::Hello {
+            edge_id,
+            iroh_endpoints,
+            software_version,
+            psk,
+        } => {
+            if expected_psk.ct_eq(&psk).into() {
+                (edge_id, iroh_endpoints, software_version)
+            } else {
+                anyhow::bail!("Hello PSK mismatch");
+            }
+        }
+        other => anyhow::bail!("first frame was not Hello: {other:?}"),
+    };
+
+    info!(
+        peer = %peer,
+        edge = %hex::encode(edge_id),
+        version = %software_version,
+        endpoints = iroh_endpoints.len(),
+        "edge_link authenticated"
+    );
+
+    let signing_keys = current_signing_keys(&state)?;
+    let welcome = HubToEdge::Welcome {
+        hub_id,
+        signing_keys,
+    };
+    let mut writer = write_half;
+    // Upsert AFTER Welcome lands so a peer that disconnects mid-handshake
+    // doesn't leave a stale entry; there is no janitor yet.
+    write_hub_to_edge(&mut writer, &welcome).await?;
+    state.live_edges.upsert(edge_id, iroh_endpoints, now_ms());
+
+    let (writer_tx, writer_rx) = mpsc::channel::<HubToEdge>(64);
+    let writer_task = tokio::spawn(run_writer(writer, writer_rx));
+    let pusher_task = tokio::spawn(push_routes(route_rx, writer_tx.clone(), state.clone()));
+
+    let result = read_loop(reader, &state, edge_id, shutdown.clone()).await;
+
+    drop(writer_tx);
+    pusher_task.abort();
+    writer_task.abort();
+    state.live_edges.remove(&edge_id);
+    info!(edge = %hex::encode(edge_id), "edge_link disconnected");
+    result
+}
+
+async fn read_loop<R>(
+    mut reader: R,
+    state: &Arc<AppState>,
+    edge_id: EdgeId,
+    shutdown: CancellationToken,
+) -> anyhow::Result<()>
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return Ok(()),
+            frame = read_edge_to_hub(&mut reader) => {
+                match frame {
+                    Ok(EdgeToHub::Hello { .. }) => {
+                        warn!(edge = %hex::encode(edge_id), "duplicate Hello on established link; ignoring");
+                    }
+                    Ok(EdgeToHub::SessionAdded { agent_id, tenant_id }) => {
+                        bump_liveness(state, agent_id, tenant_id).await;
+                    }
+                    Ok(EdgeToHub::SessionRemoved { agent_id }) => {
+                        tracing::debug!(agent = %agent_id, "session removed");
+                    }
+                    Ok(EdgeToHub::SessionsSnapshot { sessions }) => {
+                        for (agent_id, tenant_id) in sessions {
+                            bump_liveness(state, agent_id, tenant_id).await;
+                        }
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("read frame: {e}")),
+                }
+            }
+        }
+    }
+}
+
+async fn bump_liveness(
+    state: &Arc<AppState>,
+    agent_id: AgentId,
+    tenant_id: towonel_common::identity::TenantId,
+) {
+    if let Err(e) = state
+        .db
+        .bump_agent_liveness(&tenant_id, &agent_id, now_ms())
+        .await
+    {
+        warn!(error = %e, "edge_link session bump_agent_liveness failed");
+    }
+}
+
+async fn run_writer<W>(mut writer: W, mut rx: mpsc::Receiver<HubToEdge>) -> anyhow::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(msg) = rx.recv().await {
+        write_hub_to_edge(&mut writer, &msg).await?;
+    }
+    Ok(())
+}
+
+async fn push_routes(
+    mut route_rx: broadcast::Receiver<RouteTable>,
+    writer_tx: mpsc::Sender<HubToEdge>,
+    state: Arc<AppState>,
+) -> anyhow::Result<()> {
+    // Initial snapshot so a fresh edge converges before the next mutation.
+    if let Ok(initial) = build_current_route_table(&state).await
+        && writer_tx
+            .send(HubToEdge::RouteSnapshot {
+                table: Box::new(initial),
+            })
+            .await
+            .is_err()
+    {
+        return Ok(());
+    }
+    loop {
+        match route_rx.recv().await {
+            Ok(table) => {
+                if writer_tx
+                    .send(HubToEdge::RouteSnapshot {
+                        table: Box::new(table),
+                    })
+                    .await
+                    .is_err()
+                {
+                    return Ok(());
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                warn!(skipped, "edge_link route stream lagged");
+            }
+            Err(broadcast::error::RecvError::Closed) => return Ok(()),
+        }
+    }
+}
+
+async fn build_current_route_table(state: &Arc<AppState>) -> anyhow::Result<RouteTable> {
+    let cutoff = now_ms().saturating_sub(super::api::AGENT_LIVE_TTL_MS);
+    let (entries, live) =
+        tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
+    let policy = state.policy.load();
+    Ok(RouteTable::from_entries_with_liveness(
+        &entries,
+        &policy,
+        Some(&live),
+    ))
+}
+
+fn current_signing_keys(state: &AppState) -> anyhow::Result<Vec<HubSigningKey>> {
+    let signer = state.signer.as_ref();
+    let pubkey = signer.public_key().as_bytes().to_vec();
+    Ok(vec![HubSigningKey::new(signer.kid(), pubkey)?])
+}

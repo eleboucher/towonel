@@ -63,6 +63,7 @@ impl TestHub {
             udp_port_lock: tokio::sync::Mutex::new(()),
             signer,
             refresh_limiter: new_refresh_limiter(),
+            live_edges: Arc::new(super::live_edges::LiveEdges::new()),
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

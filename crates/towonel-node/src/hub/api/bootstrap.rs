@@ -116,9 +116,8 @@ pub(super) async fn post_bootstrap(
     {
         trusted_edges.push(self_edge);
     }
-    let edge_node_id = trusted_edges.first().copied();
 
-    let iroh_endpoints: Vec<IrohEndpoint> = match (
+    let mut iroh_endpoints: Vec<IrohEndpoint> = match (
         state.identity.edge_node_id,
         state.identity.edge_iroh_addresses.as_slice(),
     ) {
@@ -128,6 +127,24 @@ pub(super) async fn post_bootstrap(
         }],
         _ => Vec::new(),
     };
+
+    for (edge_id, addresses) in state.live_edges.snapshot() {
+        let Some(node_id) = iroh::EndpointId::from_bytes(&edge_id).ok() else {
+            continue;
+        };
+        if iroh_endpoints
+            .iter()
+            .any(|existing| existing.node_id == node_id)
+        {
+            continue;
+        }
+        iroh_endpoints.push(IrohEndpoint { node_id, addresses });
+        if !trusted_edges.contains(&node_id) {
+            trusted_edges.push(node_id);
+        }
+    }
+
+    let edge_node_id = trusted_edges.first().copied();
 
     let (kid, edge_cred_b64, edge_cred_sig_b64) = match req.agent_id.as_deref() {
         Some(hex) => match mint_edge_cred(&state, hex, &invite.tenant_id) {
