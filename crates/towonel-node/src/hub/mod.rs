@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod control;
 pub mod db;
 pub mod metrics;
 pub mod signing;
@@ -194,6 +195,8 @@ pub struct HubParams {
 /// API, persists them to `SQLite`, and serves config updates to edges.
 pub struct Hub {
     p: HubParams,
+    /// `Some` only when the hub is colocated with an edge; filled at boot.
+    control_handler_cell: Option<crate::edge::hub_client::ControlHandlerCell>,
 }
 
 fn spawn_background_loops(state: &Arc<api::AppState>) {
@@ -203,7 +206,19 @@ fn spawn_background_loops(state: &Arc<api::AppState>) {
 
 impl Hub {
     pub const fn new(params: HubParams) -> Self {
-        Self { p: params }
+        Self {
+            p: params,
+            control_handler_cell: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_control_handler_cell(
+        mut self,
+        cell: crate::edge::hub_client::ControlHandlerCell,
+    ) -> Self {
+        self.control_handler_cell = Some(cell);
+        self
     }
 
     /// Run the hub. Opens the DB and starts the HTTP management API.
@@ -287,6 +302,14 @@ impl Hub {
         });
 
         spawn_background_loops(&state);
+
+        if let Some(cell) = self.control_handler_cell.as_ref() {
+            let handler: Arc<dyn crate::edge::hub_client::ControlFrameHandler> =
+                Arc::new(control::HubControlHandler::new(Arc::clone(&state)));
+            if cell.set(handler).is_err() {
+                tracing::warn!("hub control handler cell was already set; ignoring");
+            }
+        }
 
         let api_app = api::router(Arc::clone(&state))
             .into_make_service_with_connect_info::<std::net::SocketAddr>();

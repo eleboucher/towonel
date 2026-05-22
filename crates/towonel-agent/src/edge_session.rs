@@ -10,11 +10,15 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
+use towonel_common::edge_cred::AuthFrame;
 use towonel_common::protocol::ALPN_TUNNEL;
+use towonel_common::tunnel::{CONTROL_STATUS_OK, read_control_status, write_control_prefix};
 
 use crate::metrics::AgentMetrics;
-use crate::stateless::EdgeContact;
+use crate::stateless::{CachedEdgeCred, EdgeContact};
 use crate::tunnel::{self, ServiceMap};
+
+const PRESENT_CRED_TIMEOUT: Duration = Duration::from_secs(5);
 
 const MIN_HEALTHY_SESSION: Duration = Duration::from_mins(1);
 
@@ -33,6 +37,7 @@ pub fn spawn(
     service_map: &Arc<ServiceMap>,
     metrics: &Arc<AgentMetrics>,
     shutdown: &CancellationToken,
+    edge_cred: &Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
     let mut spawned = 0usize;
@@ -49,8 +54,9 @@ pub fn spawn(
         let service_map = Arc::clone(service_map);
         let metrics = Arc::clone(metrics);
         let shutdown = shutdown.clone();
+        let edge_cred = Arc::clone(edge_cred);
         set.spawn(async move {
-            supervise(endpoint, contact, service_map, metrics, shutdown).await;
+            supervise(endpoint, contact, service_map, metrics, shutdown, edge_cred).await;
         });
         spawned += 1;
     }
@@ -67,6 +73,7 @@ async fn supervise(
     service_map: Arc<ServiceMap>,
     metrics: Arc<AgentMetrics>,
     shutdown: CancellationToken,
+    edge_cred: Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
 ) {
     let edge_label = contact.id.fmt_short().to_string();
     let span = info_span!("edge_supervisor", edge = %edge_label);
@@ -84,7 +91,7 @@ async fn supervise(
                     info!("supervisor cancelled mid-dial");
                     return;
                 }
-                r = dial_and_serve(&endpoint, &contact, &service_map, &metrics) => r,
+                r = dial_and_serve(&endpoint, &contact, &service_map, &metrics, &edge_cred) => r,
             };
 
             match outcome {
@@ -135,6 +142,7 @@ async fn dial_and_serve(
     contact: &EdgeContact,
     service_map: &Arc<ServiceMap>,
     metrics: &Arc<AgentMetrics>,
+    edge_cred: &Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
 ) -> anyhow::Result<Duration> {
     let resolved = resolve_addrs(&contact.addrs).await;
     if resolved.is_empty() {
@@ -160,6 +168,10 @@ async fn dial_and_serve(
         .with_label_values(&[&edge_label])
         .set(1);
 
+    if let Some(cred) = edge_cred.load_full() {
+        present_edge_cred(&conn, &edge_label, &cred).await;
+    }
+
     let started = Instant::now();
     tunnel::handle_connection(
         conn,
@@ -174,6 +186,52 @@ async fn dial_and_serve(
         .with_label_values(&[&edge_label])
         .set(0);
     Ok(started.elapsed())
+}
+
+/// Best-effort. Logs the outcome but never errors — the data path keeps
+/// running whether the edge accepted the cred or not.
+async fn present_edge_cred(
+    conn: &iroh::endpoint::Connection,
+    edge_label: &str,
+    cred: &CachedEdgeCred,
+) {
+    let result = tokio::time::timeout(PRESENT_CRED_TIMEOUT, do_present_edge_cred(conn, cred)).await;
+    match result {
+        Ok(Ok(status)) if status == CONTROL_STATUS_OK => {
+            info!(edge = %edge_label, "EdgeCred accepted");
+        }
+        Ok(Ok(status)) => {
+            warn!(edge = %edge_label, status, "EdgeCred rejected by edge");
+        }
+        Ok(Err(e)) => {
+            warn!(edge = %edge_label, error = %e, "presenting EdgeCred failed");
+        }
+        Err(_) => {
+            warn!(edge = %edge_label, "EdgeCred presentation timed out");
+        }
+    }
+}
+
+async fn do_present_edge_cred(
+    conn: &iroh::endpoint::Connection,
+    cred: &CachedEdgeCred,
+) -> anyhow::Result<u8> {
+    let (mut send, mut recv) = conn.open_bi().await.context("open control bidi stream")?;
+    write_control_prefix(&mut send)
+        .await
+        .context("write CONTROL_PREFIX")?;
+    let frame = AuthFrame {
+        kid: cred.kid,
+        cred_cbor: cred.cred_cbor.clone(),
+        sig: cred.sig,
+    }
+    .encode();
+    send.write_all(&frame).await.context("write auth frame")?;
+    send.finish().context("finish send stream")?;
+    let status = read_control_status(&mut recv)
+        .await
+        .context("read control status")?;
+    Ok(status)
 }
 
 async fn resolve_addrs(addrs: &[String]) -> Vec<SocketAddr> {

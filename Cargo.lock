@@ -5806,6 +5806,7 @@ dependencies = [
  "base64",
  "ciborium",
  "clap",
+ "fastrand",
  "iroh",
  "ppp",
  "prometheus",
