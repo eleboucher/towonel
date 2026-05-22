@@ -4,6 +4,7 @@ pub mod control;
 pub mod db;
 pub mod edge_link;
 pub mod live_edges;
+pub mod liveness;
 pub mod metrics;
 pub mod signing;
 
@@ -201,6 +202,7 @@ pub struct Hub {
     p: HubParams,
     /// `Some` only when the hub is colocated with an edge; filled at boot.
     control_handler_cell: Option<crate::edge::hub_client::ControlHandlerCell>,
+    liveness_cell: Option<crate::edge::hub_client::LivenessCell>,
 }
 
 fn spawn_background_loops(state: &Arc<api::AppState>) {
@@ -213,6 +215,7 @@ impl Hub {
         Self {
             p: params,
             control_handler_cell: None,
+            liveness_cell: None,
         }
     }
 
@@ -222,6 +225,12 @@ impl Hub {
         cell: crate::edge::hub_client::ControlHandlerCell,
     ) -> Self {
         self.control_handler_cell = Some(cell);
+        self
+    }
+
+    #[must_use]
+    pub fn with_liveness_cell(mut self, cell: crate::edge::hub_client::LivenessCell) -> Self {
+        self.liveness_cell = Some(cell);
         self
     }
 
@@ -247,6 +256,9 @@ impl Hub {
         )
         .await?;
 
+        let liveness: liveness::SharedLivenessStore =
+            Arc::new(liveness::DbBackedLivenessStore::new(db.clone()));
+
         let signer = Arc::new(signing::get_or_create_active_signing_key(&db, &self.p.kek).await?);
         info!(kid = signer.kid(), "active hub signing key loaded");
 
@@ -269,7 +281,7 @@ impl Hub {
         // anything still present at boot is either a currently-alive pod
         // (about to bump its heartbeat) or within the TTL window.
         let initial_cutoff = towonel_common::time::now_ms().saturating_sub(api::AGENT_LIVE_TTL_MS);
-        let live = db.live_agents(initial_cutoff).await
+        let live = liveness.live_agents(initial_cutoff).await
             .inspect_err(|e| tracing::error!(error = %e, "failed to load live agents at startup; initial route table will be empty"))
             .unwrap_or_default();
         match db.get_all_entries().await {
@@ -308,6 +320,7 @@ impl Hub {
             signer,
             refresh_limiter: api::new_refresh_limiter(),
             live_edges: Arc::new(live_edges::LiveEdges::new()),
+            liveness,
         });
 
         spawn_background_loops(&state);
@@ -318,6 +331,12 @@ impl Hub {
             if cell.set(handler).is_err() {
                 tracing::warn!("hub control handler cell was already set; ignoring");
             }
+        }
+
+        if let Some(cell) = self.liveness_cell.as_ref()
+            && cell.set(Arc::clone(&state.liveness)).is_err()
+        {
+            tracing::warn!("hub liveness cell was already set; ignoring");
         }
 
         let api_app = api::router(Arc::clone(&state))
@@ -380,15 +399,15 @@ async fn agent_liveness_prune_loop(state: Arc<api::AppState>) {
     loop {
         tick.tick().await;
         let cutoff = towonel_common::time::now_ms().saturating_sub(api::AGENT_PRUNE_TTL_MS);
-        let pruned = match state.db.prune_agent_liveness(cutoff).await {
+        let pruned = match state.liveness.prune(cutoff).await {
             Ok(n) => n,
             Err(e) => {
-                tracing::warn!(error = %e, "agent_liveness prune failed");
+                tracing::warn!(error = %e, "liveness prune failed");
                 continue;
             }
         };
         if pruned > 0 {
-            tracing::debug!(pruned, "pruned stale agent_liveness rows");
+            tracing::debug!(pruned, "pruned stale liveness rows");
             if let Err(e) = api::rebuild_and_broadcast_routes(&state).await {
                 tracing::warn!(error = %e, "route rebuild after liveness prune failed");
             }

@@ -17,14 +17,15 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
 
+use towonel_common::edge_cred::{AuthFrame, EdgeCred};
 use towonel_common::http_host::extract_host_header;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
     CONTROL_STATUS_INTERNAL_ERROR, CONTROL_STATUS_INVALID, CONTROL_STATUS_NOT_IMPLEMENTED,
-    COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX,
-    forward_quic_to_writer, read_control_prefix, read_datagram_frame, write_control_status,
-    write_datagram_frame, write_handshake,
+    CONTROL_STATUS_OK, COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX,
+    UDP_ROUTE_PREFIX, forward_quic_to_writer, read_control_prefix, read_datagram_frame,
+    write_control_status, write_datagram_frame, write_handshake,
 };
 
 use self::acme::AcmeManager;
@@ -305,10 +306,15 @@ async fn handle_inbound_agent(
 
     let accept_loop = {
         let conn = conn.clone();
+        let sessions = Arc::clone(&sessions);
+        let hub_client = hub_client.clone();
         async move {
             while let Ok((send, recv)) = conn.accept_bi().await {
                 let hub_client = hub_client.clone();
-                tokio::spawn(handle_agent_stream(send, recv, agent_id, hub_client));
+                let sessions = Arc::clone(&sessions);
+                tokio::spawn(handle_agent_stream(
+                    send, recv, agent_id, hub_client, sessions,
+                ));
             }
         }
     };
@@ -317,8 +323,28 @@ async fn handle_inbound_agent(
         () = accept_loop => {}
         _close = conn.closed() => {}
     }
+    let tenant = sessions.tenant_for(&agent_id);
     sessions.remove_if_current(&session);
+    if let Some(tenant_id) = tenant
+        && let Some(client) = hub_client.as_deref()
+        && let Ok(aid) = towonel_common::identity::AgentId::from_bytes(agent_id.as_bytes())
+    {
+        client.record_session_removed(tenant_id, aid).await;
+    }
     Ok(())
+}
+
+/// Extract `(tenant_id, agent_id)` from an `AuthFrame`. The hub has
+/// already verified the signature.
+fn decode_cred_identity(
+    frame: &[u8],
+) -> Option<(
+    towonel_common::identity::TenantId,
+    towonel_common::identity::AgentId,
+)> {
+    let auth = AuthFrame::decode(frame).ok()?;
+    let cred = EdgeCred::from_cbor(&auth.cred_cbor).ok()?;
+    Some((cred.tenant_id, cred.agent_id))
 }
 
 const CONTROL_FRAME_MAX_BYTES: usize = 64 * 1024;
@@ -331,10 +357,11 @@ async fn handle_agent_stream(
     recv: iroh::endpoint::RecvStream,
     agent_id: iroh::EndpointId,
     hub_client: Option<Arc<dyn HubClient>>,
+    sessions: Arc<SessionRegistry>,
 ) {
     match tokio::time::timeout(
         CONTROL_STREAM_TIMEOUT,
-        run_control_stream(send, recv, agent_id, hub_client),
+        run_control_stream(send, recv, agent_id, hub_client, sessions),
     )
     .await
     {
@@ -354,6 +381,7 @@ async fn run_control_stream(
     mut recv: iroh::endpoint::RecvStream,
     agent_id: iroh::EndpointId,
     hub_client: Option<Arc<dyn HubClient>>,
+    sessions: Arc<SessionRegistry>,
 ) {
     if let Err(e) = read_control_prefix(&mut recv).await {
         debug!(
@@ -385,7 +413,7 @@ async fn run_control_stream(
     };
 
     let (status, body) = match hub_client.as_deref() {
-        Some(client) => match client.handle_control_frame(frame).await {
+        Some(client) => match client.handle_control_frame(frame.clone()).await {
             Ok(resp) => resp,
             Err(e) => {
                 warn!(
@@ -398,6 +426,15 @@ async fn run_control_stream(
         },
         None => (CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new()),
     };
+
+    if status == CONTROL_STATUS_OK
+        && let Some(client) = hub_client.as_deref()
+        && let Some((tenant_id, cred_agent_id)) = decode_cred_identity(&frame)
+        && cred_agent_id.as_bytes() == agent_id.as_bytes()
+    {
+        sessions.record_tenant(agent_id, tenant_id);
+        client.record_session_added(tenant_id, cred_agent_id).await;
+    }
 
     if let Err(e) = write_control_status(&mut send, status).await {
         debug!(agent = %agent_id.fmt_short(), error = %e, "writing control status failed");

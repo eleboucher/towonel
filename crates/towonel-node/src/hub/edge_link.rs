@@ -195,12 +195,8 @@ async fn bump_liveness(
     agent_id: AgentId,
     tenant_id: towonel_common::identity::TenantId,
 ) {
-    if let Err(e) = state
-        .db
-        .bump_agent_liveness(&tenant_id, &agent_id, now_ms())
-        .await
-    {
-        warn!(error = %e, "edge_link session bump_agent_liveness failed");
+    if let Err(e) = state.liveness.bump(&tenant_id, &agent_id, now_ms()).await {
+        warn!(error = %e, "edge_link session liveness bump failed");
     }
 }
 
@@ -253,8 +249,10 @@ async fn push_routes(
 
 async fn build_current_route_table(state: &Arc<AppState>) -> anyhow::Result<RouteTable> {
     let cutoff = now_ms().saturating_sub(super::api::AGENT_LIVE_TTL_MS);
-    let (entries, live) =
-        tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
+    let (entries, live) = tokio::try_join!(
+        state.db.get_all_entries(),
+        state.liveness.live_agents(cutoff)
+    )?;
     let policy = state.policy.load();
     Ok(RouteTable::from_entries_with_liveness(
         &entries,

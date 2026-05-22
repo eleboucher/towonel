@@ -4,6 +4,8 @@ use iroh::EndpointId;
 use iroh::endpoint::Connection;
 use tracing::{debug, info};
 
+use towonel_common::identity::TenantId;
+
 use super::health::EdgeMetrics;
 
 pub struct AgentSession {
@@ -37,6 +39,8 @@ impl AgentSession {
 
 pub struct SessionRegistry {
     by_id: papaya::HashMap<EndpointId, Arc<AgentSession>>,
+    /// Populated after the hub verifies the agent's `EdgeCred`.
+    tenants: papaya::HashMap<EndpointId, TenantId>,
     metrics: EdgeMetrics,
 }
 
@@ -45,8 +49,18 @@ impl SessionRegistry {
     pub fn new(metrics: EdgeMetrics) -> Self {
         Self {
             by_id: papaya::HashMap::new(),
+            tenants: papaya::HashMap::new(),
             metrics,
         }
+    }
+
+    pub fn record_tenant(&self, agent_id: EndpointId, tenant_id: TenantId) {
+        self.tenants.pin().insert(agent_id, tenant_id);
+    }
+
+    #[must_use]
+    pub fn tenant_for(&self, agent_id: &EndpointId) -> Option<TenantId> {
+        self.tenants.pin().get(agent_id).copied()
     }
 
     pub fn register(&self, session: &Arc<AgentSession>) {
@@ -80,6 +94,7 @@ impl SessionRegistry {
         match result {
             Ok(Some(_)) => {
                 self.metrics.active_sessions.dec();
+                self.tenants.pin().remove(&agent_id);
                 info!(agent = %agent_id.fmt_short(), "agent session removed");
             }
             Ok(None) | Err(_) => {

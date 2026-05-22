@@ -361,9 +361,12 @@ async fn run_node() -> anyhow::Result<()> {
             let (route_tx, _) = broadcast::channel::<RouteTable>(64);
             let control_handler: edge::hub_client::ControlHandlerCell =
                 Arc::new(std::sync::OnceLock::new());
+            let liveness_cell: edge::hub_client::LivenessCell =
+                Arc::new(std::sync::OnceLock::new());
             let hub_client = Arc::new(edge::hub_client::InProcessHubClient::new(
                 route_tx.clone(),
                 Arc::clone(&control_handler),
+                Arc::clone(&liveness_cell),
             ));
             let BuiltEdge {
                 edge,
@@ -392,7 +395,8 @@ async fn run_node() -> anyhow::Result<()> {
                 software_version: SOFTWARE_VERSION,
             };
             let hub = hub::Hub::new(build_hub_params(&config, identity, route_tx).await?)
-                .with_control_handler_cell(control_handler);
+                .with_control_handler_cell(control_handler)
+                .with_liveness_cell(liveness_cell);
 
             tokio::select! {
                 res = hub.run() => {

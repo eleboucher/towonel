@@ -25,7 +25,6 @@ use crate::hub_client::{
     check_response, fetch_latest_sequence, is_rate_limited, is_sequence_conflict,
     is_unsupported_op, retry_on_rate_limit, submit_entry,
 };
-use crate::metrics::{self, AgentMetrics};
 
 /// Env var that carries the `tt_inv_2_...` token. Presence of this var is
 /// how we detect "run in stateless mode".
@@ -34,9 +33,6 @@ pub const INVITE_TOKEN_ENV: &str = "TOWONEL_INVITE_TOKEN";
 /// Overrides the hub-returned allowlist. Escape hatch for local testing
 /// or pinning a specific edge during an incident.
 pub const TRUSTED_EDGES_ENV: &str = "TOWONEL_AGENT_TRUSTED_EDGES";
-
-/// Heartbeats every 20s; the hub considers an agent live for 90s.
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 /// Register retries to tolerate sequence conflicts from sibling replicas.
 const REGISTER_MAX_ATTEMPTS: usize = 10;
@@ -653,63 +649,6 @@ async fn call_refresh(ctx: &BootstrapContext) -> anyhow::Result<CachedEdgeCred> 
         sig,
         not_after_ms: decoded.not_after_ms,
     })
-}
-
-/// Spawn the heartbeat task. Returns the `JoinHandle` so the caller can
-/// abort on shutdown (not strictly necessary -- the hub reaps stale
-/// heartbeats -- but keeps shutdown logs clean).
-pub fn spawn_heartbeat(ctx: Arc<BootstrapContext>, metrics: Arc<AgentMetrics>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        tick.tick().await; // first tick is immediate -- send one right away
-        loop {
-            match send_heartbeat(&ctx).await {
-                Ok(()) => metrics.record_heartbeat(metrics::heartbeat_outcome::OK),
-                Err(e) => {
-                    metrics.record_heartbeat(metrics::heartbeat_outcome::ERROR);
-                    warn!(error = %e, "heartbeat failed; continuing");
-                }
-            }
-            tick.tick().await;
-        }
-    })
-}
-
-async fn send_heartbeat(ctx: &BootstrapContext) -> anyhow::Result<()> {
-    #[derive(Serialize)]
-    struct Body {
-        tenant_id: TenantId,
-        agent_id: AgentId,
-    }
-
-    let body = Body {
-        tenant_id: ctx.tenant_id,
-        agent_id: ctx.agent_id(),
-    };
-    let mut buf = Vec::new();
-    ciborium::into_writer(&body, &mut buf).context("encode heartbeat")?;
-
-    let url = format!("{}/v1/agent/heartbeat", ctx.hub_url.trim_end_matches('/'));
-    let auth = sign_auth_header(
-        ctx.agent_kp.signing_key(),
-        "towonel/agent-heartbeat/v1",
-        towonel_common::time::now_ms(),
-        &buf,
-    );
-
-    let resp = ctx
-        .client
-        .post(&url)
-        .header(reqwest::header::AUTHORIZATION, auth)
-        .header(reqwest::header::CONTENT_TYPE, CBOR_CONTENT_TYPE)
-        .body(buf)
-        .send()
-        .await
-        .with_context(|| format!("failed to POST {url}"))?;
-
-    check_response(resp).await?;
-    Ok(())
 }
 
 #[derive(Deserialize)]

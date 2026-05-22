@@ -8,10 +8,16 @@ use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+use towonel_common::edge_link::EdgeToHub;
+use towonel_common::identity::{AgentId, TenantId};
 use towonel_common::routing::RouteTable;
 use towonel_common::tunnel::CONTROL_STATUS_NOT_IMPLEMENTED;
 
 use super::hub_link::HubLinkHandle;
+
+/// Late-binding handle the hub fills with its `LivenessStore` once
+/// `AppState` is built; empty before then.
+pub type LivenessCell = Arc<OnceLock<Arc<dyn crate::hub::liveness::LivenessStore>>>;
 
 pub type RouteStream = Pin<Box<dyn Stream<Item = RouteTable> + Send + 'static>>;
 
@@ -34,21 +40,33 @@ pub trait HubClient: Send + Sync {
 
     /// Hub verifies the frame; the edge does not inspect it.
     async fn handle_control_frame(&self, frame: Vec<u8>) -> anyhow::Result<ControlResponse>;
+
+    /// Best-effort; the next route rebuild or a reconnect `SessionsSnapshot`
+    /// repairs any miss.
+    async fn record_session_added(&self, tenant_id: TenantId, agent_id: AgentId);
+
+    async fn record_session_removed(&self, tenant_id: TenantId, agent_id: AgentId);
 }
 
 pub struct InProcessHubClient {
     rx: Mutex<Option<broadcast::Receiver<RouteTable>>>,
     tx: broadcast::Sender<RouteTable>,
     control_handler: ControlHandlerCell,
+    liveness: LivenessCell,
 }
 
 impl InProcessHubClient {
-    pub fn new(tx: broadcast::Sender<RouteTable>, control_handler: ControlHandlerCell) -> Self {
+    pub fn new(
+        tx: broadcast::Sender<RouteTable>,
+        control_handler: ControlHandlerCell,
+        liveness: LivenessCell,
+    ) -> Self {
         let rx = tx.subscribe();
         Self {
             rx: Mutex::new(Some(rx)),
             tx,
             control_handler,
+            liveness,
         }
     }
 }
@@ -79,12 +97,25 @@ impl HubClient for InProcessHubClient {
             None => Ok((CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new())),
         }
     }
+
+    async fn record_session_added(&self, tenant_id: TenantId, agent_id: AgentId) {
+        let Some(liveness) = self.liveness.get() else {
+            return;
+        };
+        if let Err(e) = liveness
+            .bump(&tenant_id, &agent_id, towonel_common::time::now_ms())
+            .await
+        {
+            tracing::warn!(error = %e, "in-process liveness bump failed");
+        }
+    }
+
+    async fn record_session_removed(&self, _tenant_id: TenantId, _agent_id: AgentId) {
+        // Single-hub volatile model: prune loop ages stale rows out.
+    }
 }
 
-/// `HubClient` over the edge's `hub_link` transport. The supervisor pushes
-/// `RouteSnapshot`s into the broadcast channel that `subscribe_routes`
-/// reads. Control-frame proxying isn't implemented yet — see
-/// `handle_control_frame`.
+/// `HubClient` over the edge's `hub_link` transport.
 pub struct RemoteHubClient {
     link: HubLinkHandle,
 }
@@ -114,6 +145,29 @@ impl HubClient for RemoteHubClient {
         // the agent presenter logs the rejection but doesn't gate on it.
         Ok((CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new()))
     }
+
+    async fn record_session_added(&self, tenant_id: TenantId, agent_id: AgentId) {
+        if let Err(e) = self
+            .link
+            .session_event_tx
+            .try_send(EdgeToHub::SessionAdded {
+                agent_id,
+                tenant_id,
+            })
+        {
+            tracing::warn!(error = %e, "hub_link session event queue full or closed");
+        }
+    }
+
+    async fn record_session_removed(&self, _tenant_id: TenantId, agent_id: AgentId) {
+        if let Err(e) = self
+            .link
+            .session_event_tx
+            .try_send(EdgeToHub::SessionRemoved { agent_id })
+        {
+            tracing::warn!(error = %e, "hub_link session event queue full or closed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +177,11 @@ mod tests {
     #[tokio::test]
     async fn replays_pre_subscribe_broadcast() {
         let (tx, _) = broadcast::channel(8);
-        let client = InProcessHubClient::new(tx.clone(), Arc::new(OnceLock::new()));
+        let client = InProcessHubClient::new(
+            tx.clone(),
+            Arc::new(OnceLock::new()),
+            Arc::new(OnceLock::new()),
+        );
 
         tx.send(RouteTable::from_raw(std::collections::HashMap::new()))
             .unwrap();
@@ -138,7 +196,8 @@ mod tests {
     #[tokio::test]
     async fn handle_control_frame_returns_not_implemented_by_default() {
         let (tx, _) = broadcast::channel(8);
-        let client = InProcessHubClient::new(tx, Arc::new(OnceLock::new()));
+        let client =
+            InProcessHubClient::new(tx, Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
         let (status, body) = client
             .handle_control_frame(b"anything".to_vec())
             .await
@@ -150,7 +209,11 @@ mod tests {
     #[tokio::test]
     async fn second_subscribe_only_sees_new_updates() {
         let (tx, _) = broadcast::channel(8);
-        let client = InProcessHubClient::new(tx.clone(), Arc::new(OnceLock::new()));
+        let client = InProcessHubClient::new(
+            tx.clone(),
+            Arc::new(OnceLock::new()),
+            Arc::new(OnceLock::new()),
+        );
 
         let _consumed = client.subscribe_routes();
         let mut second = client.subscribe_routes();

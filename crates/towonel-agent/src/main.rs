@@ -141,9 +141,6 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     }
 
     stateless::register(&ctx).await?;
-    // Heartbeat right after register so liveness is set before the
-    // supervisor's first dial.
-    let heartbeat = stateless::spawn_heartbeat(ctx.clone(), metrics.clone());
     let _cred_refresh = stateless::spawn_edge_cred_refresh(ctx.clone());
 
     stateless::publish_hostnames(&ctx).await?;
@@ -159,8 +156,6 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         .map(|s| (s.name.clone(), s.listen_port))
         .collect();
     stateless::publish_udp_services(&ctx, &desired_udp_bindings).await?;
-    // No reconcile pass: dead pods are pruned by the hub's heartbeat
-    // TTL. Reconciling here would revoke sibling replicas.
 
     if !agent_config.services.is_empty() {
         let result = publish_tls::publish(
@@ -200,7 +195,6 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     }
     shutdown.cancel();
     supervisors.shutdown().await;
-    heartbeat.abort();
     health_handle.abort();
     endpoint.close().await;
     info!("towonel-agent stopped");

@@ -1,4 +1,3 @@
-mod agent_heartbeat;
 mod agent_refresh;
 mod bootstrap;
 mod edge_invites;
@@ -111,11 +110,11 @@ pub struct AppState {
     pub metrics: HubMetrics,
     /// Operator secret used to keyed-hash invite secrets before persistence.
     pub invite_hash_key: Arc<InviteHashKey>,
-    /// Replay cache for signed agent → hub requests (`/agent/heartbeat`,
-    /// `/agent/refresh`), keyed by `(node_id, ts_ms)`. The auth domain in
-    /// the signed message is endpoint-specific so cross-replay across
-    /// endpoints is impossible; this cache only catches in-endpoint replays
-    /// within the ±60s freshness window.
+    /// Replay cache for signed agent → hub requests (`/agent/refresh`),
+    /// keyed by `(node_id, ts_ms)`. The auth domain in the signed message
+    /// is endpoint-specific so cross-replay across endpoints is impossible;
+    /// this cache only catches in-endpoint replays within the ±60s freshness
+    /// window.
     pub signed_request_nonces: NonceCache,
     /// Replay cache for edge-subscribe (`node_id`, `ts_ms`) pairs. A captured
     /// `Authorization` header for `GET /v1/routes/subscribe` would otherwise
@@ -131,6 +130,7 @@ pub struct AppState {
     pub signer: Arc<HubSigner>,
     pub refresh_limiter: RefreshLimiter,
     pub live_edges: Arc<super::live_edges::LiveEdges>,
+    pub liveness: super::liveness::SharedLivenessStore,
 }
 
 impl AppState {
@@ -155,8 +155,10 @@ impl AppState {
 pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Result<()> {
     let policy_snapshot = state.policy.load_full();
     let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
-    let (entries, live) =
-        tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
+    let (entries, live) = tokio::try_join!(
+        state.db.get_all_entries(),
+        state.liveness.live_agents(cutoff)
+    )?;
     let table = RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live));
     if state.route_tx.send(table).is_err() {
         tracing::debug!("route broadcast: no active subscribers");
@@ -255,7 +257,6 @@ fn signed_public_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/entries", post(entries::post_entry))
         .route("/v1/tenants/{id}/entries", get(entries::get_tenant_entries))
-        .route("/v1/agent/heartbeat", post(agent_heartbeat::post_heartbeat))
         .route("/v1/agent/refresh", post(agent_refresh::post_refresh))
         .route("/v1/routes/subscribe", get(subscribe::routes_subscribe))
 }

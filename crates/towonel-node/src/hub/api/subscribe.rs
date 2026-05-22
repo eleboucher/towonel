@@ -51,8 +51,10 @@ async fn authenticate_edge_subscriber(
 pub(super) async fn build_initial_snapshot(state: &AppState) -> anyhow::Result<RouteTable> {
     let policy_snapshot = state.policy.load_full();
     let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
-    let (entries, live) =
-        tokio::try_join!(state.db.get_all_entries(), state.db.live_agents(cutoff))?;
+    let (entries, live) = tokio::try_join!(
+        state.db.get_all_entries(),
+        state.liveness.live_agents(cutoff)
+    )?;
     Ok(RouteTable::from_entries_with_liveness(
         &entries,
         &policy_snapshot,

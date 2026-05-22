@@ -15,11 +15,6 @@ pub mod stream_error {
     pub const FORWARD_ERROR: &str = "forward_error";
 }
 
-pub mod heartbeat_outcome {
-    pub const OK: &str = "ok";
-    pub const ERROR: &str = "error";
-}
-
 pub mod direction {
     pub const EDGE_TO_ORIGIN: &str = "edge_to_origin";
     pub const ORIGIN_TO_EDGE: &str = "origin_to_edge";
@@ -34,7 +29,6 @@ pub struct AgentMetrics {
     pub stream_errors: IntCounterVec,
     pub streams_active: IntGauge,
     pub bytes_total: IntCounterVec,
-    pub heartbeats: IntCounterVec,
     pub info: IntGaugeVec,
     registry: Arc<Registry>,
 }
@@ -83,12 +77,6 @@ impl AgentMetrics {
                 "Bytes forwarded between edge and origin, by direction",
                 &["direction"],
             ),
-            heartbeats: register_counter_vec(
-                &r,
-                "towonel_agent_heartbeats_total",
-                "Heartbeat POSTs to the hub, by outcome",
-                &["outcome"],
-            ),
             info: register_gauge_vec(
                 &r,
                 "towonel_agent_info",
@@ -109,10 +97,6 @@ impl AgentMetrics {
 
     pub fn record_stream_error(&self, reason: &'static str) {
         self.stream_errors.with_label_values(&[reason]).inc();
-    }
-
-    pub fn record_heartbeat(&self, outcome: &'static str) {
-        self.heartbeats.with_label_values(&[outcome]).inc();
     }
 
     pub fn add_bytes(&self, dir: &'static str, n: u64) {
@@ -141,8 +125,6 @@ mod tests {
         m.record_stream_error(stream_error::ORIGIN_CONNECT);
         m.add_bytes(direction::EDGE_TO_ORIGIN, 123);
         m.add_bytes(direction::ORIGIN_TO_EDGE, 456);
-        m.record_heartbeat(heartbeat_outcome::OK);
-        m.record_heartbeat(heartbeat_outcome::ERROR);
 
         let mut buf = Vec::new();
         TextEncoder::new()
@@ -156,14 +138,12 @@ mod tests {
             "towonel_agent_stream_errors",
             "towonel_agent_streams_active",
             "towonel_agent_bytes",
-            "towonel_agent_heartbeats",
             "towonel_agent_info",
         ] {
             assert!(out.contains(name), "missing metric {name} in:\n{out}");
         }
         assert!(out.contains("reason=\"origin_connect\""));
         assert!(out.contains("direction=\"edge_to_origin\""));
-        assert!(out.contains("outcome=\"ok\""));
         assert!(out.contains("version=\"test-0.0.0\""));
     }
 

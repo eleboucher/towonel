@@ -42,7 +42,7 @@ impl TestHub {
         );
 
         let state = Arc::new(AppState {
-            db,
+            db: db.clone(),
             route_tx,
             policy,
             identity: super::HubIdentity {
@@ -64,6 +64,7 @@ impl TestHub {
             signer,
             refresh_limiter: new_refresh_limiter(),
             live_edges: Arc::new(super::live_edges::LiveEdges::new()),
+            liveness: Arc::new(super::liveness::DbBackedLivenessStore::new(db.clone())),
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

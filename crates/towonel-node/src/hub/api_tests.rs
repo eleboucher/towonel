@@ -797,27 +797,6 @@ async fn bootstrap_rejects_missing_invite() {
     assert_eq!(body["error"]["code"], "not_found");
 }
 
-// POST /v1/agent/heartbeat
-
-#[derive(serde::Serialize)]
-struct HeartbeatBody {
-    tenant_id: towonel_common::identity::TenantId,
-    agent_id: towonel_common::identity::AgentId,
-}
-
-fn encode_heartbeat(
-    tenant_id: towonel_common::identity::TenantId,
-    agent_id: towonel_common::identity::AgentId,
-) -> Vec<u8> {
-    let body = HeartbeatBody {
-        tenant_id,
-        agent_id,
-    };
-    let mut buf = Vec::new();
-    ciborium::into_writer(&body, &mut buf).unwrap();
-    buf
-}
-
 #[tokio::test]
 async fn prune_stale_liveness_drops_agent_from_route_table() {
     // Seed an agent as live, submit its UpsertAgent + UpsertHostname, verify
@@ -895,39 +874,6 @@ async fn prune_stale_liveness_drops_agent_from_route_table() {
 
     let live_after = hub.state.db.live_agents(0).await.unwrap();
     assert!(!live_after.contains(&(tenant.id(), agent.id())));
-}
-
-#[tokio::test]
-async fn heartbeat_bumps_liveness_for_known_tenant() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
-    let tenant = tenant_from_token(&token);
-    let agent = AgentKeypair::generate();
-
-    // Serialize the body first; the signature must cover it (v2 body-binding).
-    let body_bytes = encode_heartbeat(tenant.id(), agent.id());
-
-    let auth = towonel_common::auth::sign_auth_header(
-        agent.signing_key(),
-        "towonel/agent-heartbeat/v1",
-        towonel_common::time::now_ms(),
-        &body_bytes,
-    );
-
-    let resp = client
-        .post(hub.url("/v1/agent/heartbeat"))
-        .header(reqwest::header::AUTHORIZATION, auth)
-        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
-        .body(body_bytes)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let live = hub.state.db.live_agents(0).await.unwrap();
-    assert!(live.contains(&(tenant.id(), agent.id())));
 }
 
 #[tokio::test]
