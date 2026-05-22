@@ -24,7 +24,7 @@ ARG ZIG_VERSION=0.16.0
 # renovate: datasource=github-releases depName=rust-cross/cargo-zigbuild
 ARG CARGO_ZIGBUILD_VERSION=0.22.3
 # renovate: datasource=github-releases depName=mozilla/sccache
-ARG SCCACHE_VERSION=0.14.0
+ARG SCCACHE_VERSION=0.15.0
 ARG ENABLE_SCCACHE=0
 
 RUN apt-get update \
