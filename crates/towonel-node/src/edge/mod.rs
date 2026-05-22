@@ -1,5 +1,6 @@
 pub mod acme;
 pub mod health;
+pub mod hub_client;
 pub mod proxy_protocol;
 pub mod router;
 pub mod sessions;
@@ -24,6 +25,7 @@ use towonel_common::tunnel::{
 
 use self::acme::AcmeManager;
 use self::health::{EdgeMetrics, session_reject_reason};
+use self::hub_client::HubClient;
 use self::router::Router;
 use self::sessions::{AgentSession, SessionRegistry};
 use crate::config::ProxyProtocolConfig;
@@ -68,6 +70,7 @@ pub struct Edge {
     hub_self_route: Option<Arc<HubSelfRoute>>,
     proxy_protocol: Arc<ProxyProtocolConfig>,
     metrics: EdgeMetrics,
+    hub_client: Option<Arc<dyn HubClient>>,
 }
 
 struct TlsState {
@@ -100,7 +103,14 @@ impl Edge {
             hub_self_route: None,
             proxy_protocol: Arc::default(),
             metrics,
+            hub_client: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_hub_client(mut self, client: Arc<dyn HubClient>) -> Self {
+        self.hub_client = Some(client);
+        self
     }
 
     #[must_use]
@@ -187,6 +197,12 @@ impl Edge {
             )));
         }
 
+        if let Some(hub_client) = self.hub_client.as_ref() {
+            let stream = hub_client.subscribe_routes();
+            let router = Arc::clone(&self.router);
+            tasks.push(tokio::spawn(route_sync_loop(stream, router)));
+        }
+
         for task in tasks {
             // Accept loops never return `Ok`; only observe task panics.
             if let Err(e) = task.await {
@@ -195,6 +211,16 @@ impl Edge {
         }
         Ok(())
     }
+}
+
+async fn route_sync_loop(mut stream: hub_client::RouteStream, router: Arc<Router>) {
+    use tokio_stream::StreamExt;
+    while let Some(table) = stream.next().await {
+        let count = table.len();
+        router.replace(table);
+        info!(hostnames = count, "dynamic route update applied");
+    }
+    info!("route stream closed, stopping sync loop");
 }
 
 async fn iroh_accept_loop(

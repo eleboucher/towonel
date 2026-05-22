@@ -11,13 +11,12 @@ use clap::{Parser, Subcommand};
 use iroh::RelayMode;
 use iroh::endpoint::{Endpoint, presets::Minimal};
 use tokio::sync::broadcast;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use towonel_common::identity::TenantId;
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
 
-use crate::edge::router::Router;
 use crate::hub::HubIdentity;
 
 const SOFTWARE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -359,17 +358,18 @@ async fn run_node() -> anyhow::Result<()> {
 
     match (config.hub.enabled, config.edge.enabled) {
         (true, true) => {
-            let (route_tx, route_rx) = broadcast::channel::<RouteTable>(64);
+            let (route_tx, _) = broadcast::channel::<RouteTable>(64);
+            let hub_client = Arc::new(edge::hub_client::InProcessHubClient::new(route_tx.clone()));
             let BuiltEdge {
-                router,
                 edge,
                 edge_node_id,
                 bound_socket_strings,
                 iroh_port,
                 endpoint,
+                ..
             } = build_edge(secret_key, &config.tenants, &config.edge).await?;
 
-            let edge = configure_hub_self_route(edge, &config.hub);
+            let edge = configure_hub_self_route(edge, &config.hub).with_hub_client(hub_client);
 
             let public_addresses = if config.edge.public_addresses.is_empty() {
                 bound_socket_strings.clone()
@@ -387,8 +387,6 @@ async fn run_node() -> anyhow::Result<()> {
                 software_version: SOFTWARE_VERSION,
             };
             let hub = hub::Hub::new(build_hub_params(&config, identity, route_tx).await?);
-
-            tokio::spawn(route_sync_task(route_rx, router));
 
             tokio::select! {
                 res = hub.run() => {
@@ -655,27 +653,6 @@ fn derive_edge_iroh_addresses(
             (!addr.ip().is_unspecified() && !addr.ip().is_loopback()).then(|| addr.to_string())
         })
         .collect()
-}
-
-/// Background task: receives materialized route tables from the hub's broadcast
-/// channel and applies them to the edge's router.
-async fn route_sync_task(mut route_rx: broadcast::Receiver<RouteTable>, router: Arc<Router>) {
-    loop {
-        match route_rx.recv().await {
-            Ok(new_table) => {
-                let count = new_table.len();
-                router.replace(new_table);
-                info!(hostnames = count, "dynamic route update applied");
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!(skipped = n, "route sync lagged, waiting for next update");
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                info!("route broadcast channel closed, stopping sync task");
-                break;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
