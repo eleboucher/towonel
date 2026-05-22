@@ -38,6 +38,7 @@ prometheus = { workspace = true }
 base64 = { workspace = true }
 getrandom = { workspace = true }
 tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
 async-stream = { workspace = true }
 # Used by the SSE route-subscriber client in edge-only mode (and by hub API tests).
 reqwest = { workspace = true }

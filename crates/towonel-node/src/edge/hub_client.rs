@@ -11,6 +11,8 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use towonel_common::routing::RouteTable;
 use towonel_common::tunnel::CONTROL_STATUS_NOT_IMPLEMENTED;
 
+use super::hub_link::HubLinkHandle;
+
 pub type RouteStream = Pin<Box<dyn Stream<Item = RouteTable> + Send + 'static>>;
 
 /// `(status_byte, response_body)` written back on the same QUIC stream.
@@ -76,6 +78,41 @@ impl HubClient for InProcessHubClient {
             Some(handler) => handler.handle(frame).await,
             None => Ok((CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new())),
         }
+    }
+}
+
+/// `HubClient` over the edge's `hub_link` transport. The supervisor pushes
+/// `RouteSnapshot`s into the broadcast channel that `subscribe_routes`
+/// reads. Control-frame proxying isn't implemented yet — see
+/// `handle_control_frame`.
+pub struct RemoteHubClient {
+    link: HubLinkHandle,
+}
+
+impl RemoteHubClient {
+    #[must_use]
+    pub const fn new(link: HubLinkHandle) -> Self {
+        Self { link }
+    }
+}
+
+#[async_trait::async_trait]
+impl HubClient for RemoteHubClient {
+    fn subscribe_routes(&self) -> RouteStream {
+        let rx = self.link.route_tx.subscribe();
+        Box::pin(BroadcastStream::new(rx).filter_map(|res| match res {
+            Ok(table) => Some(table),
+            Err(BroadcastStreamRecvError::Lagged(n)) => {
+                tracing::warn!(skipped = n, "remote route stream lagged");
+                None
+            }
+        }))
+    }
+
+    async fn handle_control_frame(&self, _frame: Vec<u8>) -> anyhow::Result<ControlResponse> {
+        // Remote control-frame proxying isn't wired through the link yet;
+        // the agent presenter logs the rejection but doesn't gate on it.
+        Ok((CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new()))
     }
 }
 

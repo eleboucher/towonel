@@ -428,11 +428,60 @@ async fn run_node() -> anyhow::Result<()> {
             let BuiltEdge {
                 router,
                 edge,
+                edge_node_id,
+                bound_socket_strings,
+                iroh_port,
                 endpoint,
                 ..
             } = build_edge(secret_key, &config.tenants, &config.edge).await?;
 
-            if let Some(hub_url) = config.edge.hub_url.clone() {
+            let link_shutdown = tokio_util::sync::CancellationToken::new();
+            let (edge, link_task) = match (
+                config.edge.hub_link_addr.clone(),
+                config.edge.hub_link_psk.clone(),
+            ) {
+                (Some(addr), Some(psk)) => {
+                    let handle = edge::hub_link::HubLinkHandle::new(64);
+                    let public_addresses = if config.edge.public_addresses.is_empty() {
+                        bound_socket_strings.clone()
+                    } else {
+                        config.edge.public_addresses.clone()
+                    };
+                    let iroh_endpoints = derive_edge_iroh_addresses(
+                        &public_addresses,
+                        iroh_port,
+                        &bound_socket_strings,
+                    );
+                    let cfg = edge::hub_link::HubLinkConfig {
+                        addr,
+                        psk,
+                        edge_id: *edge_node_id.as_bytes(),
+                        iroh_endpoints,
+                        software_version: SOFTWARE_VERSION.to_string(),
+                    };
+                    let hub_client: Arc<dyn edge::hub_client::HubClient> =
+                        Arc::new(edge::hub_client::RemoteHubClient::new(handle.clone()));
+                    let edge_with_client = edge.with_hub_client(hub_client);
+                    let shutdown = link_shutdown.clone();
+                    let task = tokio::spawn(async move {
+                        edge::hub_link::run_supervisor(cfg, handle, shutdown).await;
+                    });
+                    (edge_with_client, Some(task))
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    tracing::warn!(
+                        "TOWONEL_EDGE_HUB_LINK_ADDR and TOWONEL_EDGE_HUB_LINK_PSK must both be set; \
+                         hub_link disabled — falling back to the legacy SSE subscriber if TOWONEL_EDGE_HUB_URL is set"
+                    );
+                    (edge, None)
+                }
+                (None, None) => (edge, None),
+            };
+
+            // Legacy SSE fallback when hub_link isn't configured.
+            if link_task.is_none()
+                && let Some(hub_url) = config.edge.hub_url.clone()
+            {
                 let router_for_sub = Arc::clone(&router);
                 tokio::spawn(async move {
                     if let Err(e) =
@@ -448,6 +497,12 @@ async fn run_node() -> anyhow::Result<()> {
                     if let Err(e) = res { error!("edge error: {e}"); }
                 }
                 () = towonel_common::shutdown::shutdown_signal() => {}
+            }
+            link_shutdown.cancel();
+            if let Some(task) = link_task
+                && let Err(e) = task.await
+            {
+                tracing::debug!(error = %e, "hub_link supervisor join error");
             }
             endpoint.close().await;
         }
@@ -521,6 +576,8 @@ async fn build_hub_params(
         invite_hash_key,
         kek,
         public_url,
+        link_listen_addr: config.hub.link_listen_addr.clone(),
+        link_psk: config.hub.link_psk.clone(),
     })
 }
 
