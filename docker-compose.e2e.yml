@@ -29,7 +29,7 @@ services:
       retries: 30
 
   origin:
-    image: alpine:3.21
+    image: alpine:3.23
     container_name: towonel-e2e-origin
     command:
       - sh
