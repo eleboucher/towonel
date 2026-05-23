@@ -90,7 +90,6 @@ jobs:
     needs: [release]
     permissions:
       contents: write
-      id-token: write
     runs-on: docker
     strategy:
       fail-fast: false
@@ -104,7 +103,7 @@ jobs:
       ZIG_VERSION: "0.16.0"
       CARGO_ZIGBUILD_VERSION: "0.22.3"
       # renovate: datasource=github-releases depName=sigstore/cosign
-      COSIGN_VERSION: "2.4.1"
+      COSIGN_VERSION: "3.0.5"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
 
@@ -176,13 +175,16 @@ jobs:
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
 
-      # Keyless signing needs the runner OIDC issuer in Fulcio's trust root.
-      - name: Cosign sign-blob (keyless)
+      - name: Cosign sign-blob
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
         run: |
           set -euo pipefail
           ARCHIVE="${{ steps.archive.outputs.archive }}"
           cosign sign-blob --yes \
-            --bundle "${ARCHIVE}.cosign.bundle" \
+            --key env://COSIGN_KEY \
+            --output-signature "${ARCHIVE}.sig" \
             "${ARCHIVE}"
 
       - name: Upload assets to Forgejo release
@@ -202,7 +204,7 @@ jobs:
           }
           upload "${ARCHIVE}"
           upload "${ARCHIVE}.sha256"
-          upload "${ARCHIVE}.cosign.bundle"
+          upload "${ARCHIVE}.sig"
 
   container:
     needs: [tests]
