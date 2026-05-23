@@ -62,6 +62,11 @@ enum Command {
         #[command(subcommand)]
         action: InviteAction,
     },
+    /// Operator-only: manage hub user accounts (web frontend).
+    User {
+        #[command(subcommand)]
+        action: UserAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -155,6 +160,23 @@ enum AgentAction {
     Init {
         #[arg(long, default_value = "agent.key")]
         key_path: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum UserAction {
+    /// Create a hub user account. Writes directly to the hub DB, so this
+    /// must run on the hub host (or with `TOWONEL_HUB_DB_*` pointing at it).
+    Create {
+        /// Account email.
+        #[arg(long)]
+        email: String,
+        /// `user` or `operator`.
+        #[arg(long, default_value = "user")]
+        role: String,
+        /// Password. Prompted interactively if omitted.
+        #[arg(long)]
+        password: Option<String>,
     },
 }
 
@@ -278,6 +300,13 @@ async fn main() -> anyhow::Result<()> {
                 api_key,
                 id,
             } => admin::invite::cmd_invite_revoke(hub_url, api_key, id).await,
+        },
+        Some(Command::User { action }) => match action {
+            UserAction::Create {
+                email,
+                role,
+                password,
+            } => admin::user::cmd_user_create(email, role, password).await,
         },
     }
 }

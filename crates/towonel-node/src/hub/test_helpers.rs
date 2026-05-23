@@ -64,6 +64,7 @@ impl TestHub {
             refresh_limiter: new_refresh_limiter(),
             live_edges: Arc::new(super::live_edges::LiveEdges::new()),
             liveness: Arc::new(super::liveness::InMemoryLivenessStore::new()),
+            web_enabled: true,
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

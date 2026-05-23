@@ -6,8 +6,11 @@
 pub(super) mod entities;
 mod invites;
 mod migration;
+pub mod sessions;
 mod signing_keys;
+mod signup_invites;
 mod types;
+pub mod users;
 
 pub use types::*;
 

@@ -317,6 +317,7 @@ impl Hub {
             refresh_limiter: api::new_refresh_limiter(),
             live_edges: Arc::new(live_edges::LiveEdges::new()),
             liveness,
+            web_enabled: self.p.web_enabled,
         });
 
         spawn_background_loops(&state);

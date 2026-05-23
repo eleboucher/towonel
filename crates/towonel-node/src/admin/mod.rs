@@ -5,6 +5,7 @@
 pub mod entry;
 pub mod invite;
 pub mod tenant;
+pub mod user;
 
 use std::path::{Path, PathBuf};
 

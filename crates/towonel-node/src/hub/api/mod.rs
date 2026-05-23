@@ -1,4 +1,5 @@
 mod agent_refresh;
+mod auth;
 mod bootstrap;
 mod entries;
 mod invites;
@@ -124,6 +125,7 @@ pub struct AppState {
     pub refresh_limiter: RefreshLimiter,
     pub live_edges: Arc<super::live_edges::LiveEdges>,
     pub liveness: super::liveness::SharedLivenessStore,
+    pub web_enabled: bool,
 }
 
 impl AppState {
@@ -182,7 +184,7 @@ pub fn router_unlimited(state: Arc<AppState>) -> Router {
 
 fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let operator_routes = operator_routes(&state);
-    let rate_limited_public = maybe_rate_limit(rate_limited_routes(), rate_limit);
+    let rate_limited_public = maybe_rate_limit(rate_limited_routes(state.web_enabled), rate_limit);
     let signed_public = signed_public_routes();
     let unlimited_public = Router::new()
         .route("/v1/health", get(entries::health))
@@ -234,8 +236,16 @@ fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
 }
 
-fn rate_limited_routes() -> Router<Arc<AppState>> {
-    Router::new().route("/v1/bootstrap", post(bootstrap::post_bootstrap))
+fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
+    let mut r = Router::new().route("/v1/bootstrap", post(bootstrap::post_bootstrap));
+    if web_enabled {
+        r = r
+            .route("/v1/auth/signup", post(auth::post_signup))
+            .route("/v1/auth/login", post(auth::post_login))
+            .route("/v1/auth/logout", post(auth::post_logout))
+            .route("/v1/auth/me", get(auth::get_me));
+    }
+    r
 }
 
 fn signed_public_routes() -> Router<Arc<AppState>> {
