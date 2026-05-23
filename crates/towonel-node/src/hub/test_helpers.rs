@@ -33,6 +33,10 @@ pub(super) struct TestHub {
 
 impl TestHub {
     pub(super) async fn start() -> Self {
+        Self::start_with(false).await
+    }
+
+    pub(super) async fn start_with(ports_require_reservation: bool) -> Self {
         let db = temp_db().await;
         let (route_tx, _route_rx) = broadcast::channel(16);
         let policy = arc_swap::ArcSwap::from_pointee(OwnershipPolicy::new());
@@ -69,6 +73,8 @@ impl TestHub {
             live_edges: Arc::new(super::live_edges::LiveEdges::new()),
             liveness: Arc::new(super::liveness::InMemoryLivenessStore::new()),
             web_enabled: true,
+            port_reservations_tx: tokio::sync::broadcast::channel(64).0,
+            ports_require_reservation,
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

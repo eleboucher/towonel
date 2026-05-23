@@ -4,6 +4,7 @@ mod bootstrap;
 mod entries;
 mod invites;
 mod metrics_handler;
+mod ports;
 mod signup_invites;
 mod users;
 
@@ -31,6 +32,7 @@ use towonel_common::routing::RouteTable;
 use tracing::Level;
 
 use super::db;
+use super::edge_link::PortReservationDelta;
 use super::metrics::HubMetrics;
 use super::signing::HubSigner;
 use db::Db;
@@ -143,6 +145,8 @@ pub struct AppState {
     pub live_edges: Arc<super::live_edges::LiveEdges>,
     pub liveness: super::liveness::SharedLivenessStore,
     pub web_enabled: bool,
+    pub port_reservations_tx: broadcast::Sender<PortReservationDelta>,
+    pub ports_require_reservation: bool,
 }
 
 impl AppState {
@@ -249,6 +253,15 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
 fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tenants/{id}", delete(entries::delete_tenant))
+        .route(
+            "/v1/tenants/{id}/ports",
+            post(ports::post_port).get(ports::list_ports),
+        )
+        .route(
+            "/v1/tenants/{id}/ports/{proto}/{port}",
+            delete(ports::delete_port),
+        )
+        .route("/v1/ports", get(ports::list_all_ports))
         .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
 }
 

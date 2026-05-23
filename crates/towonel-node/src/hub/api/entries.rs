@@ -10,10 +10,11 @@ use tracing::warn;
 
 use towonel_common::time::now_ms;
 
+use super::super::db::port_reservations::PortProtocol;
 use super::super::metrics::reject_reason;
 use super::{
-    AppState, PROTOCOL_VERSION, cbor_response, hostname_not_owned, internal_error, invalid_request,
-    invalid_signature, json_ok, rebuild_and_broadcast_routes, sequence_conflict,
+    AppState, PROTOCOL_VERSION, cbor_response, error_response, hostname_not_owned, internal_error,
+    invalid_request, invalid_signature, json_ok, rebuild_and_broadcast_routes, sequence_conflict,
     tenant_not_allowed, unsupported_op, unsupported_version,
 };
 
@@ -180,6 +181,41 @@ async fn find_port_conflict(
     None
 }
 
+async fn require_reservation(
+    state: &Arc<AppState>,
+    kind: ServiceKind,
+    listen_port: u16,
+    tenant_id: &TenantId,
+) -> Result<(), Response> {
+    let protocol = match kind {
+        ServiceKind::Tcp => PortProtocol::Tcp,
+        ServiceKind::Udp => PortProtocol::Udp,
+    };
+    let owns = state
+        .db
+        .tenant_owns_shared_port(tenant_id, listen_port, protocol)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "tenant_owns_shared_port query failed");
+            internal_error()
+        })?;
+    if owns {
+        return Ok(());
+    }
+    state
+        .metrics
+        .record_reject(reject_reason::PORT_NOT_RESERVED);
+    Err(error_response(
+        axum::http::StatusCode::FORBIDDEN,
+        "port_not_reserved",
+        format!(
+            "tenant has no {} reservation for listen_port {listen_port}; \
+             reserve via POST /v1/tenants/{tenant_id}/ports first",
+            kind.reasons().label,
+        ),
+    ))
+}
+
 async fn validate_service_op(
     state: &Arc<AppState>,
     payload: &ConfigPayload,
@@ -223,6 +259,12 @@ async fn validate_service_op(
                 "invalid {} listen_port {listen_port}: {e}",
                 r.label
             )));
+        }
+        if state.ports_require_reservation
+            && let Err(resp) =
+                require_reservation(state, kind, listen_port, &payload.tenant_id).await
+        {
+            return Err(resp);
         }
         match find_port_conflict(
             &state.db,

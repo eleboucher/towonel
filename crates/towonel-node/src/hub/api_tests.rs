@@ -1053,6 +1053,90 @@ async fn upsert_tcp_service_same_tenant_different_service_same_port_rejected() {
 }
 
 #[tokio::test]
+async fn require_reservation_blocks_unreserved_tcp_claim() {
+    let hub = TestHub::start_with(true).await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "ssh".into(),
+            listen_port: 22000,
+        },
+    )
+    .await;
+    assert_eq!(status, 403, "got body: {body}");
+    assert_eq!(body["error"]["code"], "port_not_reserved");
+}
+
+#[tokio::test]
+async fn require_reservation_allows_reserved_tcp_claim() {
+    let hub = TestHub::start_with(true).await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "tcp", "preferred": 22000, "label": "ssh"}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "reserve failed: {body}");
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertTcpService {
+            service: "ssh".into(),
+            listen_port: 22000,
+        },
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+}
+
+#[tokio::test]
+async fn require_reservation_is_per_protocol() {
+    // A TCP reservation on port N must NOT unlock a UDP claim on the same N.
+    let hub = TestHub::start_with(true).await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, _) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "tcp", "preferred": 5353}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpService {
+            service: "dns".into(),
+            listen_port: 5353,
+        },
+    )
+    .await;
+    assert_eq!(status, 403, "got body: {body}");
+    assert_eq!(body["error"]["code"], "port_not_reserved");
+}
+
+#[tokio::test]
 async fn unknown_op_variant_returns_unsupported_op() {
     #[derive(Serialize)]
     #[serde(rename_all = "snake_case")]

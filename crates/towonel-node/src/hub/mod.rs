@@ -197,6 +197,7 @@ pub struct HubParams {
     pub link_psk: Option<Arc<[u8; 32]>>,
     pub tls: Option<crate::config::TlsConfig>,
     pub web_enabled: bool,
+    pub ports_require_reservation: bool,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -320,6 +321,8 @@ impl Hub {
             live_edges: Arc::new(live_edges::LiveEdges::new()),
             liveness,
             web_enabled: self.p.web_enabled,
+            port_reservations_tx: tokio::sync::broadcast::channel(64).0,
+            ports_require_reservation: self.p.ports_require_reservation,
         });
 
         spawn_background_loops(&state);

@@ -146,6 +146,8 @@ pub struct HubConfig {
     /// operator-key flow get zero behavior change. Toggled via
     /// `TOWONEL_HUB_WEB_ENABLED`.
     pub web_enabled: bool,
+    /// `TOWONEL_HUB_PORTS_REQUIRE_RESERVATION`.
+    pub ports_require_reservation: bool,
 }
 
 /// Default UDP port for the iroh QUIC socket. Operators rarely need
@@ -276,6 +278,7 @@ struct RawEnv {
     hub_link_listen_addr: Option<String>,
     hub_link_psk: Option<String>,
     hub_web_enabled: Option<bool>,
+    hub_ports_require_reservation: Option<bool>,
 
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
@@ -332,6 +335,7 @@ impl NodeConfig {
             hub_link_listen_addr,
             hub_link_psk,
             hub_web_enabled,
+            hub_ports_require_reservation,
             edge_enabled,
             edge_listen_addr,
             edge_health_listen_addr,
@@ -381,6 +385,7 @@ impl NodeConfig {
             link_psk: hub_link_psk,
             tls: hub_tls,
             web_enabled: hub_web_enabled,
+            ports_require_reservation: hub_ports_require_reservation,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -465,6 +470,7 @@ struct HubInputs<'a> {
     link_psk: Option<std::sync::Arc<[u8; 32]>>,
     tls: Option<TlsConfig>,
     web_enabled: Option<bool>,
+    ports_require_reservation: Option<bool>,
     data_dir: Option<&'a Path>,
 }
 
@@ -487,6 +493,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         link_psk,
         tls,
         web_enabled,
+        ports_require_reservation,
         data_dir,
     } = inputs;
 
@@ -543,6 +550,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         link_psk,
         tls,
         web_enabled: web_enabled.unwrap_or(false),
+        ports_require_reservation: ports_require_reservation.unwrap_or(false),
     })
 }
 

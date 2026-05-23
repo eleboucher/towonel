@@ -16,6 +16,8 @@ use towonel_common::edge_link::{
 };
 use towonel_common::routing::RouteTable;
 
+use super::port_reservations::PortReservations;
+
 pub type LinkPsk = [u8; 32];
 
 pub type SigningKeyMap = Arc<RwLock<HashMap<Kid, Vec<u8>>>>;
@@ -39,6 +41,7 @@ pub struct HubLinkHandle {
     pub signing_keys: SigningKeyMap,
     pub session_event_tx: SessionEventTx,
     pub session_event_rx: Arc<Mutex<Option<SessionEventRx>>>,
+    pub port_reservations: Arc<PortReservations>,
 }
 
 impl HubLinkHandle {
@@ -50,6 +53,7 @@ impl HubLinkHandle {
             signing_keys: Arc::new(RwLock::new(HashMap::new())),
             session_event_tx,
             session_event_rx: Arc::new(Mutex::new(Some(session_event_rx))),
+            port_reservations: PortReservations::new(),
         }
     }
 }
@@ -238,6 +242,18 @@ fn handle_frame(frame: HubToEdge, handle: &HubLinkHandle) {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.remove(&kid);
+        }
+        HubToEdge::PortReservationsSnapshot { entries } => {
+            handle.port_reservations.replace_all(&entries);
+            tracing::info!(count = entries.len(), "applied port reservations snapshot");
+        }
+        HubToEdge::PortReservationsChanged { added, removed } => {
+            handle.port_reservations.apply_delta(&added, &removed);
+            tracing::info!(
+                added = added.len(),
+                removed = removed.len(),
+                "applied port reservations delta"
+            );
         }
     }
 }

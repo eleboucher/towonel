@@ -72,6 +72,11 @@ enum Command {
         #[command(subcommand)]
         action: SignupInviteAction,
     },
+    /// Operator-only: manage per-tenant TCP/UDP port reservations.
+    Port {
+        #[command(subcommand)]
+        action: PortAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -186,6 +191,51 @@ enum UserAction {
 }
 
 #[derive(Subcommand)]
+enum PortAction {
+    /// Reserve a TCP/UDP port slot for a tenant on the shared IP.
+    Reserve {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Tenant the port is being reserved for.
+        #[arg(long)]
+        tenant_id: String,
+        /// `tcp` or `udp`.
+        #[arg(long)]
+        proto: String,
+        /// Specific port. Omit to let the hub auto-pick.
+        #[arg(long)]
+        port: Option<u16>,
+        /// Optional human-readable label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Release a port reservation.
+    Release {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        tenant_id: String,
+        #[arg(long)]
+        proto: String,
+        #[arg(long)]
+        port: u16,
+    },
+    /// List a tenant's port reservations.
+    List {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        tenant_id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SignupInviteAction {
     /// Mint a new signup code and print it to stdout.
     Create {
@@ -241,6 +291,10 @@ enum InviteAction {
 #[expect(
     clippy::large_futures,
     reason = "top-level main future is large; boxing it provides no benefit"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "subcommand dispatch is a flat lookup; splitting it hides the routing table"
 )]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -331,6 +385,30 @@ async fn main() -> anyhow::Result<()> {
                 role,
                 expires_in_days,
             } => admin::signup_invite::cmd_signup_invite_create(role, expires_in_days).await,
+        },
+        Some(Command::Port { action }) => match action {
+            PortAction::Reserve {
+                hub_url,
+                api_key,
+                tenant_id,
+                proto,
+                port,
+                label,
+            } => {
+                admin::port::cmd_port_reserve(hub_url, api_key, tenant_id, proto, port, label).await
+            }
+            PortAction::Release {
+                hub_url,
+                api_key,
+                tenant_id,
+                proto,
+                port,
+            } => admin::port::cmd_port_release(hub_url, api_key, tenant_id, proto, port).await,
+            PortAction::List {
+                hub_url,
+                api_key,
+                tenant_id,
+            } => admin::port::cmd_port_list(hub_url, api_key, tenant_id).await,
         },
     }
 }
@@ -545,6 +623,7 @@ async fn build_hub_params(
             acme_staging: t.acme_staging,
         }),
         web_enabled: config.hub.web_enabled,
+        ports_require_reservation: config.hub.ports_require_reservation,
     })
 }
 

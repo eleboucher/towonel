@@ -3,6 +3,7 @@ pub mod entries;
 pub mod hub_signing_keys;
 pub mod invite_hostnames;
 pub mod invites;
+pub mod port_reservations;
 pub mod sessions;
 pub mod signup_invites;
 pub mod tenant_ownership;

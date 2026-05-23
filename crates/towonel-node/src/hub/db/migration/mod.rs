@@ -9,6 +9,7 @@ mod m20260522_000000_hub_signing_keys;
 mod m20260523_000000_user_accounts;
 mod m20260523_000001_admin_actions_widen_actor_kind;
 mod m20260524_000000_drop_edge_invites;
+mod m20260524_000001_port_reservations;
 
 pub struct Migrator;
 
@@ -25,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260523_000000_user_accounts::Migration),
             Box::new(m20260523_000001_admin_actions_widen_actor_kind::Migration),
             Box::new(m20260524_000000_drop_edge_invites::Migration),
+            Box::new(m20260524_000001_port_reservations::Migration),
         ]
     }
 }

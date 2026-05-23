@@ -51,6 +51,14 @@ pub enum EdgeToHub {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortReservationEntry {
+    pub tenant_id: TenantId,
+    pub ip: Option<String>,
+    pub port: u16,
+    pub protocol: String,
+}
+
 /// `RouteSnapshot.table` is boxed because `RouteTable` dwarfs every other
 /// variant. No `PartialEq`/`Eq` — `RouteTable` carries `HashMap`/`HashSet`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +74,13 @@ pub enum HubToEdge {
     KeyAdded(HubSigningKey),
     KeyRetired {
         kid: Kid,
+    },
+    PortReservationsSnapshot {
+        entries: Vec<PortReservationEntry>,
+    },
+    PortReservationsChanged {
+        added: Vec<PortReservationEntry>,
+        removed: Vec<PortReservationEntry>,
     },
 }
 
@@ -240,6 +255,51 @@ mod tests {
                 assert_eq!(signing_keys[0].kid, 42);
             }
             other => panic!("expected Welcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hub_to_edge_round_trip_port_reservations() {
+        let entries = vec![
+            PortReservationEntry {
+                tenant_id: tenant_id(),
+                ip: None,
+                port: 22000,
+                protocol: "tcp".into(),
+            },
+            PortReservationEntry {
+                tenant_id: tenant_id(),
+                ip: Some("2001:db8::1".into()),
+                port: 53,
+                protocol: "udp".into(),
+            },
+        ];
+        let snapshot = HubToEdge::PortReservationsSnapshot {
+            entries: entries.clone(),
+        };
+        let mut buf = Vec::new();
+        write_hub_to_edge(&mut buf, &snapshot).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let got = read_hub_to_edge(&mut cur).await.unwrap();
+        match got {
+            HubToEdge::PortReservationsSnapshot { entries: got } => assert_eq!(got, entries),
+            other => panic!("expected PortReservationsSnapshot, got {other:?}"),
+        }
+
+        let delta = HubToEdge::PortReservationsChanged {
+            added: entries.clone(),
+            removed: vec![],
+        };
+        let mut buf = Vec::new();
+        write_hub_to_edge(&mut buf, &delta).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let got = read_hub_to_edge(&mut cur).await.unwrap();
+        match got {
+            HubToEdge::PortReservationsChanged { added, removed } => {
+                assert_eq!(added, entries);
+                assert!(removed.is_empty());
+            }
+            other => panic!("expected PortReservationsChanged, got {other:?}"),
         }
     }
 

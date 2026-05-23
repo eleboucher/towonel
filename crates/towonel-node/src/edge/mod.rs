@@ -1,6 +1,7 @@
 pub mod health;
 pub mod hub_client;
 pub mod hub_link;
+pub mod port_reservations;
 pub mod proxy_protocol;
 pub mod router;
 pub mod sessions;

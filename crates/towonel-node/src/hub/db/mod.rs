@@ -7,6 +7,7 @@ pub mod admin_actions;
 pub(super) mod entities;
 mod invites;
 mod migration;
+pub mod port_reservations;
 pub mod sessions;
 mod signing_keys;
 pub mod signup_invites;
