@@ -67,6 +67,11 @@ enum Command {
         #[command(subcommand)]
         action: UserAction,
     },
+    /// Operator-only: mint signup invite codes for the web frontend.
+    SignupInvite {
+        #[command(subcommand)]
+        action: SignupInviteAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -177,6 +182,19 @@ enum UserAction {
         /// Password. Prompted interactively if omitted.
         #[arg(long)]
         password: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SignupInviteAction {
+    /// Mint a new signup code and print it to stdout.
+    Create {
+        /// Role granted on redemption: `user` or `operator`.
+        #[arg(long, default_value = "user")]
+        role: String,
+        /// Days until the code expires. Omit for non-expiring.
+        #[arg(long)]
+        expires_in_days: Option<u32>,
     },
 }
 
@@ -307,6 +325,12 @@ async fn main() -> anyhow::Result<()> {
                 role,
                 password,
             } => admin::user::cmd_user_create(email, role, password).await,
+        },
+        Some(Command::SignupInvite { action }) => match action {
+            SignupInviteAction::Create {
+                role,
+                expires_in_days,
+            } => admin::signup_invite::cmd_signup_invite_create(role, expires_in_days).await,
         },
     }
 }

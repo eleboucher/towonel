@@ -3,12 +3,13 @@
     reason = "TryInto length-mismatch errors carry no information beyond what our custom messages convey"
 )]
 
+pub mod admin_actions;
 pub(super) mod entities;
 mod invites;
 mod migration;
 pub mod sessions;
 mod signing_keys;
-mod signup_invites;
+pub mod signup_invites;
 mod types;
 pub mod users;
 

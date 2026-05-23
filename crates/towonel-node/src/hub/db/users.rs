@@ -94,4 +94,13 @@ impl Db {
             .await?;
         Ok(())
     }
+
+    pub async fn list_users(&self) -> anyhow::Result<Vec<UserRow>> {
+        use sea_orm::QueryOrder;
+        let rows = users::Entity::find()
+            .order_by_desc(users::Column::CreatedAtMs)
+            .all(&self.conn)
+            .await?;
+        Ok(rows.into_iter().map(UserRow::from).collect())
+    }
 }

@@ -106,4 +106,34 @@ impl Db {
             .await?;
         Ok(())
     }
+
+    pub async fn list_signup_invites(&self) -> anyhow::Result<Vec<SignupInviteRow>> {
+        use super::entities::signup_invites;
+        use sea_orm::{EntityTrait, QueryOrder};
+        let rows = signup_invites::Entity::find()
+            .order_by_desc(signup_invites::Column::CreatedAtMs)
+            .all(&self.conn)
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|m| SignupInviteRow {
+                code: m.code,
+                role: m.role,
+                created_at_ms: m.created_at_ms,
+                expires_at_ms: m.expires_at_ms,
+                redeemed_by_user_id: m.redeemed_by_user_id,
+                redeemed_at_ms: m.redeemed_at_ms,
+            })
+            .collect())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SignupInviteRow {
+    pub code: String,
+    pub role: String,
+    pub created_at_ms: i64,
+    pub expires_at_ms: Option<i64>,
+    pub redeemed_by_user_id: Option<String>,
+    pub redeemed_at_ms: Option<i64>,
 }

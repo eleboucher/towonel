@@ -4,6 +4,7 @@
 
 pub mod entry;
 pub mod invite;
+pub mod signup_invite;
 pub mod tenant;
 pub mod user;
 

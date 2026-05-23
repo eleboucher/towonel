@@ -4,6 +4,8 @@ mod bootstrap;
 mod entries;
 mod invites;
 mod metrics_handler;
+mod signup_invites;
+mod users;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,6 +188,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let operator_routes = operator_routes(&state);
     let rate_limited_public = maybe_rate_limit(rate_limited_routes(state.web_enabled), rate_limit);
     let signed_public = signed_public_routes();
+    let web_admin = web_admin_routes(state.web_enabled);
     let unlimited_public = Router::new()
         .route("/v1/health", get(entries::health))
         .route("/v1/edges", get(entries::list_edges));
@@ -216,6 +219,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         .merge(signed_public)
         .merge(unlimited_public)
         .merge(operator_routes)
+        .merge(web_admin)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             record_request_metric,
@@ -246,6 +250,19 @@ fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
             .route("/v1/auth/me", get(auth::get_me));
     }
     r
+}
+
+fn web_admin_routes(web_enabled: bool) -> Router<Arc<AppState>> {
+    if !web_enabled {
+        return Router::new();
+    }
+    Router::new()
+        .route(
+            "/v1/signup-invites",
+            post(signup_invites::post_signup_invite).get(signup_invites::list_signup_invites),
+        )
+        .route("/v1/users", get(users::list_users))
+        .route("/v1/users/{id}/disable", post(users::post_user_disable))
 }
 
 fn signed_public_routes() -> Router<Arc<AppState>> {
