@@ -112,7 +112,12 @@ impl OpsClient {
 
     pub async fn raw_get(&self, path: &str) -> Result<reqwest::Response> {
         let url = format!("{}{path}", self.base.trim_end_matches('/'));
-        Ok(self.http.get(&url).send().await?)
+        Ok(self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?)
     }
 
     pub async fn raw_post_unauth(
@@ -122,5 +127,10 @@ impl OpsClient {
     ) -> Result<reqwest::Response> {
         let url = format!("{}{path}", self.base.trim_end_matches('/'));
         Ok(self.http.post(&url).json(&body).send().await?)
+    }
+
+    pub async fn raw_get_unauth(&self, path: &str) -> Result<reqwest::Response> {
+        let url = format!("{}{path}", self.base.trim_end_matches('/'));
+        Ok(self.http.get(&url).send().await?)
     }
 }

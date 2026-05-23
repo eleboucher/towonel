@@ -228,9 +228,11 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let rate_limited_public = maybe_rate_limit(rate_limited_routes(state.web_enabled), rate_limit);
     let signed_public = signed_public_routes();
     let web_admin = web_admin_routes(state.web_enabled);
-    let unlimited_public = Router::new()
-        .route("/v1/health", get(entries::health))
-        .route("/v1/edges", get(entries::list_edges));
+    // `/v1/health` is intentionally public — load balancers and uptime
+    // monitors probe it without credentials. Everything operator-shaped
+    // (including `/v1/edges`, which leaks the iroh endpoint topology of the
+    // deployment) lives under the operator-auth router below.
+    let unlimited_public = Router::new().route("/v1/health", get(entries::health));
 
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(|req: &axum::http::Request<_>| {
@@ -281,6 +283,7 @@ fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             delete(ports::delete_port),
         )
         .route("/v1/ports", get(ports::list_all_ports))
+        .route("/v1/edges", get(entries::list_edges))
         .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
 }
 

@@ -28,6 +28,14 @@ pub async fn run(ops: &OpsClient) -> Result<()> {
     let bytes = edges.bytes().await?;
     let _: serde_json::Value = serde_json::from_slice(&bytes).context("/v1/edges body")?;
 
+    let edges_unauth = ops.raw_get_unauth("/v1/edges").await?;
+    if edges_unauth.status().is_success() {
+        return Err(anyhow!(
+            "unauth GET /v1/edges returned {} — operator auth bypass",
+            edges_unauth.status()
+        ));
+    }
+
     tracing::info!("operator_api: PASS");
     Ok(())
 }
