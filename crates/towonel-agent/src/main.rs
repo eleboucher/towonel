@@ -38,10 +38,16 @@ struct Cli {
     #[arg(long)]
     addr_out: Option<PathBuf>,
 
-    /// Port for the built-in HTTP server exposing `GET /healthz` and
-    /// `GET /metrics`. Used by k8s liveness/readiness probes.
-    #[arg(long, default_value_t = 9090)]
-    health_port: u16,
+    /// Listen address for the built-in HTTP server exposing `GET /healthz`
+    /// and `GET /metrics`. Defaults to loopback so metrics are not exposed to
+    /// the LAN under `--network host`. Set `0.0.0.0:9090` (or pass
+    /// `TOWONEL_AGENT_HEALTH_LISTEN_ADDR`) to expose externally.
+    #[arg(
+        long,
+        env = "TOWONEL_AGENT_HEALTH_LISTEN_ADDR",
+        default_value = "127.0.0.1:9090"
+    )]
+    health_listen_addr: SocketAddr,
 }
 
 #[expect(
@@ -170,7 +176,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         }
     }
 
-    let health_handle = tokio::spawn(serve_http(cli.health_port, metrics.clone()));
+    let health_handle = tokio::spawn(serve_http(cli.health_listen_addr, metrics.clone()));
 
     info!(
         edges = ctx.edge_contacts.len(),
@@ -201,20 +207,19 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn serve_http(port: u16, metrics: Arc<AgentMetrics>) {
+async fn serve_http(addr: SocketAddr, metrics: Arc<AgentMetrics>) {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/metrics", get(metrics_handler))
         .with_state(metrics);
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
-            error!(port, error = %e, "failed to bind health listener");
+            error!(%addr, error = %e, "failed to bind health listener");
             return;
         }
     };
-    info!(port, "health + metrics listening");
+    info!(%addr, "health + metrics listening");
     if let Err(e) = axum::serve(listener, app).await {
         error!(error = %e, "health server error");
     }
