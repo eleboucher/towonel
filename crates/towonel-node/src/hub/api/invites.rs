@@ -11,6 +11,9 @@ use tracing::warn;
 
 use towonel_common::time::now_ms;
 
+use crate::hub::auth::middleware::Principal;
+use crate::hub::db::tenant_ownership::NewTenantOwnership;
+
 use super::db::{InviteRow, InviteStatus, PendingInvite};
 use super::{
     AppState, conflict, internal_error, invalid_request, json_ok, not_found, parse_invite_id,
@@ -42,6 +45,7 @@ const MAX_TTL_SECS: u64 = 30 * 24 * 3600;
 
 pub(super) async fn post_invite(
     State(state): State<Arc<AppState>>,
+    principal: Principal,
     axum::Json(req): axum::Json<CreateInviteRequest>,
 ) -> Response {
     let name = match req.name {
@@ -122,6 +126,21 @@ pub(super) async fn post_invite(
         return internal_error();
     }
 
+    if let Principal::User(user) = &principal
+        && let Err(e) = state
+            .db
+            .insert_tenant_ownership(NewTenantOwnership {
+                user_id: &user.id,
+                tenant_id: tenant_id.as_bytes(),
+                invite_id: &token.invite_id,
+                display_name: &name,
+                now_ms: i64::try_from(created_at_ms).unwrap_or(i64::MAX),
+            })
+            .await
+    {
+        warn!(error = %e, "insert_tenant_ownership failed");
+    }
+
     state.policy_update(|policy| {
         policy.register_tenant(
             &tenant_id,
@@ -165,20 +184,44 @@ impl From<InviteRow> for InviteSummary {
     }
 }
 
-pub(super) async fn list_invites(State(state): State<Arc<AppState>>) -> Response {
-    match state.db.list_invites().await {
-        Ok(rows) => json_ok(serde_json::json!({
-            "invites": rows.into_iter().map(InviteSummary::from).collect::<Vec<_>>()
-        })),
+pub(super) async fn list_invites(
+    State(state): State<Arc<AppState>>,
+    principal: Principal,
+) -> Response {
+    let rows = match state.db.list_invites().await {
+        Ok(r) => r,
         Err(e) => {
             warn!(error = %e, "failed to list invites");
-            internal_error()
+            return internal_error();
         }
-    }
+    };
+
+    let filtered: Vec<InviteRow> = match &principal {
+        Principal::OperatorKey => rows,
+        Principal::User(u) if u.role == "operator" => rows,
+        Principal::User(u) => {
+            let owned = match state.db.list_invite_ids_for_user(&u.id).await {
+                Ok(ids) => ids,
+                Err(e) => {
+                    warn!(error = %e, "list_invite_ids_for_user failed");
+                    return internal_error();
+                }
+            };
+            let owned_set: std::collections::HashSet<Vec<u8>> = owned.into_iter().collect();
+            rows.into_iter()
+                .filter(|r| owned_set.contains(r.invite_id.as_slice()))
+                .collect()
+        }
+    };
+
+    json_ok(serde_json::json!({
+        "invites": filtered.into_iter().map(InviteSummary::from).collect::<Vec<_>>()
+    }))
 }
 
 pub(super) async fn delete_invite(
     State(state): State<Arc<AppState>>,
+    principal: Principal,
     Path(id): Path<String>,
 ) -> Response {
     let Some(invite_id) = parse_invite_id(&id) else {
@@ -194,6 +237,25 @@ pub(super) async fn delete_invite(
         }
     };
 
+    if let Principal::User(u) = &principal
+        && u.role != "operator"
+    {
+        let owned = match state
+            .db
+            .find_tenant_ownership_by_invite(&u.id, &invite_id)
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(error = %e, "find_tenant_ownership_by_invite failed");
+                return internal_error();
+            }
+        };
+        if owned.is_none() {
+            return not_found("invite does not exist");
+        }
+    }
+
     match state.db.revoke_invite(&invite_id).await {
         Ok(true) => {
             let tid = row.tenant_id;
@@ -202,6 +264,9 @@ pub(super) async fn delete_invite(
                 return internal_error();
             }
             state.policy_update(|p| p.remove(&tid));
+            if let Err(e) = state.db.delete_tenant_ownership_by_invite(&invite_id).await {
+                warn!(error = %e, "delete_tenant_ownership_by_invite failed");
+            }
             json_ok(serde_json::json!({"status": "revoked"}))
         }
         Ok(false) => not_found("invite is already revoked or does not exist"),

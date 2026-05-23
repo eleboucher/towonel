@@ -186,6 +186,7 @@ pub fn router_unlimited(state: Arc<AppState>) -> Router {
 
 fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let operator_routes = operator_routes(&state);
+    let invites_routes = invites_routes();
     let rate_limited_public = maybe_rate_limit(rate_limited_routes(state.web_enabled), rate_limit);
     let signed_public = signed_public_routes();
     let web_admin = web_admin_routes(state.web_enabled);
@@ -219,6 +220,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         .merge(signed_public)
         .merge(unlimited_public)
         .merge(operator_routes)
+        .merge(invites_routes)
         .merge(web_admin)
         .layer(middleware::from_fn_with_state(
             state.clone(),
@@ -231,13 +233,17 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
 
 fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
+        .route("/v1/tenants/{id}", delete(entries::delete_tenant))
+        .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
+}
+
+fn invites_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route(
             "/v1/invites",
             post(invites::post_invite).get(invites::list_invites),
         )
         .route("/v1/invites/{id}", delete(invites::delete_invite))
-        .route("/v1/tenants/{id}", delete(entries::delete_tenant))
-        .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
 }
 
 fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {

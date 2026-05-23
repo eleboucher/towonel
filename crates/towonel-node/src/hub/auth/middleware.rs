@@ -3,12 +3,13 @@
 use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
+use axum::http::header;
 use axum::http::request::Parts;
-use axum::http::{StatusCode, header};
+use axum::response::Response;
 use towonel_common::time::now_ms;
 
 use super::session;
-use crate::hub::api::AppState;
+use crate::hub::api::{AppState, internal_error, not_found, unauthorized};
 use crate::hub::db::users::UserRow;
 
 #[derive(Debug, Clone)]
@@ -28,7 +29,7 @@ impl Principal {
 }
 
 impl FromRequestParts<Arc<AppState>> for Principal {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = Response;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -61,12 +62,12 @@ impl FromRequestParts<Arc<AppState>> for Principal {
                 .await
                 .map_err(|e| {
                     tracing::warn!(error = %e, "session lookup failed");
-                    (StatusCode::INTERNAL_SERVER_ERROR, "session lookup failed")
+                    internal_error()
                 })?;
             if let Some(row) = row {
                 let user = state.db.find_user_by_id(&row.user_id).await.map_err(|e| {
                     tracing::warn!(error = %e, "user lookup failed");
-                    (StatusCode::INTERNAL_SERVER_ERROR, "user lookup failed")
+                    internal_error()
                 })?;
                 if let Some(user) = user
                     && user.disabled_at_ms.is_none()
@@ -76,14 +77,14 @@ impl FromRequestParts<Arc<AppState>> for Principal {
             }
         }
 
-        Err((StatusCode::UNAUTHORIZED, "authentication required"))
+        Err(unauthorized("authentication required"))
     }
 }
 
 pub struct OperatorPrincipal(pub Principal);
 
 impl FromRequestParts<Arc<AppState>> for OperatorPrincipal {
-    type Rejection = (StatusCode, &'static str);
+    type Rejection = Response;
 
     async fn from_request_parts(
         parts: &mut Parts,
@@ -92,7 +93,7 @@ impl FromRequestParts<Arc<AppState>> for OperatorPrincipal {
         let p = Principal::from_request_parts(parts, state).await?;
         if !p.is_operator() {
             // 404 on admin paths to hide endpoint existence from non-operators.
-            return Err((StatusCode::NOT_FOUND, "not found"));
+            return Err(not_found("not found"));
         }
         Ok(Self(p))
     }

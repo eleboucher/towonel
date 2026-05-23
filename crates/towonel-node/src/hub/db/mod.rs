@@ -10,6 +10,7 @@ mod migration;
 pub mod sessions;
 mod signing_keys;
 pub mod signup_invites;
+pub mod tenant_ownership;
 mod types;
 pub mod users;
 
