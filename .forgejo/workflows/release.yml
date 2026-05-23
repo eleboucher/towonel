@@ -32,6 +32,9 @@ jobs:
     permissions:
       contents: write
     runs-on: docker
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+      tag: ${{ steps.create.outputs.tag }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
         with:
@@ -58,13 +61,14 @@ jobs:
           printf 'content<<EOF\n%s\nEOF\n' "$CONTENT" >> "$GITHUB_OUTPUT"
 
       - name: Create Forgejo release
+        id: create
         env:
           GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_BODY: ${{ steps.changelog.outputs.content }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
-          jq -n \
+          RESPONSE="$(jq -n \
             --arg tag "$TAG" \
             --arg name "$TAG" \
             --arg body "$RELEASE_BODY" \
@@ -73,7 +77,140 @@ jobs:
                 -H "Authorization: token ${GITEA_TOKEN}" \
                 -H "Content-Type: application/json" \
                 --data-binary @- \
-                "https://git.erwanleboucher.dev/api/v1/repos/${GITHUB_REPOSITORY}/releases"
+                "https://git.erwanleboucher.dev/api/v1/repos/${GITHUB_REPOSITORY}/releases")"
+          RELEASE_ID="$(echo "$RESPONSE" | jq -r '.id')"
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+            echo "failed to parse release id from response: $RESPONSE" >&2
+            exit 1
+          fi
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+  binaries:
+    needs: [release]
+    permissions:
+      contents: write
+      id-token: write
+    runs-on: docker
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            zig_arch: x86_64
+            arch_label: amd64
+          - target: aarch64-unknown-linux-gnu
+            zig_arch: aarch64
+            arch_label: arm64
+    env:
+      ZIG_VERSION: "0.16.0"
+      CARGO_ZIGBUILD_VERSION: "0.22.3"
+      # renovate: datasource=github-releases depName=sigstore/cosign
+      COSIGN_VERSION: "2.4.1"
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install zig + cargo-zigbuild
+        run: |
+          set -euo pipefail
+          HOST_ARCH="$(uname -m)"
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${HOST_ARCH}-linux-${ZIG_VERSION}.tar.xz" \
+            | tar -xJ -C /opt
+          ln -sf "/opt/zig-${HOST_ARCH}-linux-${ZIG_VERSION}/zig" /usr/local/bin/zig
+          HOST_TARGET="${HOST_ARCH}-unknown-linux-musl"
+          curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/cargo-zigbuild-${HOST_TARGET}.tar.xz" \
+            | tar -xJO "cargo-zigbuild-${HOST_TARGET}/cargo-zigbuild" > /usr/local/bin/cargo-zigbuild
+          chmod +x /usr/local/bin/cargo-zigbuild
+
+      - name: Install cosign
+        run: |
+          set -euo pipefail
+          HOST_ARCH="$(uname -m)"
+          case "$HOST_ARCH" in
+            x86_64) COSIGN_BIN="cosign-linux-amd64" ;;
+            aarch64) COSIGN_BIN="cosign-linux-arm64" ;;
+            *) echo "unsupported host arch: $HOST_ARCH" >&2; exit 1 ;;
+          esac
+          BASE="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
+          curl -fsSL -o cosign "${BASE}/${COSIGN_BIN}"
+          # Cosign publishes SHA256SUMS per release; verify before install.
+          curl -fsSL "${BASE}/cosign_checksums.txt" -o checksums.txt
+          grep "[[:space:]]${COSIGN_BIN}\$" checksums.txt | sha256sum -c -
+          install -m 0755 cosign /usr/local/bin/cosign
+          rm -f cosign checksums.txt
+
+      - name: Install cross-arch strip
+        if: matrix.arch_label == 'arm64'
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release --target "${{ matrix.target }}" \
+            -p towonel-node -p towonel-agent
+
+      - name: Stage and archive
+        id: archive
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          STAGE="towonel-${VERSION}-${{ matrix.arch_label }}-linux"
+          case "${{ matrix.arch_label }}" in
+            amd64) STRIP=strip ;;
+            arm64) STRIP=aarch64-linux-gnu-strip ;;
+          esac
+          mkdir -p "$STAGE"
+          cp "target/${{ matrix.target }}/release/towonel"       "$STAGE/towonel"
+          cp "target/${{ matrix.target }}/release/towonel-agent" "$STAGE/towonel-agent"
+          "$STRIP" "$STAGE/towonel" "$STAGE/towonel-agent"
+          cp LICENSE README.md "$STAGE/"
+          ARCHIVE="${STAGE}.tar.gz"
+          tar -czf "$ARCHIVE" "$STAGE"
+          sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+
+      # Cosign keyless requires Sigstore's Fulcio CA to trust the Forgejo OIDC
+      # issuer. If the runner can't mint a token Fulcio accepts, this step
+      # fails; switch to key-based signing (set COSIGN_PRIVATE_KEY in repo
+      # secrets and use `cosign sign-blob --key env://COSIGN_PRIVATE_KEY`).
+      - name: Cosign sign-blob (keyless)
+        env:
+          COSIGN_YES: "true"
+        run: |
+          set -euo pipefail
+          ARCHIVE="${{ steps.archive.outputs.archive }}"
+          cosign sign-blob --yes \
+            --bundle "${ARCHIVE}.cosign.bundle" \
+            "${ARCHIVE}"
+
+      - name: Upload assets to Forgejo release
+        env:
+          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.release.outputs.release_id }}
+          ARCHIVE: ${{ steps.archive.outputs.archive }}
+        run: |
+          set -euo pipefail
+          upload() {
+            local file="$1"
+            curl -fsSL -X POST \
+              -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@${file}" \
+              "https://git.erwanleboucher.dev/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$(basename "${file}")"
+          }
+          upload "${ARCHIVE}"
+          upload "${ARCHIVE}.sha256"
+          upload "${ARCHIVE}.cosign.bundle"
 
   container:
     needs: [tests]
