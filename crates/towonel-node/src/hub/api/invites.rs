@@ -264,6 +264,10 @@ pub(super) async fn delete_invite(
         }
     }
 
+    // Serialize the revoke+policy_update window against concurrent invite
+    // creation so the policy snapshot never loses a freshly-created tenant
+    // through a CoW race.
+    let _guard = state.invite_lock.lock().await;
     match state.db.revoke_invite(&invite_id).await {
         Ok(true) => {
             let tid = row.tenant_id;

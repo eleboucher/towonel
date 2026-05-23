@@ -512,6 +512,10 @@ pub(super) async fn delete_tenant(
         Err(e) => return invalid_request(format!("invalid tenant_id: {e}")),
     };
 
+    // Serialize the remove+policy_update against concurrent invite creation
+    // so a tenant being deleted here can't be lost from a snapshot that
+    // already includes a newly-created tenant.
+    let _guard = state.invite_lock.lock().await;
     if let Err(e) = state.db.remove_tenant(&tenant_id, now_ms()).await {
         warn!(error = %e, "failed to persist tenant removal");
         return internal_error();

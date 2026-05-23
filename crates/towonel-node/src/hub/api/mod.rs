@@ -119,8 +119,9 @@ pub struct AppState {
     /// runtime; the route table rebuilds pull from this same policy.
     /// Copy-on-write via `ArcSwap`: readers do a pointer-bump `.load()`;
     /// writers clone, mutate, and `.store()` a new `Arc`. Serialization
-    /// across concurrent writers is provided by `invite_lock` for the
-    /// check-then-register windows that need it.
+    /// across concurrent writers is provided by `invite_lock` — every
+    /// `policy_update` call site must hold it, otherwise a concurrent
+    /// create + delete will drop the newer tenant from the snapshot.
     pub policy: ArcSwap<OwnershipPolicy>,
     /// Identity information (`node_id`, edge info, version).
     pub identity: super::HubIdentity,
@@ -128,7 +129,10 @@ pub struct AppState {
     pub operator_api_key: zeroize::Zeroizing<String>,
     /// Public URL of the hub (e.g. "<https://node.towonel.example.eu:8443>").
     pub public_url: String,
-    /// Serializes the check+insert window in `POST /v1/invites`.
+    /// Serializes every mutator of [`AppState::policy`] (invite create +
+    /// invite revoke + tenant delete) so the copy-on-write snapshots can't
+    /// race-stomp each other. Despite the historical name this is the
+    /// global policy lock — keep adding new callers here, not bypassing it.
     pub invite_lock: Mutex<()>,
     /// Prometheus metrics surface exposed on `/metrics`.
     pub metrics: HubMetrics,
