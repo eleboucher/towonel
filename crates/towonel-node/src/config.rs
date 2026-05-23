@@ -440,12 +440,19 @@ impl NodeConfig {
             .map(|raw| parse_psk_hex(raw, "TOWONEL_EDGE_HUB_LINK_PSK"))
             .transpose()?
             .map(std::sync::Arc::new);
+        if let Some(addr) = edge_hub_link_addr.as_deref() {
+            validate_socket_addr("TOWONEL_EDGE_HUB_LINK_ADDR", addr)?;
+        }
 
+        let edge_listen_addr = edge_listen_addr.unwrap_or_else(|| "0.0.0.0:443".to_string());
+        let edge_health_listen_addr =
+            edge_health_listen_addr.unwrap_or_else(|| "0.0.0.0:9090".to_string());
+        validate_socket_addr("TOWONEL_EDGE_LISTEN_ADDR", &edge_listen_addr)?;
+        validate_socket_addr("TOWONEL_EDGE_HEALTH_LISTEN_ADDR", &edge_health_listen_addr)?;
         let edge = EdgeConfig {
             enabled: edge_enabled.unwrap_or(true),
-            listen_addr: edge_listen_addr.unwrap_or_else(|| "0.0.0.0:443".to_string()),
-            health_listen_addr: edge_health_listen_addr
-                .unwrap_or_else(|| "0.0.0.0:9090".to_string()),
+            listen_addr: edge_listen_addr,
+            health_listen_addr: edge_health_listen_addr,
             hub_link_addr: edge_hub_link_addr,
             hub_link_psk: edge_hub_link_psk,
             public_addresses,
@@ -534,6 +541,9 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
     if hub_enabled && let Some(url) = public_url.as_deref() {
         validate_hub_public_url(url)?;
     }
+    if let Some(addr) = link_listen_addr.as_deref() {
+        validate_socket_addr("TOWONEL_HUB_LINK_LISTEN_ADDR", addr)?;
+    }
     let driver = db_driver.unwrap_or(DbDriver::Sqlite);
     let dsn = db_dsn.or_else(|| match driver {
         DbDriver::Sqlite => data_dir.map(|d| d.join("hub.db").to_string_lossy().into_owned()),
@@ -576,8 +586,16 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
             max_open_conns: db_max_open_conns,
             max_idle_conns: db_max_idle_conns,
         },
-        listen_addr: listen_addr.unwrap_or_else(|| "0.0.0.0:8443".to_string()),
-        health_listen_addr: health_listen_addr.unwrap_or_else(|| "0.0.0.0:9091".to_string()),
+        listen_addr: {
+            let v = listen_addr.unwrap_or_else(|| "0.0.0.0:8443".to_string());
+            validate_socket_addr("TOWONEL_HUB_LISTEN_ADDR", &v)?;
+            v
+        },
+        health_listen_addr: {
+            let v = health_listen_addr.unwrap_or_else(|| "0.0.0.0:9091".to_string());
+            validate_socket_addr("TOWONEL_HUB_HEALTH_LISTEN_ADDR", &v)?;
+            v
+        },
         operator_api_key,
         operator_api_key_path,
         public_url,
@@ -589,6 +607,14 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
     })
+}
+
+fn validate_socket_addr(label: &str, raw: &str) -> anyhow::Result<()> {
+    use std::net::SocketAddr;
+    use std::str::FromStr as _;
+    SocketAddr::from_str(raw.trim())
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{label} is not a valid host:port: {e}"))
 }
 
 fn validate_hub_public_url(raw: &str) -> anyhow::Result<()> {
@@ -707,6 +733,16 @@ mod tests {
     #[test]
     fn parse_cidr_list_rejects_garbage() {
         parse_cidr_list("not-a-cidr").unwrap_err();
+    }
+
+    #[test]
+    fn socket_addr_validation_catches_typos() {
+        validate_socket_addr("X", "0.0.0.0:443").unwrap();
+        validate_socket_addr("X", "127.0.0.1:8443").unwrap();
+        validate_socket_addr("X", "[::]:443").unwrap();
+        validate_socket_addr("X", "0.0.0.0:44.3").unwrap_err();
+        validate_socket_addr("X", "0.0.0.0").unwrap_err();
+        validate_socket_addr("X", "not-an-addr").unwrap_err();
     }
 
     #[test]
