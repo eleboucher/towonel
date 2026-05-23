@@ -97,10 +97,8 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            zig_arch: x86_64
             arch_label: amd64
           - target: aarch64-unknown-linux-gnu
-            zig_arch: aarch64
             arch_label: arm64
     env:
       ZIG_VERSION: "0.16.0"
@@ -137,7 +135,6 @@ jobs:
           esac
           BASE="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
           curl -fsSL -o cosign "${BASE}/${COSIGN_BIN}"
-          # Cosign publishes SHA256SUMS per release; verify before install.
           curl -fsSL "${BASE}/cosign_checksums.txt" -o checksums.txt
           grep "[[:space:]]${COSIGN_BIN}\$" checksums.txt | sha256sum -c -
           install -m 0755 cosign /usr/local/bin/cosign
@@ -179,13 +176,8 @@ jobs:
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
 
-      # Cosign keyless requires Sigstore's Fulcio CA to trust the Forgejo OIDC
-      # issuer. If the runner can't mint a token Fulcio accepts, this step
-      # fails; switch to key-based signing (set COSIGN_PRIVATE_KEY in repo
-      # secrets and use `cosign sign-blob --key env://COSIGN_PRIVATE_KEY`).
+      # Keyless signing needs the runner OIDC issuer in Fulcio's trust root.
       - name: Cosign sign-blob (keyless)
-        env:
-          COSIGN_YES: "true"
         run: |
           set -euo pipefail
           ARCHIVE="${{ steps.archive.outputs.archive }}"
