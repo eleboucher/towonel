@@ -210,10 +210,14 @@ pub(super) async fn post_login(
             return internal_error();
         }
     };
-    // Determine the hash to verify against. For unknown / disabled users
-    // verify against the sentinel so the CPU cost is identical.
+    // Determine the hash to verify against. For unknown / disabled users —
+    // and for OIDC-only users (empty password_hash sentinel) — verify
+    // against the sentinel so the CPU cost is identical and OIDC-only
+    // accounts aren't disclosed via response timing.
     let (hash, real_user) = match &user_opt {
-        Some(u) if u.disabled_at_ms.is_none() => (u.password_hash.as_str(), true),
+        Some(u) if u.disabled_at_ms.is_none() && !u.password_hash.is_empty() => {
+            (u.password_hash.as_str(), true)
+        }
         _ => (state.login_sentinel_hash.as_str(), false),
     };
     let ok = match password::verify(&body.password, hash).await {

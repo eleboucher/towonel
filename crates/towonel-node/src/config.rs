@@ -183,6 +183,20 @@ pub struct HubConfig {
     pub web_enabled: bool,
     /// `TOWONEL_HUB_PORTS_REQUIRE_RESERVATION`.
     pub ports_require_reservation: bool,
+    pub oidc: OidcConfig,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct OidcConfig {
+    pub codeberg: Option<OidcProviderConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct OidcProviderConfig {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: zeroize::Zeroizing<String>,
+    pub redirect_uri: String,
 }
 
 /// Default UDP port for the iroh QUIC socket. Operators rarely need
@@ -316,6 +330,10 @@ struct RawEnv {
     hub_link_psk: Option<String>,
     hub_web_enabled: Option<bool>,
     hub_ports_require_reservation: Option<bool>,
+    hub_oidc_codeberg_issuer: Option<String>,
+    hub_oidc_codeberg_client_id: Option<String>,
+    hub_oidc_codeberg_client_secret: Option<String>,
+    hub_oidc_codeberg_redirect_uri: Option<String>,
 
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
@@ -375,6 +393,10 @@ impl NodeConfig {
             hub_link_psk,
             hub_web_enabled,
             hub_ports_require_reservation,
+            hub_oidc_codeberg_issuer,
+            hub_oidc_codeberg_client_id,
+            hub_oidc_codeberg_client_secret,
+            hub_oidc_codeberg_redirect_uri,
             edge_enabled,
             edge_listen_addr,
             edge_health_listen_addr,
@@ -414,6 +436,17 @@ impl NodeConfig {
             .transpose()?
             .map(std::sync::Arc::new);
 
+        let oidc = OidcConfig {
+            codeberg: build_oidc_provider(
+                "TOWONEL_HUB_OIDC_CODEBERG",
+                "https://codeberg.org",
+                hub_oidc_codeberg_issuer,
+                hub_oidc_codeberg_client_id,
+                hub_oidc_codeberg_client_secret,
+                hub_oidc_codeberg_redirect_uri,
+            )?,
+        };
+
         let hub = build_hub_config(HubInputs {
             enabled: hub_enabled,
             listen_addr: hub_listen_addr,
@@ -434,6 +467,7 @@ impl NodeConfig {
             tls: hub_tls,
             web_enabled: hub_web_enabled,
             ports_require_reservation: hub_ports_require_reservation,
+            oidc,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -527,6 +561,7 @@ struct HubInputs<'a> {
     tls: Option<TlsConfig>,
     web_enabled: Option<bool>,
     ports_require_reservation: Option<bool>,
+    oidc: OidcConfig,
     data_dir: Option<&'a Path>,
 }
 
@@ -551,6 +586,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         tls,
         web_enabled,
         ports_require_reservation,
+        oidc,
         data_dir,
     } = inputs;
 
@@ -632,7 +668,48 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         tls,
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
+        oidc,
     })
+}
+
+/// Partial configuration is an error rather than a silent fallback so a
+/// deploy typo can't leave the button visible but the callback broken.
+fn build_oidc_provider(
+    prefix: &str,
+    default_issuer: &str,
+    issuer: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    redirect_uri: Option<String>,
+) -> anyhow::Result<Option<OidcProviderConfig>> {
+    let any = client_id.is_some() || client_secret.is_some() || redirect_uri.is_some();
+    if !any {
+        return Ok(None);
+    }
+    let require = |name: &str, v: Option<String>| -> anyhow::Result<String> {
+        v.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+            anyhow::anyhow!("{prefix}_{name} is required when any other {prefix}_* var is set")
+        })
+    };
+    let client_id = require("CLIENT_ID", client_id)?;
+    let client_secret = require("CLIENT_SECRET", client_secret)?;
+    let redirect_uri = require("REDIRECT_URI", redirect_uri)?;
+    let issuer = issuer
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| default_issuer.to_string());
+    if url::Url::parse(&issuer).is_err() {
+        anyhow::bail!("{prefix}_ISSUER ({issuer}) is not a valid URL");
+    }
+    if url::Url::parse(&redirect_uri).is_err() {
+        anyhow::bail!("{prefix}_REDIRECT_URI ({redirect_uri}) is not a valid URL");
+    }
+    Ok(Some(OidcProviderConfig {
+        issuer,
+        client_id,
+        client_secret: zeroize::Zeroizing::new(client_secret),
+        redirect_uri,
+    }))
 }
 
 /// Under Postgres the hub is presumed to be running in HA mode against a

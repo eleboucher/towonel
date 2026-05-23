@@ -25,11 +25,8 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
-# Don't Panic - prevent panics from unwraps and unsafe slicing or indexing
-# CI runs clippy with `-D warnings`, so `warn` already fails the build there.
-# Escalating to `deny` here also surfaces these in editors and on
-# bare `cargo check` so production code can't accidentally introduce them
-# without an explicit, justified `#[expect(...)]`.
+# Don't Panic - prevent panics from unwraps and unsafe slicing or indexing.
+# Denied so they also surface on bare `cargo check`, not just CI clippy.
 string_slice = "deny"
 indexing_slicing = "deny"
 unwrap_used = "deny"
@@ -192,6 +189,7 @@ webpki-roots = "1.0"
 arc-swap = "1.7"
 socket2 = { version = "0.6", features = ["all"] }
 moka = { version = "0.12", features = ["future"] }
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
 backon = "1"
 ppp = "2"
 papaya = "0.2"

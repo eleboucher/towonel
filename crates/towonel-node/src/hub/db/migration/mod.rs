@@ -11,6 +11,7 @@ mod m20260523_000001_admin_actions_widen_actor_kind;
 mod m20260524_000000_drop_edge_invites;
 mod m20260524_000001_port_reservations;
 mod m20260601_000000_hub_init_canary;
+mod m20260612_000000_user_oauth_identities;
 
 pub struct Migrator;
 
@@ -29,6 +30,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260524_000000_drop_edge_invites::Migration),
             Box::new(m20260524_000001_port_reservations::Migration),
             Box::new(m20260601_000000_hub_init_canary::Migration),
+            Box::new(m20260612_000000_user_oauth_identities::Migration),
         ]
     }
 }

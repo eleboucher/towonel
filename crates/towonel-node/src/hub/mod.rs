@@ -37,10 +37,8 @@ pub const INVITE_HASH_KEY_ENV: &str = "TOWONEL_INVITE_HASH_KEY";
 pub const HUB_KEK_ENV: &str = "TOWONEL_HUB_KEK";
 
 /// Resolve from env value, else read/generate at `path`, else error.
-///
-/// If both env and an on-disk key are present and disagree, refuse to start —
-/// silently letting env shadow a stale file invalidates every outstanding
-/// invite the file would have authenticated. The operator must choose.
+/// Refuses to start when env and an on-disk key disagree: silently shadowing
+/// a stale file invalidates every outstanding invite.
 pub fn load_or_generate_invite_hash_key(
     env_value: Option<&str>,
     path: Option<&Path>,
@@ -245,6 +243,7 @@ pub struct HubParams {
     pub tls: Option<crate::config::TlsConfig>,
     pub web_enabled: bool,
     pub ports_require_reservation: bool,
+    pub oidc: crate::config::OidcConfig,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -318,6 +317,11 @@ impl Hub {
         let signer = Arc::new(signing::get_or_create_active_signing_key(&db, &self.p.kek).await?);
         info!(kid = signer.kid(), "active hub signing key loaded");
 
+        let oidc = api::build_oidc_runtimes(&self.p.oidc).await?;
+        if oidc.codeberg.is_some() {
+            info!("OIDC provider 'codeberg' configured");
+        }
+
         let removed: Vec<towonel_common::identity::TenantId> = db.list_tenant_removals().await?;
 
         let mut policy = self.p.static_policy.clone();
@@ -376,6 +380,7 @@ impl Hub {
             port_reservations_tx: tokio::sync::broadcast::channel(64).0,
             ports_require_reservation: self.p.ports_require_reservation,
             port_index: arc_swap::ArcSwap::from_pointee(api::PortIndex::default()),
+            oidc,
         });
 
         // Seed the port index from the DB before serving any upsert; the

@@ -4,9 +4,12 @@ mod bootstrap;
 mod entries;
 mod invites;
 mod metrics_handler;
+mod oidc;
 mod ports;
 mod signup_invites;
 mod users;
+
+pub use oidc::{OidcRuntimes, build_runtimes as build_oidc_runtimes};
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -175,6 +178,9 @@ pub struct AppState {
     /// claiming the port. Read by `find_port_conflict` under the
     /// per-protocol locks; refreshed by `rebuild_and_broadcast_routes`.
     pub port_index: ArcSwap<PortIndex>,
+    /// Configured OIDC providers (one runtime per provider). Empty means
+    /// no OIDC providers are advertised on `/v1/auth/providers`.
+    pub oidc: OidcRuntimes,
 }
 
 #[derive(Default)]
@@ -401,7 +407,10 @@ fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
             .route("/v1/auth/signup", post(auth::post_signup))
             .route("/v1/auth/login", post(auth::post_login))
             .route("/v1/auth/logout", post(auth::post_logout))
-            .route("/v1/auth/me", get(auth::get_me));
+            .route("/v1/auth/me", get(auth::get_me))
+            .route("/v1/auth/providers", get(oidc::list_providers))
+            .route("/v1/auth/oidc/{provider}/start", get(oidc::start))
+            .route("/v1/auth/oidc/{provider}/callback", get(oidc::callback));
     }
     r
 }

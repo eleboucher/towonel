@@ -80,6 +80,7 @@ impl TestHub {
             web_enabled: true,
             port_reservations_tx: tokio::sync::broadcast::channel(64).0,
             ports_require_reservation,
+            oidc: super::api::OidcRuntimes::default(),
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

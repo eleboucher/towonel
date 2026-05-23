@@ -13,6 +13,7 @@ mod signing_keys;
 pub mod signup_invites;
 pub mod tenant_ownership;
 mod types;
+pub mod user_oauth_identities;
 pub mod users;
 
 pub use types::*;

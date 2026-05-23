@@ -9,4 +9,5 @@ pub mod sessions;
 pub mod signup_invites;
 pub mod tenant_ownership;
 pub mod tenant_removals;
+pub mod user_oauth_identities;
 pub mod users;

@@ -627,6 +627,7 @@ async fn build_hub_params(
         }),
         web_enabled: config.hub.web_enabled,
         ports_require_reservation: config.hub.ports_require_reservation,
+        oidc: config.hub.oidc.clone(),
     })
 }
 
