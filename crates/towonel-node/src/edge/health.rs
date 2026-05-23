@@ -21,9 +21,10 @@ pub struct EdgeMetrics {
     pub sessions_total: IntCounter,
     pub sessions_rejected_total: IntCounterVec,
     pub route_no_session_total: IntCounter,
-    /// Connections dropped because the edge's concurrency cap was saturated.
-    /// Spikes here mean operator should raise `EDGE_MAX_INFLIGHT_CONNECTIONS`
-    /// or that we're absorbing a TCP-accept `DoS`.
+    /// Connections / sessions dropped because the edge concurrency caps were
+    /// saturated. Counts both TCP-accept overload (the global
+    /// `TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS` semaphore) and UDP new-session
+    /// overload (per-listener `TOWONEL_EDGE_MAX_UDP_SESSIONS_PER_LISTENER`).
     pub connections_rejected_overload: IntCounter,
     registry: Arc<Registry>,
 }

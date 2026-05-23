@@ -49,6 +49,27 @@ const PEEK_RETRY_DELAY: Duration = Duration::from_millis(5);
 /// exhaust FDs. Caddy's own listener wrapper defaults to 2s.
 const PROXY_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Hard cap on UDP sessions per listener. UDP source addresses are
+/// trivially spoofable so an attacker could otherwise pin millions of
+/// `(src_ip, src_port)` sessions, each allocating a tokio task + QUIC
+/// stream. Datagrams arriving for an already-tracked peer are unaffected;
+/// only attempts to create a *new* session past the cap are dropped.
+///
+/// Drop-new (not LRU): LRU would evict the legitimate established session
+/// in favour of the attacker's freshest spoofed source, which is the
+/// opposite of what we want. Override with
+/// `TOWONEL_EDGE_MAX_UDP_SESSIONS_PER_LISTENER`.
+const DEFAULT_MAX_UDP_SESSIONS_PER_LISTENER: usize = 4_096;
+
+fn max_udp_sessions_from_env() -> usize {
+    std::env::var("TOWONEL_EDGE_MAX_UDP_SESSIONS_PER_LISTENER")
+        .ok()
+        .as_deref()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MAX_UDP_SESSIONS_PER_LISTENER)
+}
+
 /// Hard cap on simultaneously in-flight TCP connections. Each accept holds a
 /// permit for the lifetime of the per-connection task; on overload, new
 /// accepts close the socket and bump `connections_rejected_overload`. 50k
@@ -1200,6 +1221,7 @@ async fn udp_listen_loop(
     let binding = Arc::new(binding);
     let sessions: Arc<tokio::sync::Mutex<UdpSessions>> =
         Arc::new(tokio::sync::Mutex::new(UdpSessions::new()));
+    let session_cap = max_udp_sessions_from_env();
 
     let mut buf = vec![0u8; MAX_UDP_DATAGRAM];
     loop {
@@ -1219,12 +1241,19 @@ async fn udp_listen_loop(
 
         // Single critical section: get-or-create the session sender, then
         // release the lock before `try_send`. A stale entry (closed channel,
-        // pump exited) is recreated in place.
+        // pump exited) is recreated in place. New sessions are refused once
+        // the per-listener cap is hit so a UDP source-address flood can't
+        // exhaust tasks/FDs/streams.
         let tx = {
             let mut map = sessions.lock().await;
             match map.get(&peer_addr) {
                 Some(tx) if !tx.is_closed() => tx.clone(),
                 _ => {
+                    if map.len() >= session_cap {
+                        drop(map);
+                        ctx.metrics.connections_rejected_overload.inc();
+                        continue;
+                    }
                     let (tx, rx) = mpsc::channel::<Vec<u8>>(UDP_SESSION_QUEUE);
                     map.insert(peer_addr, tx.clone());
                     drop(map);
