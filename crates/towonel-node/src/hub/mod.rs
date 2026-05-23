@@ -135,12 +135,15 @@ fn read_hub_kek_file(path: &Path) -> anyhow::Result<HubKek> {
     HubKek::from_hex(trimmed)
 }
 
-/// Load the operator API key from `path`, or generate a new random one and
-/// save it with 0o600 permissions. File I/O happens on a blocking pool so
-/// the async runtime isn't stalled at startup.
+/// Resolve from env value, else read/generate at `path`. File I/O happens
+/// on a blocking pool so the async runtime isn't stalled at startup.
 pub async fn load_or_generate_operator_key(
+    env_value: Option<&str>,
     path: &Path,
 ) -> anyhow::Result<zeroize::Zeroizing<String>> {
+    if let Some(value) = env_value.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(zeroize::Zeroizing::new(value.to_string()));
+    }
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || load_or_generate_operator_key_blocking(&path))
         .await
@@ -558,6 +561,27 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let err = load_or_generate_invite_hash_key(None, Some(&path)).unwrap_err();
         assert!(err.to_string().contains("empty"), "got: {err}");
+        drop(std::fs::remove_file(&path));
+    }
+
+    #[tokio::test]
+    async fn operator_key_env_value_wins_over_path() {
+        let path = temp_path("op-env-wins");
+        let key = load_or_generate_operator_key(Some("inline-token-value"), &path)
+            .await
+            .unwrap();
+        assert_eq!(&**key, "inline-token-value");
+        assert!(!path.exists(), "env value path must not be touched");
+    }
+
+    #[tokio::test]
+    async fn operator_key_blank_env_falls_through_to_path() {
+        let path = temp_path("op-blank-env");
+        let key = load_or_generate_operator_key(Some("   "), &path)
+            .await
+            .unwrap();
+        assert!(path.exists(), "blank env must trigger file generation");
+        assert!(!key.is_empty());
         drop(std::fs::remove_file(&path));
     }
 }

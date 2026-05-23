@@ -104,12 +104,29 @@ pub struct NodeConfig {
 
 #[derive(Debug)]
 pub struct IdentityConfig {
-    pub key_path: PathBuf,
+    pub inline_hex: Option<String>,
+    pub key_path: Option<PathBuf>,
 }
 
 impl IdentityConfig {
     pub async fn load_secret_key_async(&self) -> anyhow::Result<iroh::SecretKey> {
-        let path = self.key_path.clone();
+        if let Some(hex) = self
+            .inline_hex
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let bytes = hex::decode(hex)
+                .map_err(|e| anyhow::anyhow!("TOWONEL_IDENTITY_KEY is not valid hex: {e}"))?;
+            let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|e| {
+                anyhow::anyhow!("TOWONEL_IDENTITY_KEY must be 32 bytes (64 hex chars): {e}")
+            })?;
+            return Ok(iroh::SecretKey::from(arr));
+        }
+        let path = self
+            .key_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("identity source missing"))?;
         tokio::task::spawn_blocking(move || {
             towonel_common::identity::load_or_generate_secret_key(&path)
         })
@@ -125,6 +142,7 @@ pub struct HubConfig {
     pub listen_addr: String,
     pub health_listen_addr: String,
     pub operator_api_key_path: PathBuf,
+    pub operator_api_key: Option<String>,
     pub public_url: Option<String>,
     /// Keyed-hash key for invite secrets. Loaded from
     /// [`crate::hub::INVITE_HASH_KEY_ENV`] during `NodeConfig::load` so a
@@ -258,6 +276,7 @@ struct RawEnv {
     /// Base directory supplying defaults for every path-shaped env var below.
     data_dir: Option<PathBuf>,
 
+    identity_key: Option<String>,
     identity_key_path: Option<PathBuf>,
 
     invite_hash_key: Option<String>,
@@ -269,6 +288,7 @@ struct RawEnv {
     hub_enabled: Option<bool>,
     hub_listen_addr: Option<String>,
     hub_health_listen_addr: Option<String>,
+    hub_operator_api_key: Option<String>,
     hub_operator_api_key_path: Option<PathBuf>,
     hub_public_url: Option<String>,
     hub_db_driver: Option<DbDriver>,
@@ -318,6 +338,7 @@ impl NodeConfig {
         let hub_tls = build_hub_tls(&r);
         let RawEnv {
             data_dir,
+            identity_key,
             identity_key_path,
             invite_hash_key,
             invite_hash_key_path,
@@ -326,6 +347,7 @@ impl NodeConfig {
             hub_enabled,
             hub_listen_addr,
             hub_health_listen_addr,
+            hub_operator_api_key,
             hub_operator_api_key_path,
             hub_public_url,
             hub_db_driver,
@@ -351,15 +373,23 @@ impl NodeConfig {
             ..
         } = r;
 
-        let key_path = identity_key_path
-            .or_else(|| data_dir.as_ref().map(|d| d.join("node.key")))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "identity source missing: set TOWONEL_IDENTITY_KEY_PATH or \
-                     TOWONEL_DATA_DIR (defaults to ${{DATA_DIR}}/node.key)"
-                )
-            })?;
-        let identity = IdentityConfig { key_path };
+        let inline_identity = identity_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let key_path = identity_key_path.or_else(|| data_dir.as_ref().map(|d| d.join("node.key")));
+        if inline_identity.is_none() && key_path.is_none() {
+            anyhow::bail!(
+                "identity source missing: set TOWONEL_IDENTITY_KEY (32 hex bytes), \
+                 TOWONEL_IDENTITY_KEY_PATH, or TOWONEL_DATA_DIR (defaults to \
+                 ${{DATA_DIR}}/node.key)"
+            );
+        }
+        let identity = IdentityConfig {
+            inline_hex: inline_identity,
+            key_path,
+        };
 
         let hub_link_psk = hub_link_psk
             .as_deref()
@@ -371,6 +401,7 @@ impl NodeConfig {
             enabled: hub_enabled,
             listen_addr: hub_listen_addr,
             health_listen_addr: hub_health_listen_addr,
+            operator_api_key: hub_operator_api_key,
             operator_api_key_path: hub_operator_api_key_path,
             public_url: hub_public_url.clone(),
             db_driver: hub_db_driver,
@@ -456,6 +487,7 @@ struct HubInputs<'a> {
     enabled: Option<bool>,
     listen_addr: Option<String>,
     health_listen_addr: Option<String>,
+    operator_api_key: Option<String>,
     operator_api_key_path: Option<PathBuf>,
     public_url: Option<String>,
     db_driver: Option<DbDriver>,
@@ -479,6 +511,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         enabled,
         listen_addr,
         health_listen_addr,
+        operator_api_key,
         operator_api_key_path,
         public_url,
         db_driver,
@@ -542,6 +575,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         },
         listen_addr: listen_addr.unwrap_or_else(|| "0.0.0.0:8443".to_string()),
         health_listen_addr: health_listen_addr.unwrap_or_else(|| "0.0.0.0:9091".to_string()),
+        operator_api_key,
         operator_api_key_path,
         public_url,
         invite_hash_key,
@@ -762,7 +796,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(cfg.identity.key_path, dir.join("node.key"));
+        assert_eq!(
+            cfg.identity.key_path.as_deref(),
+            Some(dir.join("node.key").as_path())
+        );
         assert_eq!(
             cfg.hub.database.dsn.as_deref(),
             Some(dir.join("hub.db").to_string_lossy().as_ref()),
@@ -787,7 +824,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(cfg.identity.key_path, PathBuf::from("/custom/node.key"));
+        assert_eq!(
+            cfg.identity.key_path.as_deref(),
+            Some(std::path::Path::new("/custom/node.key"))
+        );
         assert_eq!(cfg.hub.database.dsn.as_deref(), Some("/custom/hub.db"));
         assert_eq!(
             cfg.hub.operator_api_key_path,
@@ -818,6 +858,7 @@ mod tests {
     fn missing_identity_without_data_dir_errors_with_helpful_message() {
         let err = NodeConfig::from_raw(base_raw_env(&"44".repeat(32))).unwrap_err();
         let msg = err.to_string();
+        assert!(msg.contains("TOWONEL_IDENTITY_KEY"), "got: {msg}");
         assert!(msg.contains("TOWONEL_IDENTITY_KEY_PATH"), "got: {msg}");
         assert!(msg.contains("TOWONEL_DATA_DIR"), "got: {msg}");
     }
@@ -879,6 +920,36 @@ mod tests {
         assert!(
             path.exists(),
             "invite-hash key file should be generated at ${{DATA_DIR}}/invite_hash.key"
+        );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn inline_identity_key_satisfies_missing_path() {
+        let cfg = NodeConfig::from_raw(RawEnv {
+            identity_key: Some("66".repeat(32)),
+            ..base_raw_env(&"77".repeat(32))
+        })
+        .unwrap();
+        assert_eq!(
+            cfg.identity.inline_hex.as_deref(),
+            Some("6".repeat(64).as_str())
+        );
+        assert!(cfg.identity.key_path.is_none());
+    }
+
+    #[test]
+    fn inline_operator_api_key_propagates_to_hub_config() {
+        let dir = unique_data_dir("opkey");
+        let cfg = NodeConfig::from_raw(RawEnv {
+            data_dir: Some(dir.clone()),
+            hub_operator_api_key: Some("super-secret-token".into()),
+            ..base_raw_env(&"88".repeat(32))
+        })
+        .unwrap();
+        assert_eq!(
+            cfg.hub.operator_api_key.as_deref(),
+            Some("super-secret-token")
         );
         drop(std::fs::remove_dir_all(&dir));
     }

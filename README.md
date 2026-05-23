@@ -340,8 +340,8 @@ Conditions are spelled out next to the marker.
 
 `TOWONEL_DATA_DIR` (`/data` in the Docker image) supplies defaults for
 every path-shaped env var below. Individual overrides win. At least one
-of `TOWONEL_DATA_DIR`, `TOWONEL_IDENTITY_KEY_PATH`, or
-`TOWONEL_EDGE_INVITE_TOKEN` must be set so the node can resolve an
+of `TOWONEL_DATA_DIR`, `TOWONEL_IDENTITY_KEY`, `TOWONEL_IDENTITY_KEY_PATH`,
+or `TOWONEL_EDGE_INVITE_TOKEN` must be set so the node can resolve an
 identity at startup.
 
 | Variable           | Default | Cascades into                                                                                                             |
@@ -352,12 +352,14 @@ identity at startup.
 
 | Variable                             | Default                                      | Description                                                                  |
 | ------------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------------- |
+| `TOWONEL_IDENTITY_KEY`               | derived from `IDENTITY_KEY_PATH`             | 32-byte hex node key. When set, the file at `IDENTITY_KEY_PATH` is not read |
 | `TOWONEL_IDENTITY_KEY_PATH`          | `${DATA_DIR}/node.key` or `node.key`         | Node identity key (generated on first boot)                                  |
 | `TOWONEL_HUB_ENABLED`                | `true`                                       | Enable the hub API                                                           |
 | `TOWONEL_INVITE_HASH_KEY`            | derived from `INVITE_HASH_KEY_PATH`          | Hex key for hashing invite secrets (file generated on first boot when unset) |
 | `TOWONEL_INVITE_HASH_KEY_PATH`       | `${DATA_DIR}/invite_hash.key`                | Where the hub reads/generates the invite-hash key                            |
 | `TOWONEL_HUB_LISTEN_ADDR`            | `0.0.0.0:8443`                               | Hub API bind address                                                         |
 | `TOWONEL_HUB_PUBLIC_URL`             | derived                                      | URL embedded in invite tokens                                                |
+| `TOWONEL_HUB_OPERATOR_API_KEY`       | derived from `OPERATOR_API_KEY_PATH`         | Operator API key (string). When set, the file at `OPERATOR_API_KEY_PATH` is not read |
 | `TOWONEL_HUB_OPERATOR_API_KEY_PATH`  | `${DATA_DIR}/operator.key` or `operator.key` | Operator API key file (generated on first boot)                              |
 | `TOWONEL_HUB_DB_DRIVER`              | `sqlite`                                     | `sqlite` or `postgres`                                                       |
 | `TOWONEL_HUB_DB_DSN`                 | `${DATA_DIR}/hub.db` or `hub.db` (sqlite)    | Connection string. **Required** for `postgres`                               |

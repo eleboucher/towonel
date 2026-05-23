@@ -591,8 +591,11 @@ async fn build_hub_params(
     route_tx: broadcast::Sender<RouteTable>,
 ) -> anyhow::Result<hub::HubParams> {
     let policy = build_ownership_policy(&config.tenants)?;
-    let operator_api_key =
-        hub::load_or_generate_operator_key(&config.hub.operator_api_key_path).await?;
+    let operator_api_key = hub::load_or_generate_operator_key(
+        config.hub.operator_api_key.as_deref(),
+        &config.hub.operator_api_key_path,
+    )
+    .await?;
     let invite_hash_key = config
         .hub
         .invite_hash_key
