@@ -1,6 +1,7 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
@@ -170,62 +171,108 @@ pub(super) async fn post_signup(
 
 pub(super) async fn post_login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<LoginRequest>,
 ) -> Response {
-    if validate_email(&body.email).is_err() || body.password.is_empty() {
-        return unauthorized("invalid credentials");
-    }
+    let bad_request = validate_email(&body.email).is_err() || body.password.is_empty();
+    let email_key = body.email.to_lowercase();
+    let ip_key = client_ip_key(&peer, &headers);
 
-    let lockout_key = body.email.to_lowercase();
-    if let Some(counter) = state.login_limiter.get(&lockout_key).await
+    // IP-keyed lockout is what actually blocks. Per-email is also counted
+    // (audit/observability) but never blocks alone, so a third party can't
+    // freeze a known account by sending wrong passwords from anywhere.
+    if let Some(counter) = state.ip_login_limiter.get(&ip_key).await
         && counter.load(std::sync::atomic::Ordering::Relaxed) >= LOGIN_MAX_FAILURES
     {
         return error_response(
             axum::http::StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
-            "too many failed login attempts; try again later",
+            "too many failed login attempts from this IP; try again later",
         );
     }
 
-    let user = match state.db.find_user_by_email(&body.email).await {
-        Ok(Some(u)) => u,
-        Ok(None) => {
-            record_login_failure(&state, &lockout_key).await;
-            return unauthorized("invalid credentials");
+    if bad_request {
+        // Spend the same argon2 CPU as a real verify so this branch isn't a
+        // timing oracle that distinguishes "malformed input" from "valid
+        // email but wrong password".
+        if let Err(e) = password::verify(&body.password, &state.login_sentinel_hash).await {
+            warn!(error = %e, "sentinel verify error on bad_request login");
         }
+        record_login_failure(&state, &email_key, &ip_key).await;
+        return unauthorized("invalid credentials");
+    }
+
+    let user_opt = match state.db.find_user_by_email(&body.email).await {
+        Ok(u) => u,
         Err(e) => {
             warn!(error = %e, "find_user_by_email failed");
             return internal_error();
         }
     };
-    if user.disabled_at_ms.is_some() {
-        record_login_failure(&state, &lockout_key).await;
-        return unauthorized("invalid credentials");
-    }
-    let ok = match password::verify(&body.password, &user.password_hash).await {
+    // Determine the hash to verify against. For unknown / disabled users
+    // verify against the sentinel so the CPU cost is identical.
+    let (hash, real_user) = match &user_opt {
+        Some(u) if u.disabled_at_ms.is_none() => (u.password_hash.as_str(), true),
+        _ => (state.login_sentinel_hash.as_str(), false),
+    };
+    let ok = match password::verify(&body.password, hash).await {
         Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "password verify error");
             return internal_error();
         }
     };
-    if !ok {
-        record_login_failure(&state, &lockout_key).await;
+    if !ok || !real_user {
+        record_login_failure(&state, &email_key, &ip_key).await;
         return unauthorized("invalid credentials");
     }
 
-    state.login_limiter.invalidate(&lockout_key).await;
+    let Some(user) = user_opt else {
+        // unreachable per real_user check above, but be defensive
+        return unauthorized("invalid credentials");
+    };
+    state.login_limiter.invalidate(&email_key).await;
+    state.ip_login_limiter.invalidate(&ip_key).await;
     issue_session_response(&state, &user.id, &user.email, &user.role).await
 }
 
-async fn record_login_failure(state: &Arc<AppState>, key: &str) {
-    let counter = state
+/// Resolve the client IP used for the lockout counter. When the hub sits
+/// behind a reverse proxy (the typical `hub-caddy` deployment terminates
+/// TLS in Caddy and forwards on loopback), the socket peer is `127.0.0.1`
+/// or `::1`; in that case the right-most entry of `X-Forwarded-For` is the
+/// actual client IP that Caddy observed. For direct deployments we trust
+/// only the socket peer.
+fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) -> String {
+    if !peer.ip().is_loopback() {
+        return peer.ip().to_string();
+    }
+    if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
+        && let Some(last) = value.rsplit(',').next()
+    {
+        let trimmed = last.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    peer.ip().to_string()
+}
+
+async fn record_login_failure(state: &Arc<AppState>, email_key: &str, ip_key: &str) {
+    let email_counter = state
         .login_limiter
-        .get_with(key.to_string(), async {
+        .get_with(email_key.to_string(), async {
             Arc::new(std::sync::atomic::AtomicU32::new(0))
         })
         .await;
-    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    email_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let ip_counter = state
+        .ip_login_limiter
+        .get_with(ip_key.to_string(), async {
+            Arc::new(std::sync::atomic::AtomicU32::new(0))
+        })
+        .await;
+    ip_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub(super) async fn post_logout(
@@ -345,4 +392,50 @@ fn new_id(byte_len: usize) -> String {
     let mut buf = vec![0u8; byte_len];
     getrandom::fill(&mut buf).expect("OS RNG");
     B64.encode(buf)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    fn peer(ip: &str) -> SocketAddr {
+        format!("{ip}:1234").parse().unwrap()
+    }
+
+    fn headers_with_xff(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", value.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn ip_key_uses_peer_when_not_loopback() {
+        let h = headers_with_xff("8.8.8.8");
+        assert_eq!(client_ip_key(&peer("203.0.113.5"), &h), "203.0.113.5");
+    }
+
+    #[test]
+    fn ip_key_uses_xff_when_peer_is_loopback() {
+        let h = headers_with_xff("203.0.113.5");
+        assert_eq!(client_ip_key(&peer("127.0.0.1"), &h), "203.0.113.5");
+    }
+
+    #[test]
+    fn ip_key_uses_last_xff_entry() {
+        let h = headers_with_xff("198.51.100.10, 203.0.113.5");
+        assert_eq!(client_ip_key(&peer("127.0.0.1"), &h), "203.0.113.5");
+    }
+
+    #[test]
+    fn ip_key_falls_back_to_peer_when_xff_missing() {
+        let h = HeaderMap::new();
+        assert_eq!(client_ip_key(&peer("127.0.0.1"), &h), "127.0.0.1");
+    }
+
+    #[test]
+    fn ip_key_handles_ipv6_loopback() {
+        let h = headers_with_xff("2001:db8::1");
+        assert_eq!(client_ip_key(&peer("[::1]"), &h), "2001:db8::1");
+    }
 }

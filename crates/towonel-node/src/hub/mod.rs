@@ -365,6 +365,8 @@ impl Hub {
             signer,
             refresh_limiter: api::new_refresh_limiter(),
             login_limiter: api::new_login_limiter(),
+            ip_login_limiter: api::new_login_limiter(),
+            login_sentinel_hash: api::compute_login_sentinel_hash().await?,
             live_edges: Arc::new(live_edges::LiveEdges::new()),
             liveness,
             web_enabled: self.p.web_enabled,

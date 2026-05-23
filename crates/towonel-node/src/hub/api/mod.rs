@@ -96,6 +96,13 @@ pub type LoginLimiter = moka::future::Cache<String, Arc<std::sync::atomic::Atomi
 pub const LOGIN_MAX_FAILURES: u32 = 10;
 pub const LOGIN_LOCKOUT_WINDOW_SECS: u64 = 15 * 60;
 
+/// Compute the PHC hash that login uses as a fall-back verify target when
+/// the supplied email does not exist (or is disabled). Spending the same
+/// argon2 CPU on those paths closes the user-enumeration timing oracle.
+pub async fn compute_login_sentinel_hash() -> anyhow::Result<String> {
+    super::auth::password::hash("\0towonel-login-sentinel\0").await
+}
+
 #[must_use]
 pub fn new_login_limiter() -> LoginLimiter {
     moka::future::Cache::builder()
@@ -141,7 +148,19 @@ pub struct AppState {
     pub udp_port_lock: Mutex<()>,
     pub signer: Arc<HubSigner>,
     pub refresh_limiter: RefreshLimiter,
+    /// Per-email counter for failed logins. Audit/observability only — the
+    /// IP-keyed counter below is what actually blocks. A per-email lockout
+    /// would let any third party pin a known account by sending wrong
+    /// passwords from anywhere.
     pub login_limiter: LoginLimiter,
+    /// Per-client-IP counter for failed logins. Trips lockout when an IP
+    /// crosses [`LOGIN_MAX_FAILURES`] in the window; legitimate users from
+    /// other IPs are unaffected.
+    pub ip_login_limiter: LoginLimiter,
+    /// PHC hash of a fixed sentinel, computed once at startup. Used to make
+    /// the user-not-found and user-disabled paths spend the same argon2 CPU
+    /// as a real verify, closing a user-enumeration timing oracle.
+    pub login_sentinel_hash: String,
     pub live_edges: Arc<super::live_edges::LiveEdges>,
     pub liveness: super::liveness::SharedLivenessStore,
     pub web_enabled: bool,
