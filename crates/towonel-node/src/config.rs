@@ -531,6 +531,9 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
     } = inputs;
 
     let hub_enabled = enabled.unwrap_or(true);
+    if hub_enabled && let Some(url) = public_url.as_deref() {
+        validate_hub_public_url(url)?;
+    }
     let driver = db_driver.unwrap_or(DbDriver::Sqlite);
     let dsn = db_dsn.or_else(|| match driver {
         DbDriver::Sqlite => data_dir.map(|d| d.join("hub.db").to_string_lossy().into_owned()),
@@ -586,6 +589,22 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
     })
+}
+
+fn validate_hub_public_url(raw: &str) -> anyhow::Result<()> {
+    let url = url::Url::parse(raw)
+        .map_err(|e| anyhow::anyhow!("TOWONEL_HUB_PUBLIC_URL is not a valid URL: {e}"))?;
+    if url.scheme() != "https" {
+        anyhow::bail!(
+            "TOWONEL_HUB_PUBLIC_URL must use https:// (got {}://); agents fetch invites and \
+             credentials over this URL, plaintext is not safe even behind a reverse proxy",
+            url.scheme()
+        );
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        anyhow::bail!("TOWONEL_HUB_PUBLIC_URL must include a host");
+    }
+    Ok(())
 }
 
 fn parse_psk_hex(raw: &str, label: &str) -> anyhow::Result<[u8; 32]> {
@@ -688,6 +707,17 @@ mod tests {
     #[test]
     fn parse_cidr_list_rejects_garbage() {
         parse_cidr_list("not-a-cidr").unwrap_err();
+    }
+
+    #[test]
+    fn hub_public_url_must_be_https() {
+        validate_hub_public_url("https://hub.example.eu").unwrap();
+        validate_hub_public_url("https://hub.example.eu:8443/").unwrap();
+        let err = validate_hub_public_url("http://hub.example.eu").unwrap_err();
+        assert!(err.to_string().contains("https://"), "got: {err}");
+        validate_hub_public_url("ftp://hub.example.eu").unwrap_err();
+        validate_hub_public_url("not a url").unwrap_err();
+        validate_hub_public_url("https://").unwrap_err();
     }
 
     // `default_trusted_cidrs` filter_maps `.parse().ok()`, which would silently
