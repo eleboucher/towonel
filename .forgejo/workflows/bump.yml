@@ -10,12 +10,17 @@ on:
         default: "auto"
         type: string
 
+permissions:
+  contents: read
+
 concurrency:
   group: bump
   cancel-in-progress: false
 
 jobs:
   bump:
+    permissions:
+      contents: write
     runs-on: docker
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6

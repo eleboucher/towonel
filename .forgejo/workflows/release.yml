@@ -6,12 +6,17 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   release:
+    permissions:
+      contents: write
     runs-on: docker
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
