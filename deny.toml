@@ -44,7 +44,7 @@ expression = "MIT AND ISC AND OpenSSL"
 license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
 # Workspace path deps don't have a version — ignore them.
 allow-wildcard-paths = true
@@ -56,6 +56,7 @@ deny = []
 # Duplicates pulled in by the iroh networking stack. Transitive, no upstream fix.
 skip = [
   { crate = "block-buffer" },
+  { crate = "core-foundation" },
   { crate = "cpufeatures" },
   { crate = "crypto-common" },
   { crate = "curve25519-dalek" },
@@ -64,10 +65,14 @@ skip = [
   { crate = "ed25519-dalek" },
   { crate = "fiat-crypto" },
   { crate = "getrandom" },
-  { crate = "hashbrown" },
+  { crate = "netlink-packet-route" },
   { crate = "rand_core" },
+  # iroh's ed25519-dalek 3.0.0-pre pulls sha2 0.11 alongside our 0.10. Drops
+  # when iroh ships a stable release.
+  { crate = "sha2" },
   { crate = "signature" },
-  { crate = "spin" },
+  { crate = "thiserror" },
+  { crate = "thiserror-impl" },
   { crate = "windows-sys" },
 ]
 skip-tree = []
