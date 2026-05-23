@@ -159,7 +159,7 @@ prometheus = { version = "0.14", default-features = false, features = [
   "process",
 ] }
 base64 = "0.22"
-sha2 = "0.11.0-rc.5"
+sha2 = "0.10"
 url = "2"
 fips204 = { version = "0.4", default-features = false, features = [
   "ml-dsa-65",
