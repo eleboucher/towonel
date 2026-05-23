@@ -15,8 +15,8 @@ use towonel_common::time::now_ms;
 
 use super::db::InviteStatus;
 use super::{
-    AppState, constant_time_eq, gone, internal_error, invalid_request, json_ok, not_found,
-    parse_invite_id, unauthorized,
+    AppState, constant_time_eq, gone, internal_error, invalid_request, json_ok, parse_invite_id,
+    unauthorized,
 };
 
 /// 1 h — caps the worst-case revocation lag for an issued `EdgeCred`.
@@ -70,23 +70,30 @@ pub(super) async fn post_bootstrap(
         return invalid_request("invite_secret is not valid base64url");
     };
 
+    // Always compute the keyed hash before branching on row existence, so a
+    // remote attacker can't distinguish missing-invite from wrong-secret via
+    // response latency. The constant-time compare against the row's hash (or
+    // an all-zero sentinel when the row is missing) keeps both paths
+    // CPU-identical too.
+    let presented = hash_invite_secret(&state.invite_hash_key, &invite_secret);
     let invite = match state.db.get_invite(&invite_id).await {
-        Ok(Some(row)) => row,
-        Ok(None) => return not_found("invite does not exist"),
+        Ok(row) => row,
         Err(e) => {
             warn!(error = %e, "failed to fetch invite");
             return internal_error();
         }
+    };
+    let Some(invite) = invite else {
+        let sentinel = [0u8; 32];
+        let _ = constant_time_eq(&presented, &sentinel);
+        return unauthorized("invite_secret is invalid or the invite has been revoked");
     };
 
     // Return the SAME error for both wrong-secret and revoked-with-right-secret
     // so an attacker who obtains an invite_secret can't distinguish a revoked
     // invite from a mistyped secret. Legitimate clients see the generic message;
     // hub operators can inspect the server log (below) for the real cause.
-    let secret_ok = constant_time_eq(
-        &hash_invite_secret(&state.invite_hash_key, &invite_secret),
-        &invite.secret_hash,
-    );
+    let secret_ok = constant_time_eq(&presented, &invite.secret_hash);
     let revoked = matches!(invite.status, InviteStatus::Revoked);
     if !secret_ok || revoked {
         if secret_ok && revoked {

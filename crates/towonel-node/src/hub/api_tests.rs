@@ -710,8 +710,10 @@ async fn bootstrap_rejects_missing_invite() {
         None,
     )
     .await;
-    assert_eq!(status, 404);
-    assert_eq!(body["error"]["code"], "not_found");
+    // Missing-invite and wrong-secret return the SAME error so a remote
+    // attacker can't enumerate which invite IDs exist.
+    assert_eq!(status, 401);
+    assert_eq!(body["error"]["code"], "unauthorized");
 }
 
 #[tokio::test]
