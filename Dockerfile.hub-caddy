@@ -137,10 +137,12 @@ COPY --from=runtime-prep --chown=10001:10001 /home/nonroot    /home/nonroot
 COPY --from=runtime-prep /usr/local/bin/towonel /usr/local/bin/towonel
 COPY --from=runtime-prep /usr/local/bin/caddy   /usr/local/bin/caddy
 
-# Both binaries get cap_net_bind_service so operators can swap the Caddyfile
-# and rebind privileged ports without rebuilding the image.
-RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/caddy \
-    && setcap 'cap_net_bind_service=+ep' /usr/local/bin/towonel
+# Only Caddy needs cap_net_bind_service — it fronts 80/443 and forwards to
+# towonel on unprivileged loopback ports via PROXY v2. Granting the cap to
+# towonel as well would double the privileged-port surface area for no gain.
+# Operators wanting towonel to bind privileged ports directly should use
+# Dockerfile.node, which sets the cap on the towonel binary.
+RUN setcap 'cap_net_bind_service=+ep' /usr/local/bin/caddy
 
 COPY deploy/hub-caddy/Caddyfile     /etc/caddy/Caddyfile
 COPY deploy/hub-caddy/entrypoint.sh /usr/local/bin/entrypoint.sh
