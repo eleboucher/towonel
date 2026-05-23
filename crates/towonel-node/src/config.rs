@@ -116,6 +116,23 @@ impl IdentityConfig {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
+            if let Some(p) = self.key_path.as_deref()
+                && p.exists()
+            {
+                let on_disk = std::fs::read_to_string(p).map_err(|e| {
+                    anyhow::anyhow!(
+                        "TOWONEL_IDENTITY_KEY is set but TOWONEL_IDENTITY_KEY_PATH ({}) is unreadable: {e}",
+                        p.display()
+                    )
+                })?;
+                if on_disk.trim() != hex {
+                    anyhow::bail!(
+                        "TOWONEL_IDENTITY_KEY is set but disagrees with the contents of \
+                         TOWONEL_IDENTITY_KEY_PATH ({}); remove one to disambiguate",
+                        p.display()
+                    );
+                }
+            }
             let bytes = hex::decode(hex)
                 .map_err(|e| anyhow::anyhow!("TOWONEL_IDENTITY_KEY is not valid hex: {e}"))?;
             let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|e| {

@@ -37,11 +37,20 @@ pub const INVITE_HASH_KEY_ENV: &str = "TOWONEL_INVITE_HASH_KEY";
 pub const HUB_KEK_ENV: &str = "TOWONEL_HUB_KEK";
 
 /// Resolve from env value, else read/generate at `path`, else error.
+///
+/// If both env and an on-disk key are present and disagree, refuse to start —
+/// silently letting env shadow a stale file invalidates every outstanding
+/// invite the file would have authenticated. The operator must choose.
 pub fn load_or_generate_invite_hash_key(
     env_value: Option<&str>,
     path: Option<&Path>,
 ) -> anyhow::Result<InviteHashKey> {
     if let Some(hex) = env_value.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(p) = path
+            && p.exists()
+        {
+            ensure_env_matches_file(INVITE_HASH_KEY_ENV, "TOWONEL_INVITE_HASH_KEY_PATH", hex, p)?;
+        }
         return InviteHashKey::from_hex(hex);
     }
     if let Some(path) = path {
@@ -53,6 +62,28 @@ pub fn load_or_generate_invite_hash_key(
          or set TOWONEL_INVITE_HASH_KEY_PATH (or TOWONEL_DATA_DIR) so the \
          hub can persist a generated key to disk"
     )
+}
+
+fn ensure_env_matches_file(
+    env_label: &str,
+    path_label: &str,
+    env_value: &str,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let on_disk = std::fs::read_to_string(path).map_err(|e| {
+        anyhow::anyhow!(
+            "{env_label} is set but {path_label} ({}) is unreadable: {e}",
+            path.display()
+        )
+    })?;
+    if on_disk.trim() != env_value.trim() {
+        anyhow::bail!(
+            "{env_label} is set but disagrees with the contents of {path_label} ({}); \
+             remove one to disambiguate before starting the hub",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn load_or_generate_invite_hash_key_at(path: &Path) -> anyhow::Result<InviteHashKey> {
@@ -93,6 +124,11 @@ pub fn load_or_generate_hub_kek(
     path: Option<&Path>,
 ) -> anyhow::Result<HubKek> {
     if let Some(hex) = env_value.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(p) = path
+            && p.exists()
+        {
+            ensure_env_matches_file(HUB_KEK_ENV, "TOWONEL_HUB_KEK_PATH", hex, p)?;
+        }
         return HubKek::from_hex(hex);
     }
     if let Some(path) = path {
@@ -142,6 +178,14 @@ pub async fn load_or_generate_operator_key(
     path: &Path,
 ) -> anyhow::Result<zeroize::Zeroizing<String>> {
     if let Some(value) = env_value.map(str::trim).filter(|s| !s.is_empty()) {
+        if path.exists() {
+            ensure_env_matches_file(
+                "TOWONEL_HUB_OPERATOR_API_KEY",
+                "TOWONEL_HUB_OPERATOR_API_KEY_PATH",
+                value,
+                path,
+            )?;
+        }
         return Ok(zeroize::Zeroizing::new(value.to_string()));
     }
     let path = path.to_path_buf();
@@ -561,6 +605,29 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         let err = load_or_generate_invite_hash_key(None, Some(&path)).unwrap_err();
         assert!(err.to_string().contains("empty"), "got: {err}");
+        drop(std::fs::remove_file(&path));
+    }
+
+    #[test]
+    fn env_matches_file_is_ok() {
+        let hex = "33".repeat(32);
+        let path = temp_path("env-match");
+        std::fs::write(&path, &hex).unwrap();
+        let key = load_or_generate_invite_hash_key(Some(&hex), Some(&path)).unwrap();
+        assert_eq!(key.to_hex(), hex);
+        drop(std::fs::remove_file(&path));
+    }
+
+    #[test]
+    fn env_disagreeing_with_file_errors() {
+        let env_hex = "44".repeat(32);
+        let file_hex = "55".repeat(32);
+        let path = temp_path("env-mismatch");
+        std::fs::write(&path, &file_hex).unwrap();
+        let err = load_or_generate_invite_hash_key(Some(&env_hex), Some(&path)).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("disagrees"), "got: {msg}");
+        assert!(msg.contains(INVITE_HASH_KEY_ENV), "got: {msg}");
         drop(std::fs::remove_file(&path));
     }
 
