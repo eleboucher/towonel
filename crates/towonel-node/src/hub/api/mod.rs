@@ -170,6 +170,91 @@ pub struct AppState {
     pub web_enabled: bool,
     pub port_reservations_tx: broadcast::Sender<PortReservationDelta>,
     pub ports_require_reservation: bool,
+    /// Port → (tenant, service) index, computed without the liveness filter
+    /// so an offline agent's reservation still blocks another tenant from
+    /// claiming the port. Read by `find_port_conflict` under the
+    /// per-protocol locks; refreshed by `rebuild_and_broadcast_routes`.
+    pub port_index: ArcSwap<PortIndex>,
+}
+
+#[derive(Default)]
+pub struct PortIndex {
+    pub tcp:
+        std::collections::BTreeMap<u16, (towonel_common::identity::TenantId, std::string::String)>,
+    pub udp:
+        std::collections::BTreeMap<u16, (towonel_common::identity::TenantId, std::string::String)>,
+}
+
+/// Walk all signed entries and materialize the per-protocol
+/// `listen_port → (tenant, service)` map. Independent of agent liveness so a
+/// reconnecting agent's port reservation persists across blips.
+fn build_port_index(
+    entries: &[towonel_common::config_entry::SignedConfigEntry],
+    policy: &towonel_common::ownership::OwnershipPolicy,
+) -> PortIndex {
+    use towonel_common::config_entry::ConfigOp;
+    use towonel_common::identity::TenantId;
+    let mut per_tenant_tcp: std::collections::HashMap<
+        TenantId,
+        std::collections::HashMap<String, u16>,
+    > = std::collections::HashMap::new();
+    let mut per_tenant_udp: std::collections::HashMap<
+        TenantId,
+        std::collections::HashMap<String, u16>,
+    > = std::collections::HashMap::new();
+    for entry in entries {
+        if policy.pq_public_key(&entry.tenant_id).is_none() {
+            continue;
+        }
+        let Ok(payload) = entry.payload_unverified() else {
+            continue;
+        };
+        match payload.op {
+            ConfigOp::UpsertTcpService {
+                service,
+                listen_port,
+            } => {
+                per_tenant_tcp
+                    .entry(payload.tenant_id)
+                    .or_default()
+                    .insert(service, listen_port);
+            }
+            ConfigOp::DeleteTcpService { service } => {
+                per_tenant_tcp
+                    .entry(payload.tenant_id)
+                    .or_default()
+                    .remove(&service);
+            }
+            ConfigOp::UpsertUdpService {
+                service,
+                listen_port,
+            } => {
+                per_tenant_udp
+                    .entry(payload.tenant_id)
+                    .or_default()
+                    .insert(service, listen_port);
+            }
+            ConfigOp::DeleteUdpService { service } => {
+                per_tenant_udp
+                    .entry(payload.tenant_id)
+                    .or_default()
+                    .remove(&service);
+            }
+            _ => {}
+        }
+    }
+    let mut idx = PortIndex::default();
+    for (tenant, services) in per_tenant_tcp {
+        for (service, port) in services {
+            idx.tcp.entry(port).or_insert((tenant, service));
+        }
+    }
+    for (tenant, services) in per_tenant_udp {
+        for (service, port) in services {
+            idx.udp.entry(port).or_insert((tenant, service));
+        }
+    }
+    idx
 }
 
 impl AppState {
@@ -198,6 +283,13 @@ pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Resu
         state.db.get_all_entries(),
         state.liveness.live_agents(cutoff)
     )?;
+    // The port index intentionally ignores liveness AND ignores whether the
+    // tenant has any registered agents — an agent that crashed overnight
+    // (or hasn't yet been provisioned) still owns its declared `listen_port`,
+    // so another tenant can't race to claim it.
+    let idx = build_port_index(&entries, &policy_snapshot);
+    state.port_index.store(Arc::new(idx));
+
     let table = RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live));
     if state.route_tx.send(table).is_err() {
         tracing::debug!("route broadcast: no active subscribers");

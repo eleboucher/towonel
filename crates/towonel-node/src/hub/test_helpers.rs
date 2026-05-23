@@ -74,6 +74,7 @@ impl TestHub {
             login_sentinel_hash: super::api::compute_login_sentinel_hash()
                 .await
                 .expect("compute sentinel hash for tests"),
+            port_index: arc_swap::ArcSwap::from_pointee(super::api::PortIndex::default()),
             live_edges: Arc::new(super::live_edges::LiveEdges::new()),
             liveness: Arc::new(super::liveness::InMemoryLivenessStore::new()),
             web_enabled: true,

@@ -108,75 +108,29 @@ enum PortConflict {
     SameTenantOtherService { service: String },
 }
 
-/// Replay all stored entries to find whether `listen_port` is already claimed
-/// within `kind`'s port namespace. TCP and UDP are scanned separately because
-/// they live in distinct port namespaces at the OS level.
-///
-/// Skips ML-DSA re-verification — entries in the DB were already verified at
-/// insert time, and re-checking on every UpsertTcpService/UpsertUdpService
-/// would be O(N×crypto) under the global per-protocol port lock.
-///
-/// `policy` still gates the scan: entries from removed tenants are ignored,
-/// matching the behavior of `RouteTable::from_entries`.
-async fn find_port_conflict(
-    db: &super::super::db::Db,
+/// Look up `listen_port` in the cached per-protocol port index. The cache is
+/// refreshed by `rebuild_and_broadcast_routes` after every upsert/delete and
+/// computed without the liveness filter, so an agent that's currently
+/// disconnected still owns its declared port.
+fn find_port_conflict(
+    port_index: &super::PortIndex,
     kind: ServiceKind,
     listen_port: u16,
     requesting_tenant: &TenantId,
     requesting_service: &str,
-    policy: &towonel_common::ownership::OwnershipPolicy,
 ) -> Option<PortConflict> {
-    let entries = db.get_all_entries().await.ok()?;
-    let mut per_tenant: std::collections::HashMap<
-        TenantId,
-        std::collections::HashMap<String, u16>,
-    > = std::collections::HashMap::new();
-    for entry in &entries {
-        if policy.pq_public_key(&entry.tenant_id).is_none() {
-            continue;
-        }
-        let Ok(payload) = entry.payload_unverified() else {
-            continue;
-        };
-        let map = per_tenant.entry(payload.tenant_id).or_default();
-        match (kind, payload.op) {
-            (
-                ServiceKind::Tcp,
-                ConfigOp::UpsertTcpService {
-                    service,
-                    listen_port: port,
-                },
-            )
-            | (
-                ServiceKind::Udp,
-                ConfigOp::UpsertUdpService {
-                    service,
-                    listen_port: port,
-                },
-            ) => {
-                map.insert(service, port);
-            }
-            (ServiceKind::Tcp, ConfigOp::DeleteTcpService { service })
-            | (ServiceKind::Udp, ConfigOp::DeleteUdpService { service }) => {
-                map.remove(&service);
-            }
-            _ => {}
-        }
+    let map = match kind {
+        ServiceKind::Tcp => &port_index.tcp,
+        ServiceKind::Udp => &port_index.udp,
+    };
+    let (tenant, service) = map.get(&listen_port)?;
+    if tenant != requesting_tenant {
+        return Some(PortConflict::OtherTenant { tenant: *tenant });
     }
-    for (tenant_id, bindings) in &per_tenant {
-        for (service, port) in bindings {
-            if *port != listen_port {
-                continue;
-            }
-            if tenant_id != requesting_tenant {
-                return Some(PortConflict::OtherTenant { tenant: *tenant_id });
-            }
-            if service != requesting_service {
-                return Some(PortConflict::SameTenantOtherService {
-                    service: service.clone(),
-                });
-            }
-        }
+    if service != requesting_service {
+        return Some(PortConflict::SameTenantOtherService {
+            service: service.clone(),
+        });
     }
     None
 }
@@ -267,15 +221,12 @@ async fn validate_service_op(
             return Err(resp);
         }
         match find_port_conflict(
-            &state.db,
+            &state.port_index.load(),
             kind,
             listen_port,
             &payload.tenant_id,
             service,
-            state.policy.load().as_ref(),
-        )
-        .await
-        {
+        ) {
             None => {}
             Some(PortConflict::OtherTenant { tenant }) => {
                 state.metrics.record_reject(r.port_claimed);

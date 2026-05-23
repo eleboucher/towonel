@@ -375,7 +375,15 @@ impl Hub {
             web_enabled: self.p.web_enabled,
             port_reservations_tx: tokio::sync::broadcast::channel(64).0,
             ports_require_reservation: self.p.ports_require_reservation,
+            port_index: arc_swap::ArcSwap::from_pointee(api::PortIndex::default()),
         });
+
+        // Seed the port index from the DB before serving any upsert; the
+        // first call to `find_port_conflict` would otherwise see an empty
+        // index and let a tenant re-claim someone else's port.
+        if let Err(e) = api::rebuild_and_broadcast_routes(&state).await {
+            tracing::warn!(error = %e, "initial route + port_index seed failed");
+        }
 
         spawn_background_loops(&state);
 
