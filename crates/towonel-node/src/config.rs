@@ -573,6 +573,15 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         invite_hash_key_path.or_else(|| data_dir.map(|d| d.join("invite_hash.key")));
     let hub_kek_path = hub_kek_path.or_else(|| data_dir.map(|d| d.join("hub_kek.key")));
 
+    if hub_enabled && driver == DbDriver::Postgres {
+        refuse_autogen_under_postgres_for_ha(
+            hub_kek.as_deref(),
+            hub_kek_path.as_deref(),
+            invite_hash_key.as_deref(),
+            invite_hash_key_path.as_deref(),
+        )?;
+    }
+
     // Validate the invite-hash key upfront so a missing or malformed value
     // fails startup loudly, before any DB work. Edge-only nodes don't need
     // it (they never verify invite secrets).
@@ -624,6 +633,44 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
     })
+}
+
+/// Under Postgres the hub is presumed to be running in HA mode against a
+/// shared database. Auto-generating per-replica secrets would silently
+/// diverge and only fail at first decrypt — refuse unless the operator
+/// provided each secret explicitly (env or pre-existing file).
+fn refuse_autogen_under_postgres_for_ha(
+    kek_env: Option<&str>,
+    kek_path: Option<&Path>,
+    invite_env: Option<&str>,
+    invite_path: Option<&Path>,
+) -> anyhow::Result<()> {
+    refuse_autogen("TOWONEL_HUB_KEK", "TOWONEL_HUB_KEK_PATH", kek_env, kek_path)?;
+    refuse_autogen(
+        "TOWONEL_INVITE_HASH_KEY",
+        "TOWONEL_INVITE_HASH_KEY_PATH",
+        invite_env,
+        invite_path,
+    )
+}
+
+fn refuse_autogen(
+    env_label: &str,
+    path_label: &str,
+    env_value: Option<&str>,
+    path: Option<&Path>,
+) -> anyhow::Result<()> {
+    let env_set = env_value.map(str::trim).is_some_and(|s| !s.is_empty());
+    let file_present = path.is_some_and(Path::exists);
+    if env_set || file_present {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "{env_label} is not set and {path_label} has no existing key file; refusing to \
+         auto-generate under TOWONEL_HUB_DB_DRIVER=postgres because each hub replica would \
+         generate a different value and silently diverge — set {env_label} from your secret \
+         manager so every replica reads the same value"
+    )
 }
 
 fn validate_socket_addr(label: &str, raw: &str) -> anyhow::Result<()> {
@@ -750,6 +797,20 @@ mod tests {
     #[test]
     fn parse_cidr_list_rejects_garbage() {
         parse_cidr_list("not-a-cidr").unwrap_err();
+    }
+
+    #[test]
+    fn postgres_refuses_autogen_without_explicit_secret() {
+        refuse_autogen("X", "X_PATH", None, None).unwrap_err();
+        refuse_autogen("X", "X_PATH", Some("  "), None).unwrap_err();
+        refuse_autogen("X", "X_PATH", Some("hex"), None).unwrap();
+        let tmp = std::env::temp_dir().join("towonel-cfg-refuse-autogen-existing");
+        std::fs::write(&tmp, b"hex").unwrap();
+        refuse_autogen("X", "X_PATH", None, Some(&tmp)).unwrap();
+        drop(std::fs::remove_file(&tmp));
+        let absent = std::env::temp_dir().join("towonel-cfg-refuse-autogen-absent-xyz");
+        drop(std::fs::remove_file(&absent));
+        refuse_autogen("X", "X_PATH", None, Some(&absent)).unwrap_err();
     }
 
     #[test]
