@@ -16,7 +16,16 @@ fn hasher() -> Argon2<'static> {
 }
 
 /// Returns a PHC-formatted hash, including salt + params, ready to store.
-pub fn hash(password: &str) -> anyhow::Result<String> {
+/// Runs on `spawn_blocking` because argon2 burns ~20 MiB + ~50 ms of CPU and
+/// would otherwise block a tokio worker for the whole duration.
+pub async fn hash(password: &str) -> anyhow::Result<String> {
+    let password = password.to_owned();
+    tokio::task::spawn_blocking(move || hash_blocking(&password))
+        .await
+        .map_err(|e| anyhow::anyhow!("argon2 hash task panicked: {e}"))?
+}
+
+fn hash_blocking(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = hasher()
         .hash_password(password.as_bytes(), &salt)
@@ -26,7 +35,16 @@ pub fn hash(password: &str) -> anyhow::Result<String> {
 
 /// Constant-time verify against a PHC-formatted hash. Returns `Ok(false)` on
 /// a syntactically valid mismatch and an `Err` only on hash format problems.
-pub fn verify(password: &str, phc: &str) -> anyhow::Result<bool> {
+/// Runs on `spawn_blocking` (see [`hash`]).
+pub async fn verify(password: &str, phc: &str) -> anyhow::Result<bool> {
+    let password = password.to_owned();
+    let phc = phc.to_owned();
+    tokio::task::spawn_blocking(move || verify_blocking(&password, &phc))
+        .await
+        .map_err(|e| anyhow::anyhow!("argon2 verify task panicked: {e}"))?
+}
+
+fn verify_blocking(password: &str, phc: &str) -> anyhow::Result<bool> {
     let parsed = argon2::password_hash::PasswordHash::new(phc)
         .map_err(|e| anyhow::anyhow!("invalid stored hash: {e}"))?;
     match hasher().verify_password(password.as_bytes(), &parsed) {
@@ -40,17 +58,17 @@ pub fn verify(password: &str, phc: &str) -> anyhow::Result<bool> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn round_trip() {
-        let phc = hash("hunter2-the-second").unwrap();
-        assert!(verify("hunter2-the-second", &phc).unwrap());
-        assert!(!verify("hunter2-the-third", &phc).unwrap());
+    #[tokio::test]
+    async fn round_trip() {
+        let phc = hash("hunter2-the-second").await.unwrap();
+        assert!(verify("hunter2-the-second", &phc).await.unwrap());
+        assert!(!verify("hunter2-the-third", &phc).await.unwrap());
     }
 
-    #[test]
-    fn different_salts_yield_different_hashes() {
-        let a = hash("same-input").unwrap();
-        let b = hash("same-input").unwrap();
+    #[tokio::test]
+    async fn different_salts_yield_different_hashes() {
+        let a = hash("same-input").await.unwrap();
+        let b = hash("same-input").await.unwrap();
         assert_ne!(a, b);
     }
 }

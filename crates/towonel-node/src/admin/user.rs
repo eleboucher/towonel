@@ -48,7 +48,9 @@ pub async fn cmd_user_create(
         return Err(anyhow!("user with email {email} already exists"));
     }
 
-    let hash = password::hash(&password).context("failed to hash password")?;
+    let hash = password::hash(&password)
+        .await
+        .context("failed to hash password")?;
     let id = new_user_id();
     let now_ms = i64::try_from(towonel_common::time::now_ms()).unwrap_or(i64::MAX);
 

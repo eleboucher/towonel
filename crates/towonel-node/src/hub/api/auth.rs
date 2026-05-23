@@ -82,7 +82,7 @@ pub(super) async fn post_signup(
     };
 
     let user_id = new_id(16);
-    let pw_hash = match password::hash(&body.password) {
+    let pw_hash = match password::hash(&body.password).await {
         Ok(h) => h,
         Err(e) => {
             warn!(error = %e, "password hash failed");
@@ -202,7 +202,7 @@ pub(super) async fn post_login(
         record_login_failure(&state, &lockout_key).await;
         return unauthorized("invalid credentials");
     }
-    let ok = match password::verify(&body.password, &user.password_hash) {
+    let ok = match password::verify(&body.password, &user.password_hash).await {
         Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "password verify error");
