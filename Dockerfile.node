@@ -79,7 +79,7 @@ ARG VERSION=dev
 ARG REVISION=unknown
 ARG CREATED=
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin \
+    && apt-get install -y --no-install-recommends ca-certificates curl libcap2-bin tini \
     && rm -rf /var/lib/apt/lists/*
 LABEL org.opencontainers.image.title="towonel" \
       org.opencontainers.image.description="Towonel hub/edge node — Iroh-based tunnel control plane and data plane" \
@@ -106,4 +106,4 @@ ENV TOWONEL_DATA_DIR=/data
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
     CMD curl --max-time 2 -fsS http://localhost:8443/v1/health || exit 1
-ENTRYPOINT ["/usr/local/bin/towonel"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/towonel"]
