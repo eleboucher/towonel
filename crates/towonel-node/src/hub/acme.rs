@@ -43,6 +43,12 @@ impl AcmeManager {
     pub fn new(cert_dir: &Path, acme_email: String, staging: bool) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(cert_dir)
             .with_context(|| format!("failed to create cert_dir {}", cert_dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(cert_dir, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("failed to chmod cert_dir {}", cert_dir.display()))?;
+        }
 
         let storage: Arc<dyn Storage> = Arc::new(FileStorage::new(cert_dir));
         let cache = CertCache::new(CacheOptions::default());
