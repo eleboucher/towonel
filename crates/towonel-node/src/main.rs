@@ -491,6 +491,7 @@ async fn build_hub_params(
             acme_email: t.acme_email.clone(),
             acme_staging: t.acme_staging,
         }),
+        web_enabled: config.hub.web_enabled,
     })
 }
 

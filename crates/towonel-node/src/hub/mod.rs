@@ -196,6 +196,7 @@ pub struct HubParams {
     pub link_listen_addr: Option<String>,
     pub link_psk: Option<Arc<[u8; 32]>>,
     pub tls: Option<crate::config::TlsConfig>,
+    pub web_enabled: bool,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -248,6 +249,7 @@ impl Hub {
             db = %crate::config::redact_db_url(&db_url),
             max_open = self.p.database.max_open(),
             max_idle = self.p.database.max_idle(),
+            web_enabled = self.p.web_enabled,
             "hub starting"
         );
 

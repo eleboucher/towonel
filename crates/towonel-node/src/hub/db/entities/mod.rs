@@ -1,5 +1,10 @@
+pub mod admin_actions;
 pub mod entries;
 pub mod hub_signing_keys;
 pub mod invite_hostnames;
 pub mod invites;
+pub mod sessions;
+pub mod signup_invites;
+pub mod tenant_ownership;
 pub mod tenant_removals;
+pub mod users;

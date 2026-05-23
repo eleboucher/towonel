@@ -141,6 +141,11 @@ pub struct HubConfig {
     /// When set, the hub serves its API over TLS-ALPN-01 ACME on
     /// `listen_addr`. Operators set `TOWONEL_HUB_TLS_ACME_EMAIL` to enable.
     pub tls: Option<TlsConfig>,
+    /// Mounts the web account/session routes (`/v1/auth/*`, `/v1/signup-invites`,
+    /// `/v1/users`). Off by default so self-hosters who only use the CLI +
+    /// operator-key flow get zero behavior change. Toggled via
+    /// `TOWONEL_HUB_WEB_ENABLED`.
+    pub web_enabled: bool,
 }
 
 /// Default UDP port for the iroh QUIC socket. Operators rarely need
@@ -270,6 +275,7 @@ struct RawEnv {
     hub_db_max_idle_conns: Option<u32>,
     hub_link_listen_addr: Option<String>,
     hub_link_psk: Option<String>,
+    hub_web_enabled: Option<bool>,
 
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
@@ -325,6 +331,7 @@ impl NodeConfig {
             hub_db_max_idle_conns,
             hub_link_listen_addr,
             hub_link_psk,
+            hub_web_enabled,
             edge_enabled,
             edge_listen_addr,
             edge_health_listen_addr,
@@ -373,6 +380,7 @@ impl NodeConfig {
             link_listen_addr: hub_link_listen_addr,
             link_psk: hub_link_psk,
             tls: hub_tls,
+            web_enabled: hub_web_enabled,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -456,6 +464,7 @@ struct HubInputs<'a> {
     link_listen_addr: Option<String>,
     link_psk: Option<std::sync::Arc<[u8; 32]>>,
     tls: Option<TlsConfig>,
+    web_enabled: Option<bool>,
     data_dir: Option<&'a Path>,
 }
 
@@ -477,6 +486,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         link_listen_addr,
         link_psk,
         tls,
+        web_enabled,
         data_dir,
     } = inputs;
 
@@ -532,6 +542,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         link_listen_addr,
         link_psk,
         tls,
+        web_enabled: web_enabled.unwrap_or(false),
     })
 }
 
