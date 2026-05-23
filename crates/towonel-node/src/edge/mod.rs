@@ -49,6 +49,23 @@ const PEEK_RETRY_DELAY: Duration = Duration::from_millis(5);
 /// exhaust FDs. Caddy's own listener wrapper defaults to 2s.
 const PROXY_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Hard cap on simultaneously in-flight TCP connections. Each accept holds a
+/// permit for the lifetime of the per-connection task; on overload, new
+/// accepts close the socket and bump `connections_rejected_overload`. 50k
+/// matches the typical default ulimit -n of a Linux box and is comfortably
+/// above realistic steady-state load. Override with the
+/// `TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS` env var.
+const DEFAULT_MAX_INFLIGHT_CONNECTIONS: usize = 50_000;
+
+fn max_inflight_connections_from_env() -> usize {
+    std::env::var("TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS")
+        .ok()
+        .as_deref()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_MAX_INFLIGHT_CONNECTIONS)
+}
+
 /// The edge: listens on one TCP port, peeks the SNI, and forwards raw TLS
 /// bytes to the agent. Agent/origin handles TLS termination.
 pub struct Edge {
@@ -113,11 +130,14 @@ impl Edge {
             }
         });
 
+        let max_inflight = max_inflight_connections_from_env();
+        info!(max_inflight, "edge connection cap configured");
         let ctx = Arc::new(ConnCtx {
             router: Arc::clone(&self.router),
             sessions: Arc::clone(&self.sessions),
             metrics: self.metrics.clone(),
             proxy_protocol: Arc::clone(&self.proxy_protocol),
+            connection_permits: Arc::new(tokio::sync::Semaphore::new(max_inflight)),
         });
 
         let listeners = bind_listeners(&self.listen_addr, self.listen_workers).await?;
@@ -404,6 +424,13 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<ConnCtx>) {
                 continue;
             }
         };
+        let Ok(permit) = Arc::clone(&ctx.connection_permits).try_acquire_owned() else {
+            // Counter is the canonical signal here; logging per drop on a
+            // sustained accept-DoS would itself become a hot path.
+            ctx.metrics.connections_rejected_overload.inc();
+            drop(tcp_stream);
+            continue;
+        };
         if let Err(e) = tcp_stream.set_nodelay(true) {
             debug!(%peer_addr, error = %e, "failed to set TCP_NODELAY on client socket");
         }
@@ -417,6 +444,7 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<ConnCtx>) {
             reason = "tokio::spawn already boxes the future"
         )]
         tokio::spawn(async move {
+            let _permit = permit; // released when this task exits
             if let Err(e) = handle_connection(tcp_stream, peer_addr, &ctx).await {
                 debug!(%peer_addr, error = %e, "connection handling failed");
             }
@@ -472,6 +500,12 @@ struct ConnCtx {
     sessions: Arc<SessionRegistry>,
     metrics: EdgeMetrics,
     proxy_protocol: Arc<ProxyProtocolConfig>,
+    /// Hard cap on in-flight TCP connections (TLS + raw TCP services). An
+    /// `OwnedSemaphorePermit` is acquired per accept and held for the
+    /// lifetime of the spawned `handle_*_connection` task. When the cap is
+    /// reached new accepts drop the connection and increment
+    /// `metrics.connections_rejected_overload`.
+    connection_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// Dispatch a single incoming TCP connection: peek the SNI and pass through
@@ -923,6 +957,12 @@ async fn tcp_accept_loop(
                 continue;
             }
         };
+        let Ok(permit) = Arc::clone(&ctx.connection_permits).try_acquire_owned() else {
+            ctx.metrics.connections_rejected_overload.inc();
+            debug!(%peer_addr, service = %binding.service, "edge inflight cap reached; dropping accepted tcp service connection");
+            drop(tcp_stream);
+            continue;
+        };
         if let Err(e) = tcp_stream.set_nodelay(true) {
             debug!(%peer_addr, error = %e, "failed to set TCP_NODELAY on tcp service client");
         }
@@ -931,6 +971,7 @@ async fn tcp_accept_loop(
         let ctx = Arc::clone(&ctx);
         let binding = Arc::clone(&binding);
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_tcp_connection(tcp_stream, peer_addr, &binding, &ctx).await {
                 debug!(%peer_addr, service = %binding.service, error = %e, "tcp service connection handling failed");
             }

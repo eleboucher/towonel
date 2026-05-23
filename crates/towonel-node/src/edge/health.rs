@@ -21,6 +21,10 @@ pub struct EdgeMetrics {
     pub sessions_total: IntCounter,
     pub sessions_rejected_total: IntCounterVec,
     pub route_no_session_total: IntCounter,
+    /// Connections dropped because the edge's concurrency cap was saturated.
+    /// Spikes here mean operator should raise `EDGE_MAX_INFLIGHT_CONNECTIONS`
+    /// or that we're absorbing a TCP-accept `DoS`.
+    pub connections_rejected_overload: IntCounter,
     registry: Arc<Registry>,
 }
 
@@ -70,6 +74,13 @@ impl EdgeMetrics {
                 "towonel_edge_route_no_session_total",
                 "Requests where no session was registered for the agent at lookup time \
                  (excludes the case where a session existed but its open_bi failed)",
+            ),
+            connections_rejected_overload: register_counter(
+                &r,
+                "towonel_edge_connections_rejected_overload_total",
+                "TCP connections dropped because the edge inflight-connection cap was \
+                 reached. Sustained values mean an accept-time DoS or an under-sized \
+                 EDGE_MAX_INFLIGHT_CONNECTIONS.",
             ),
             registry: Arc::new(r),
         }
