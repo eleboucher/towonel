@@ -96,6 +96,8 @@ jobs:
           file: Dockerfile.node
           platforms: linux/amd64,linux/arm64
           push: true
+          sbom: true
+          provenance: mode=max
           tags: ${{ steps.meta-node.outputs.tags }}
           labels: ${{ steps.meta-node.outputs.labels }}
           cache-from: type=gha,scope=towonel-node
@@ -119,6 +121,8 @@ jobs:
           file: Dockerfile.agent
           platforms: linux/amd64,linux/arm64
           push: true
+          sbom: true
+          provenance: mode=max
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}
           cache-from: type=gha,scope=towonel-agent
@@ -142,6 +146,8 @@ jobs:
           file: Dockerfile.hub-caddy
           platforms: linux/amd64,linux/arm64
           push: true
+          sbom: true
+          provenance: mode=max
           tags: ${{ steps.meta-hub-caddy.outputs.tags }}
           labels: ${{ steps.meta-hub-caddy.outputs.labels }}
           cache-from: type=gha,scope=towonel-hub-caddy
