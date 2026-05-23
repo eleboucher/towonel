@@ -100,11 +100,6 @@ jobs:
           labels: ${{ steps.meta-node.outputs.labels }}
           cache-from: type=gha,scope=towonel-node
           cache-to: type=gha,scope=towonel-node,mode=max
-          build-args: |
-            ENABLE_SCCACHE=1
-          secrets: |
-            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
-            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
 
       - name: Compute agent image metadata
         id: meta-agent
@@ -128,11 +123,6 @@ jobs:
           labels: ${{ steps.meta-agent.outputs.labels }}
           cache-from: type=gha,scope=towonel-agent
           cache-to: type=gha,scope=towonel-agent,mode=max
-          build-args: |
-            ENABLE_SCCACHE=1
-          secrets: |
-            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
-            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
 
       - name: Compute hub-caddy image metadata
         id: meta-hub-caddy
@@ -156,8 +146,3 @@ jobs:
           labels: ${{ steps.meta-hub-caddy.outputs.labels }}
           cache-from: type=gha,scope=towonel-hub-caddy
           cache-to: type=gha,scope=towonel-hub-caddy,mode=max
-          build-args: |
-            ENABLE_SCCACHE=1
-          secrets: |
-            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
-            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
