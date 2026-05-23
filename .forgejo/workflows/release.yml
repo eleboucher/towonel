@@ -14,7 +14,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  tests:
+    runs-on: docker
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-deny
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo nextest run --workspace --all-features --no-fail-fast
+      - run: cargo deny --all-features check
+
   release:
+    needs: [tests]
     permissions:
       contents: write
     runs-on: docker
@@ -62,6 +76,7 @@ jobs:
                 "https://git.erwanleboucher.dev/api/v1/repos/${GITHUB_REPOSITORY}/releases"
 
   container:
+    needs: [tests]
     runs-on: multiarch
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
