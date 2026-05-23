@@ -43,6 +43,10 @@ pub(super) struct CreateInviteResponse {
 
 const MAX_TTL_SECS: u64 = 30 * 24 * 3600;
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear happy path with explicit rollback branches; splitting hides the ordering"
+)]
 pub(super) async fn post_invite(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -139,6 +143,10 @@ pub(super) async fn post_invite(
             .await
     {
         warn!(error = %e, "insert_tenant_ownership failed");
+        if let Err(rev_err) = state.db.revoke_invite(&token.invite_id).await {
+            warn!(error = %rev_err, "revoke_invite during ownership rollback");
+        }
+        return internal_error();
     }
 
     state.policy_update(|policy| {

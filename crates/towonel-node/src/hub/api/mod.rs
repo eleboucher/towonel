@@ -88,6 +88,20 @@ pub fn new_refresh_limiter() -> RefreshLimiter {
         .build()
 }
 
+/// Counter per lowercased login email; cache TTL is the lockout window.
+pub type LoginLimiter = moka::future::Cache<String, Arc<std::sync::atomic::AtomicU32>>;
+
+pub const LOGIN_MAX_FAILURES: u32 = 10;
+pub const LOGIN_LOCKOUT_WINDOW_SECS: u64 = 15 * 60;
+
+#[must_use]
+pub fn new_login_limiter() -> LoginLimiter {
+    moka::future::Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(Duration::from_secs(LOGIN_LOCKOUT_WINDOW_SECS))
+        .build()
+}
+
 /// Shared application state for all axum handlers.
 pub struct AppState {
     pub db: Db,
@@ -125,6 +139,7 @@ pub struct AppState {
     pub udp_port_lock: Mutex<()>,
     pub signer: Arc<HubSigner>,
     pub refresh_limiter: RefreshLimiter,
+    pub login_limiter: LoginLimiter,
     pub live_edges: Arc<super::live_edges::LiveEdges>,
     pub liveness: super::liveness::SharedLivenessStore,
     pub web_enabled: bool,

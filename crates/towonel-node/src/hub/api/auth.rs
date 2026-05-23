@@ -9,9 +9,14 @@ use tracing::warn;
 
 use crate::hub::auth::middleware::Principal;
 use crate::hub::auth::{password, session};
+use crate::hub::db;
+use crate::hub::db::admin_actions::NewAdminAction;
 use crate::hub::db::users::NewUser;
 
-use super::{AppState, internal_error, invalid_request, json_ok, json_with_status, unauthorized};
+use super::{
+    AppState, LOGIN_MAX_FAILURES, conflict, error_response, internal_error, invalid_request,
+    json_ok, json_with_status, unauthorized,
+};
 
 const SESSION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 const PASSWORD_MIN_LEN: usize = 8;
@@ -42,6 +47,10 @@ struct AuthResponse {
     user: AuthUser,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear happy path with explicit rollback branches; splitting hides the ordering"
+)]
 pub(super) async fn post_signup(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<SignupRequest>,
@@ -99,7 +108,10 @@ pub(super) async fn post_signup(
         })
         .await
     {
-        warn!(error = %e, "insert_user failed");
+        let is_dup = db::is_unique_violation(&e);
+        if !is_dup {
+            warn!(error = %e, "insert_user failed");
+        }
         if let Err(rel_err) = state
             .db
             .release_signup_invite(&claimed.code, &sentinel)
@@ -107,7 +119,11 @@ pub(super) async fn post_signup(
         {
             warn!(error = %rel_err, "release_signup_invite after insert_user failure");
         }
-        return internal_error();
+        return if is_dup {
+            conflict("email_taken", "email already in use")
+        } else {
+            internal_error()
+        };
     }
 
     if let Err(e) = state
@@ -116,6 +132,37 @@ pub(super) async fn post_signup(
         .await
     {
         warn!(error = %e, "finalize_signup_invite failed");
+        if let Err(del_err) = state.db.delete_user(&user_id).await {
+            warn!(error = %del_err, "delete_user during signup rollback");
+        }
+        if let Err(rel_err) = state
+            .db
+            .release_signup_invite(&claimed.code, &sentinel)
+            .await
+        {
+            warn!(error = %rel_err, "release_signup_invite after finalize failure");
+        }
+        return internal_error();
+    }
+
+    if let Err(e) = state
+        .db
+        .insert_admin_action(NewAdminAction {
+            id: &new_id(16),
+            actor_user_id: None,
+            actor_kind: "system",
+            action: "user.signup",
+            target_kind: "user",
+            target_id: Some(&user_id),
+            metadata: Some(serde_json::json!({
+                "role": claimed.role,
+                "signup_invite_code": claimed.code,
+            })),
+            now_ms: now_ms_i,
+        })
+        .await
+    {
+        warn!(error = %e, "insert_admin_action signup failed");
     }
 
     issue_session_response(&state, &user_id, &body.email, &claimed.role).await
@@ -129,15 +176,30 @@ pub(super) async fn post_login(
         return unauthorized("invalid credentials");
     }
 
+    let lockout_key = body.email.to_lowercase();
+    if let Some(counter) = state.login_limiter.get(&lockout_key).await
+        && counter.load(std::sync::atomic::Ordering::Relaxed) >= LOGIN_MAX_FAILURES
+    {
+        return error_response(
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many failed login attempts; try again later",
+        );
+    }
+
     let user = match state.db.find_user_by_email(&body.email).await {
         Ok(Some(u)) => u,
-        Ok(None) => return unauthorized("invalid credentials"),
+        Ok(None) => {
+            record_login_failure(&state, &lockout_key).await;
+            return unauthorized("invalid credentials");
+        }
         Err(e) => {
             warn!(error = %e, "find_user_by_email failed");
             return internal_error();
         }
     };
     if user.disabled_at_ms.is_some() {
+        record_login_failure(&state, &lockout_key).await;
         return unauthorized("invalid credentials");
     }
     let ok = match password::verify(&body.password, &user.password_hash) {
@@ -148,10 +210,22 @@ pub(super) async fn post_login(
         }
     };
     if !ok {
+        record_login_failure(&state, &lockout_key).await;
         return unauthorized("invalid credentials");
     }
 
+    state.login_limiter.invalidate(&lockout_key).await;
     issue_session_response(&state, &user.id, &user.email, &user.role).await
+}
+
+async fn record_login_failure(state: &Arc<AppState>, key: &str) {
+    let counter = state
+        .login_limiter
+        .get_with(key.to_string(), async {
+            Arc::new(std::sync::atomic::AtomicU32::new(0))
+        })
+        .await;
+    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub(super) async fn post_logout(

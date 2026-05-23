@@ -51,6 +51,13 @@ impl Db {
         Ok(())
     }
 
+    pub async fn delete_user(&self, id: &str) -> anyhow::Result<()> {
+        users::Entity::delete_by_id(id.to_string())
+            .exec(&self.conn)
+            .await?;
+        Ok(())
+    }
+
     pub async fn find_user_by_email(&self, email: &str) -> anyhow::Result<Option<UserRow>> {
         let row = users::Entity::find()
             .filter(users::Column::Email.eq(email))

@@ -211,6 +211,7 @@ pub struct Hub {
 fn spawn_background_loops(state: &Arc<api::AppState>) {
     tokio::spawn(refresh_metrics_loop(Arc::clone(state)));
     tokio::spawn(agent_liveness_prune_loop(Arc::clone(state)));
+    tokio::spawn(session_prune_loop(Arc::clone(state)));
 }
 
 impl Hub {
@@ -315,6 +316,7 @@ impl Hub {
             udp_port_lock: tokio::sync::Mutex::new(()),
             signer,
             refresh_limiter: api::new_refresh_limiter(),
+            login_limiter: api::new_login_limiter(),
             live_edges: Arc::new(live_edges::LiveEdges::new()),
             liveness,
             web_enabled: self.p.web_enabled,
@@ -438,6 +440,23 @@ async fn agent_liveness_prune_loop(state: Arc<api::AppState>) {
             if let Err(e) = api::rebuild_and_broadcast_routes(&state).await {
                 tracing::warn!(error = %e, "route rebuild after liveness prune failed");
             }
+        }
+    }
+}
+
+/// Hourly delete of expired session rows. Auth filters them out anyway;
+/// this is storage hygiene.
+async fn session_prune_loop(state: Arc<api::AppState>) {
+    let mut tick = tokio::time::interval(std::time::Duration::from_hours(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // skip immediate first tick
+    loop {
+        tick.tick().await;
+        let now = i64::try_from(towonel_common::time::now_ms()).unwrap_or(i64::MAX);
+        match state.db.prune_expired_sessions(now).await {
+            Ok(n) if n > 0 => tracing::debug!(pruned = n, "pruned expired sessions"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "session prune failed"),
         }
     }
 }

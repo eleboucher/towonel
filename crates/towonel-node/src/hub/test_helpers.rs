@@ -10,7 +10,10 @@ use towonel_common::invite::InviteToken;
 use towonel_common::kek::HubKek;
 use towonel_common::ownership::OwnershipPolicy;
 
-use super::api::{AppState, health_router, new_nonce_cache, new_refresh_limiter, router_unlimited};
+use super::api::{
+    AppState, health_router, new_login_limiter, new_nonce_cache, new_refresh_limiter,
+    router_unlimited,
+};
 use super::db::temp_db;
 use super::signing::get_or_create_active_signing_key;
 
@@ -62,6 +65,7 @@ impl TestHub {
             udp_port_lock: tokio::sync::Mutex::new(()),
             signer,
             refresh_limiter: new_refresh_limiter(),
+            login_limiter: new_login_limiter(),
             live_edges: Arc::new(super::live_edges::LiveEdges::new()),
             liveness: Arc::new(super::liveness::InMemoryLivenessStore::new()),
             web_enabled: true,
