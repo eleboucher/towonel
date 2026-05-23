@@ -28,6 +28,41 @@ const DNS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 /// handshake bytes. Bounded to stop silent/malicious edges pinning tasks open.
 const STREAM_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Bound on each TCP/UDP `connect` to the configured origin. A tarpitting
+/// or firewall-dropped origin must not pin an agent task indefinitely.
+const ORIGIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Bound on the TLS handshake when the origin is `tls=true`. A peer that
+/// accepts the TCP but never completes TLS would otherwise stall the task.
+const ORIGIN_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn tcp_connect_timeout<A>(addr: A) -> std::io::Result<TcpStream>
+where
+    A: tokio::net::ToSocketAddrs,
+{
+    tokio::time::timeout(ORIGIN_CONNECT_TIMEOUT, TcpStream::connect(addr))
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "origin TCP connect timed out",
+            ))
+        })
+}
+
+/// Bound DNS resolution so a slow/hostile resolver can't pin tasks.
+async fn lookup_host_timeout(host: &str) -> std::io::Result<Vec<SocketAddr>> {
+    tokio::time::timeout(ORIGIN_CONNECT_TIMEOUT, lookup_host(host))
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "DNS lookup timed out",
+            ))
+        })
+        .map(Iterator::collect)
+}
+
 async fn write_proxy_header(
     stream: &mut (impl AsyncWrite + Unpin),
     mode: ProxyProtocol,
@@ -77,7 +112,7 @@ impl OriginTarget {
         for addr in cached.iter() {
             let mut at_port = *addr;
             at_port.set_port(80);
-            match TcpStream::connect(at_port).await {
+            match tcp_connect_timeout(at_port).await {
                 Ok(s) => return Ok(s),
                 Err(e) => last_err = Some(e),
             }
@@ -86,7 +121,7 @@ impl OriginTarget {
             debug!(origin = %self.address, error = %e, "cached addrs exhausted on :80, re-resolving");
         }
         let host = host_of(&self.address);
-        TcpStream::connect((host, 80))
+        tcp_connect_timeout((host, 80))
             .await
             .with_context(|| format!("failed to connect to origin {host}:80"))
     }
@@ -126,7 +161,7 @@ async fn connect_tcp_origin(
     if !cached.is_empty() {
         let mut last_err: Option<std::io::Error> = None;
         for addr in cached.iter() {
-            match TcpStream::connect(addr).await {
+            match tcp_connect_timeout(addr).await {
                 Ok(s) => return Ok(s),
                 Err(e) => last_err = Some(e),
             }
@@ -135,7 +170,7 @@ async fn connect_tcp_origin(
             debug!(origin = %address, error = %e, "cached addrs exhausted, re-resolving");
         }
     }
-    TcpStream::connect(address)
+    tcp_connect_timeout(address)
         .await
         .with_context(|| format!("failed to connect to origin {address}"))
 }
@@ -156,9 +191,10 @@ impl UdpOriginTarget {
         } else {
             // Fall back to a fresh resolve so a transient startup DNS miss
             // doesn't permanently brick this service.
-            lookup_host(&self.address)
+            lookup_host_timeout(&self.address)
                 .await
                 .with_context(|| format!("failed to resolve udp origin {}", self.address))?
+                .into_iter()
                 .next()
                 .ok_or_else(|| {
                     anyhow::anyhow!("udp origin {} resolved to no addresses", self.address)
@@ -174,10 +210,12 @@ impl UdpOriginTarget {
                 self.address
             )
         })?;
-        socket
-            .connect(chosen)
+        let connect = tokio::time::timeout(ORIGIN_CONNECT_TIMEOUT, socket.connect(chosen))
             .await
-            .with_context(|| format!("failed to connect udp socket to origin {chosen}"))?;
+            .map_err(|elapsed| {
+                anyhow::anyhow!("UDP connect to origin {chosen} timed out: {elapsed}")
+            })?;
+        connect.with_context(|| format!("failed to connect udp socket to origin {chosen}"))?;
         Ok(socket)
     }
 }
@@ -317,9 +355,8 @@ impl ServiceMap {
 }
 
 async fn refresh_addr(address: &str, resolved: &ArcSwap<Vec<SocketAddr>>) {
-    match lookup_host(address).await {
-        Ok(iter) => {
-            let addrs: Vec<SocketAddr> = iter.collect();
+    match lookup_host_timeout(address).await {
+        Ok(addrs) => {
             if !addrs.is_empty() {
                 resolved.store(Arc::new(addrs));
             }
@@ -334,8 +371,8 @@ async fn resolve_origin(origin: &str) -> (Vec<SocketAddr>, bool) {
     if let Ok(addr) = origin.parse::<SocketAddr>() {
         return (vec![addr], true);
     }
-    match lookup_host(origin).await {
-        Ok(iter) => (iter.collect(), false),
+    match lookup_host_timeout(origin).await {
+        Ok(addrs) => (addrs, false),
         Err(e) => {
             warn!(origin, error = %e, "initial DNS resolution failed; will retry on first connect");
             (Vec::new(), false)
@@ -746,10 +783,17 @@ async fn forward_tls(
 
     let sni_for_log = format!("{server_name:?}");
     let connector = tokio_rustls::TlsConnector::from(tls_config);
-    let tls_stream = connector
-        .connect(server_name, origin)
-        .await
-        .with_context(|| format!("TLS handshake with origin failed (SNI: {sni_for_log})"))?;
+    let tls_stream = match tokio::time::timeout(
+        ORIGIN_TLS_HANDSHAKE_TIMEOUT,
+        connector.connect(server_name, origin),
+    )
+    .await
+    {
+        Ok(r) => {
+            r.with_context(|| format!("TLS handshake with origin failed (SNI: {sni_for_log})"))?
+        }
+        Err(_) => anyhow::bail!("TLS handshake with origin timed out (SNI: {sni_for_log})"),
+    };
 
     let (tls_read, mut tls_write) = tokio::io::split(tls_stream);
     let mut tls_read = io::BufReader::with_capacity(COPY_BUF_SIZE, tls_read);
