@@ -60,10 +60,10 @@ jobs:
           CONTENT="$(git-cliff --config cliff.toml --latest --strip all)"
           printf 'content<<EOF\n%s\nEOF\n' "$CONTENT" >> "$GITHUB_OUTPUT"
 
-      - name: Create Forgejo release
+      - name: Create Codeberg release
         id: create
         env:
-          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
           RELEASE_BODY: ${{ steps.changelog.outputs.content }}
         run: |
           set -euo pipefail
@@ -74,10 +74,10 @@ jobs:
             --arg body "$RELEASE_BODY" \
             '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}' \
             | curl -fsSL -X POST \
-                -H "Authorization: token ${GITEA_TOKEN}" \
+                -H "Authorization: token ${CODEBERG_TOKEN}" \
                 -H "Content-Type: application/json" \
                 --data-binary @- \
-                "https://git.erwanleboucher.dev/api/v1/repos/${GITHUB_REPOSITORY}/releases")"
+                "https://codeberg.org/api/v1/repos/${GITHUB_REPOSITORY}/releases")"
           RELEASE_ID="$(echo "$RESPONSE" | jq -r '.id')"
           if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
             echo "failed to parse release id from response: $RESPONSE" >&2
@@ -187,9 +187,9 @@ jobs:
             --output-signature "${ARCHIVE}.sig" \
             "${ARCHIVE}"
 
-      - name: Upload assets to Forgejo release
+      - name: Upload assets to Codeberg release
         env:
-          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
           RELEASE_ID: ${{ needs.release.outputs.release_id }}
           ARCHIVE: ${{ steps.archive.outputs.archive }}
         run: |
@@ -197,10 +197,10 @@ jobs:
           upload() {
             local file="$1"
             curl -fsSL -X POST \
-              -H "Authorization: token ${GITEA_TOKEN}" \
+              -H "Authorization: token ${CODEBERG_TOKEN}" \
               -H "Content-Type: application/octet-stream" \
               --data-binary "@${file}" \
-              "https://git.erwanleboucher.dev/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$(basename "${file}")"
+              "https://codeberg.org/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$(basename "${file}")"
           }
           upload "${ARCHIVE}"
           upload "${ARCHIVE}.sha256"
@@ -218,12 +218,12 @@ jobs:
 
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
 
-      - name: Login to git.erwanleboucher.dev
+      - name: Login to codeberg.org
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
-          registry: git.erwanleboucher.dev
+          registry: codeberg.org
           username: ${{ vars.USERNAME }}
-          password: ${{ secrets.OWNER_PACKAGE_SECRET }}
+          password: ${{ secrets.CODEBERG_TOKEN }}
 
       - name: Login to registry.erwanleboucher.dev
         uses: https://data.forgejo.org/docker/login-action@v4
@@ -237,7 +237,7 @@ jobs:
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
+            codeberg.org/towonel/towonel-node
             registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
           tags: |
             type=semver,pattern={{version}}
@@ -262,7 +262,7 @@ jobs:
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
+            codeberg.org/towonel/towonel-agent
             registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
           tags: |
             type=semver,pattern={{version}}
@@ -287,7 +287,7 @@ jobs:
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy
+            codeberg.org/towonel/towonel-hub-caddy
             registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy
           tags: |
             type=semver,pattern={{version}}

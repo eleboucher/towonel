@@ -20,12 +20,12 @@ jobs:
       - name: Compute build timestamp
         id: build-meta
         run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-      - name: Login to git.erwanleboucher.dev
+      - name: Login to codeberg.org
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
-          registry: git.erwanleboucher.dev
+          registry: codeberg.org
           username: ${{ vars.USERNAME }}
-          password: ${{ secrets.OWNER_PACKAGE_SECRET }}
+          password: ${{ secrets.CODEBERG_TOKEN }}
       - name: Login to registry.erwanleboucher.dev
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
@@ -37,7 +37,7 @@ jobs:
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
+            codeberg.org/towonel/towonel-node
             registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
@@ -45,7 +45,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=towonel
             org.opencontainers.image.description=Towonel hub/edge node — Iroh-based tunnel control plane and data plane
-            org.opencontainers.image.documentation=https://git.erwanleboucher.dev/erwan/turbo-tunnel/src/branch/main/README.md
+            org.opencontainers.image.documentation=https://codeberg.org/towonel/towonel/src/branch/main/README.md
             org.opencontainers.image.authors=Erwan Leboucher <erwanleboucher@gmail.com>
             org.opencontainers.image.vendor=Erwan Leboucher
       - name: Build and push towonel-node
@@ -74,7 +74,7 @@ jobs:
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
+            codeberg.org/towonel/towonel-agent
             registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
@@ -82,7 +82,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=towonel-agent
             org.opencontainers.image.description=Towonel agent — exposes local services through a towonel hub
-            org.opencontainers.image.documentation=https://git.erwanleboucher.dev/erwan/turbo-tunnel/src/branch/main/README.md
+            org.opencontainers.image.documentation=https://codeberg.org/towonel/towonel/src/branch/main/README.md
             org.opencontainers.image.authors=Erwan Leboucher <erwanleboucher@gmail.com>
             org.opencontainers.image.vendor=Erwan Leboucher
       - name: Build and push towonel-agent
@@ -111,7 +111,7 @@ jobs:
         uses: https://data.forgejo.org/docker/metadata-action@v6
         with:
           images: |
-            git.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy
+            codeberg.org/towonel/towonel-hub-caddy
             registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
@@ -119,7 +119,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=towonel-hub-caddy
             org.opencontainers.image.description=Towonel hub bundled with Caddy (L4 PROXY-protocol shifter for privileged ports)
-            org.opencontainers.image.documentation=https://git.erwanleboucher.dev/erwan/turbo-tunnel/src/branch/main/README.md
+            org.opencontainers.image.documentation=https://codeberg.org/towonel/towonel/src/branch/main/README.md
             org.opencontainers.image.authors=Erwan Leboucher <erwanleboucher@gmail.com>
             org.opencontainers.image.vendor=Erwan Leboucher
       - name: Build and push towonel-hub-caddy

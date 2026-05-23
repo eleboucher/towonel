@@ -92,14 +92,14 @@ jobs:
 
       - name: Commit and push tag
         env:
-          GITEA_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
           git config user.name "forgejo-actions[bot]"
-          git config user.email "actions@git.erwanleboucher.dev"
+          git config user.email "actions@codeberg.org"
           git remote set-url origin \
-            "https://x-access-token:${GITEA_TOKEN}@git.erwanleboucher.dev/${GITHUB_REPOSITORY}.git"
+            "https://x-access-token:${CODEBERG_TOKEN}@codeberg.org/${GITHUB_REPOSITORY}.git"
           git add Cargo.toml Cargo.lock
           git commit -m "chore(release): ${TAG}"
           git tag -a "${TAG}" -m "Release ${TAG}"

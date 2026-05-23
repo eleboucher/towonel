@@ -83,9 +83,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 LABEL org.opencontainers.image.title="towonel" \
       org.opencontainers.image.description="Towonel hub/edge node — Iroh-based tunnel control plane and data plane" \
-      org.opencontainers.image.source="https://git.erwanleboucher.dev/erwan/turbo-tunnel" \
-      org.opencontainers.image.url="https://git.erwanleboucher.dev/erwan/turbo-tunnel" \
-      org.opencontainers.image.documentation="https://git.erwanleboucher.dev/erwan/turbo-tunnel/src/branch/main/README.md" \
+      org.opencontainers.image.source="https://codeberg.org/towonel/towonel" \
+      org.opencontainers.image.url="https://codeberg.org/towonel/towonel" \
+      org.opencontainers.image.documentation="https://codeberg.org/towonel/towonel/src/branch/main/README.md" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.authors="Erwan Leboucher <erwanleboucher@gmail.com>" \
       org.opencontainers.image.vendor="Erwan Leboucher" \

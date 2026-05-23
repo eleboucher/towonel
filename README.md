@@ -3,7 +3,7 @@
 Self-hosted tunnel for exposing HTTP(S) services behind NAT, CGNAT, or
 dynamic IPs without opening inbound ports.
 
-[![CI](https://git.erwanleboucher.dev/eleboucher/towonel/actions/workflows/ci.yml/badge.svg)](https://git.erwanleboucher.dev/eleboucher/towonel/actions/workflows/ci.yml)
+[![CI](https://codeberg.org/towonel/towonel/actions/workflows/ci.yml/badge.svg)](https://codeberg.org/towonel/towonel/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
 
@@ -41,14 +41,14 @@ You need:
 On the VPS:
 
 ```bash
-docker pull git.erwanleboucher.dev/eleboucher/towonel-node:latest
+docker pull codeberg.org/towonel/towonel-node:latest
 docker run -d --name towonel \
   -p 443:443 -p 8443:8443 -p 51820:51820/udp \
   -v towonel-data:/data \
   -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
   -e TOWONEL_EDGE_ADVERTISED_ADDRESSES=hub.example.eu:443 \
   -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
-  git.erwanleboucher.dev/eleboucher/towonel-node:latest
+  codeberg.org/towonel/towonel-node:latest
 ```
 
 The image pins `TOWONEL_DATA_DIR=/data`; every path-shaped env var defaults
@@ -78,7 +78,7 @@ docker run -d --name towonel \
   -e TOWONEL_HUB_PUBLIC_URL=https://hub.example.eu \
   -e TOWONEL_EDGE_ADVERTISED_ADDRESSES=hub.example.eu:443 \
   -e TOWONEL_EDGE_TLS_ACME_EMAIL=ops@example.eu \
-  git.erwanleboucher.dev/eleboucher/towonel-hub-caddy:latest
+  codeberg.org/towonel/towonel-hub-caddy:latest
 ```
 
 Replace the baked Caddyfile by mounting one at `/etc/caddy/Caddyfile`.
@@ -110,7 +110,7 @@ docker run -d --name towonel-agent \
   -e TOWONEL_AGENT_SERVICES='[
     {"hostname":"app.alice.example.eu","origin":"127.0.0.1:8443"}
   ]' \
-  git.erwanleboucher.dev/eleboucher/towonel-agent:latest
+  codeberg.org/towonel/towonel-agent:latest
 ```
 
 ### 4. Point DNS
