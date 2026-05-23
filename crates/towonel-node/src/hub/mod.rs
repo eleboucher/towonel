@@ -309,6 +309,9 @@ impl Hub {
         )
         .await?;
 
+        db.verify_or_seed_canary(&self.p.kek, &self.p.invite_hash_key)
+            .await?;
+
         let liveness: liveness::SharedLivenessStore =
             Arc::new(liveness::InMemoryLivenessStore::new());
 
