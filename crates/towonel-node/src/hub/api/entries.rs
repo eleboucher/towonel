@@ -457,6 +457,31 @@ pub(super) async fn health(State(state): State<Arc<AppState>>) -> Response {
     })
 }
 
+/// Kubernetes-style readiness probe: returns 503 unless the hub can talk to
+/// its database. `/v1/health` only confirms the process is alive; rollout
+/// controllers and load balancers should hit `/v1/readyz` instead so a hub
+/// that has lost its DB connection is taken out of rotation immediately.
+pub(super) async fn readyz(State(state): State<Arc<AppState>>) -> Response {
+    use sea_orm::{ConnectionTrait, Statement};
+    let backend = state.db.conn.get_database_backend();
+    match state
+        .db
+        .conn
+        .execute(Statement::from_string(backend, "SELECT 1".to_string()))
+        .await
+    {
+        Ok(_) => json_ok(serde_json::json!({"status": "ok"})),
+        Err(e) => {
+            warn!(error = %e, "readyz DB ping failed");
+            error_response(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "not_ready",
+                "database unreachable",
+            )
+        }
+    }
+}
+
 pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
     #[derive(Serialize)]
     struct EdgeEntry<'a> {

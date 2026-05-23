@@ -236,7 +236,9 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     // monitors probe it without credentials. Everything operator-shaped
     // (including `/v1/edges`, which leaks the iroh endpoint topology of the
     // deployment) lives under the operator-auth router below.
-    let unlimited_public = Router::new().route("/v1/health", get(entries::health));
+    let unlimited_public = Router::new()
+        .route("/v1/health", get(entries::health))
+        .route("/v1/readyz", get(entries::readyz));
 
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(|req: &axum::http::Request<_>| {

@@ -135,6 +135,17 @@ async fn metrics_handler(State(metrics): State<EdgeMetrics>) -> impl IntoRespons
 pub fn router(metrics: EdgeMetrics) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/readyz", get(readyz))
         .route("/metrics", get(metrics_handler))
         .with_state(metrics)
+}
+
+async fn readyz(State(metrics): State<EdgeMetrics>) -> impl IntoResponse {
+    // Edge is "ready" once at least one agent session has registered.
+    // Before that, an LB would route traffic that has nowhere to go.
+    if metrics.active_sessions.get() > 0 {
+        (StatusCode::OK, "ok").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "no agent sessions").into_response()
+    }
 }

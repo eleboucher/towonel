@@ -102,6 +102,21 @@ impl AgentMetrics {
     pub fn add_bytes(&self, dir: &'static str, n: u64) {
         self.bytes_total.with_label_values(&[dir]).inc_by(n);
     }
+
+    /// Count of currently-active edge sessions. Used by `/readyz`: the
+    /// agent is ready once at least one edge session is established.
+    pub fn active_edge_sessions(&self) -> i64 {
+        use prometheus::core::Collector as _;
+        let mut active: i64 = 0;
+        for mf in self.edge_session_state.collect() {
+            for m in mf.get_metric() {
+                if m.get_gauge().get_value() > 0.0 {
+                    active += 1;
+                }
+            }
+        }
+        active
+    }
 }
 
 impl Default for AgentMetrics {

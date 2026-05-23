@@ -210,6 +210,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
 async fn serve_http(addr: SocketAddr, metrics: Arc<AgentMetrics>) {
     let app = Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/readyz", get(readyz_handler))
         .route("/metrics", get(metrics_handler))
         .with_state(metrics);
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -222,6 +223,17 @@ async fn serve_http(addr: SocketAddr, metrics: Arc<AgentMetrics>) {
     info!(%addr, "health + metrics listening");
     if let Err(e) = axum::serve(listener, app).await {
         error!(error = %e, "health server error");
+    }
+}
+
+async fn readyz_handler(State(metrics): State<Arc<AgentMetrics>>) -> Response {
+    // The agent is "ready" once at least one edge session is established.
+    // K8s rolling deploys use this to delay traffic on the next pod until
+    // the QUIC tunnel is actually up.
+    if metrics.active_edge_sessions() > 0 {
+        (StatusCode::OK, "ok").into_response()
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, "no active edge sessions").into_response()
     }
 }
 
