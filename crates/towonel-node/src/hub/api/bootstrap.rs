@@ -109,6 +109,12 @@ pub(super) async fn post_bootstrap(
         return gone("invite has expired");
     }
 
+    if matches!(invite.status, InviteStatus::Pending)
+        && let Err(e) = state.db.mark_invite_claimed(&invite_id).await
+    {
+        warn!(error = %e, "mark_invite_claimed failed; bootstrap proceeding");
+    }
+
     let mut trusted_edges: Vec<iroh::EndpointId> = Vec::new();
     if let Some(self_edge) = state.identity.edge_node_id {
         trusted_edges.push(self_edge);

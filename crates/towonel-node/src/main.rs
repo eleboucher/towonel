@@ -268,6 +268,9 @@ enum InviteAction {
         /// Secret cycle.
         #[arg(long, default_value = "never")]
         expires: String,
+        /// Attach the tunnel to an existing hub user (email).
+        #[arg(long)]
+        owner_email: Option<String>,
     },
     /// List invites on the hub. Operator-only.
     List {
@@ -363,7 +366,18 @@ async fn main() -> anyhow::Result<()> {
                 name,
                 hostnames,
                 expires,
-            } => admin::invite::cmd_invite_create(hub_url, api_key, name, hostnames, expires).await,
+                owner_email,
+            } => {
+                admin::invite::cmd_invite_create(
+                    hub_url,
+                    api_key,
+                    name,
+                    hostnames,
+                    expires,
+                    owner_email,
+                )
+                .await
+            }
             InviteAction::List { hub_url, api_key } => {
                 admin::invite::cmd_invite_list(hub_url, api_key).await
             }

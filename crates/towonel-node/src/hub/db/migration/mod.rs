@@ -14,6 +14,7 @@ mod m20260524_000001_port_reservations;
 mod m20260601_000000_hub_init_canary;
 mod m20260612_000000_user_oauth_identities;
 mod m20260613_000000_drop_agent_liveness;
+mod m20260615_000000_invite_status_claimed;
 
 pub struct Migrator;
 
@@ -35,6 +36,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260601_000000_hub_init_canary::Migration),
             Box::new(m20260612_000000_user_oauth_identities::Migration),
             Box::new(m20260613_000000_drop_agent_liveness::Migration),
+            Box::new(m20260615_000000_invite_status_claimed::Migration),
         ]
     }
 }

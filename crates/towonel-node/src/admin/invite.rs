@@ -10,6 +10,8 @@ struct CreateInviteReq<'a> {
     hostnames: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     expires_in_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_email: Option<&'a str>,
 }
 
 #[derive(serde::Deserialize)]
@@ -27,6 +29,7 @@ pub async fn cmd_invite_create(
     name: Option<String>,
     hostnames: Vec<String>,
     expires: String,
+    owner_email: Option<String>,
 ) -> anyhow::Result<()> {
     if hostnames.is_empty() {
         return Err(anyhow!("--hostnames must have at least one entry"));
@@ -44,6 +47,7 @@ pub async fn cmd_invite_create(
             name: name.as_deref(),
             hostnames: &hostnames,
             expires_in_secs,
+            owner_email: owner_email.as_deref(),
         })
         .send()
         .await
@@ -56,6 +60,9 @@ pub async fn cmd_invite_create(
     println!("  Invite ID: {}", parsed.invite_id);
     println!("  Tenant ID: {}", parsed.tenant_id);
     println!("  Hostnames: {}", hostnames.join(", "));
+    if let Some(email) = owner_email.as_deref() {
+        println!("  Owner:     {email}");
+    }
     match parsed.expires_at_ms {
         Some(ts) => println!("  Expires:   {ts} (in {expires})"),
         None => println!("  Expires:   never"),

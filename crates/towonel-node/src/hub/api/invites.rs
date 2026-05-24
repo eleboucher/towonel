@@ -28,6 +28,9 @@ pub(super) struct CreateInviteRequest {
     /// values at 30 days; the operator tool sets sensible defaults.
     #[serde(default)]
     expires_in_secs: Option<u64>,
+    /// Operator-key only: attach the new invite to an existing hub user.
+    #[serde(default)]
+    owner_email: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +75,27 @@ pub(super) async fn post_invite(
                 "expires_in_secs must be None (forever) or in 1..={MAX_TTL_SECS}, got {secs}"
             ));
         }
+    };
+
+    let owner_user_id: Option<String> = match (&principal, req.owner_email.as_deref()) {
+        (Principal::User(u), _) => Some(u.id.clone()),
+        (Principal::OperatorKey, Some(email)) => {
+            let email = email.trim();
+            if email.is_empty() {
+                return invalid_request("owner_email must be non-empty when supplied");
+            }
+            match state.db.find_user_by_email(email).await {
+                Ok(Some(u)) => Some(u.id),
+                Ok(None) => {
+                    return not_found(format!("no user with email {email}"));
+                }
+                Err(e) => {
+                    warn!(error = %e, "find_user_by_email failed");
+                    return internal_error();
+                }
+            }
+        }
+        (Principal::OperatorKey, None) => None,
     };
 
     let _guard = state.invite_lock.lock().await;
@@ -130,11 +154,11 @@ pub(super) async fn post_invite(
         return internal_error();
     }
 
-    if let Principal::User(user) = &principal
+    if let Some(user_id) = &owner_user_id
         && let Err(e) = state
             .db
             .insert_tenant_ownership(NewTenantOwnership {
-                user_id: &user.id,
+                user_id,
                 tenant_id: tenant_id.as_bytes(),
                 invite_id: &token.invite_id,
                 display_name: &name,

@@ -4,14 +4,14 @@ use serde::{Deserialize, Serialize};
 use towonel_common::identity::{PqPublicKey, TenantId};
 use towonel_common::invite::INVITE_ID_LEN;
 
-/// Status of an invite. v2 invites carry the seed inside the token, so
-/// `Pending` is the live state for the whole credential's life and
-/// `Revoked` is the only sink. There is no "consumed" / "redeemed"
-/// transition.
+/// `Claimed` is display-only: the token stays usable, but the UI can tell
+/// "never bootstrapped" (`Pending`) apart from "in use". `Revoked` is the
+/// only terminal state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InviteStatus {
     Pending,
+    Claimed,
     Revoked,
 }
 
@@ -19,6 +19,7 @@ impl InviteStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
+            Self::Claimed => "claimed",
             Self::Revoked => "revoked",
         }
     }
@@ -26,6 +27,7 @@ impl InviteStatus {
     pub fn parse(s: &str) -> anyhow::Result<Self> {
         match s {
             "pending" => Ok(Self::Pending),
+            "claimed" => Ok(Self::Claimed),
             "revoked" => Ok(Self::Revoked),
             other => anyhow::bail!("unknown invite status: {other}"),
         }

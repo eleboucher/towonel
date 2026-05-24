@@ -66,6 +66,23 @@ impl Db {
             .collect()
     }
 
+    /// Pending → Claimed. No-op (returns false) on already-claimed or revoked rows.
+    pub async fn mark_invite_claimed(
+        &self,
+        invite_id: &[u8; INVITE_ID_LEN],
+    ) -> anyhow::Result<bool> {
+        let result = invites::Entity::update_many()
+            .col_expr(
+                invites::Column::Status,
+                sea_orm::sea_query::Expr::value(InviteStatus::Claimed.as_str()),
+            )
+            .filter(invites::Column::InviteId.eq(invite_id.to_vec()))
+            .filter(invites::Column::Status.eq(InviteStatus::Pending.as_str()))
+            .exec(&self.conn)
+            .await?;
+        Ok(result.rows_affected == 1)
+    }
+
     pub async fn revoke_invite(&self, invite_id: &[u8; INVITE_ID_LEN]) -> anyhow::Result<bool> {
         let result = invites::Entity::update_many()
             .col_expr(
@@ -322,6 +339,42 @@ mod tests {
         }
         let rows = db.list_invites().await.unwrap();
         assert_eq!(rows.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn mark_claimed_flips_pending_only_once() {
+        let db = temp_db().await;
+        let i = input(30, "t", &["claim.example.eu"]);
+        let id = insert(&db, &i).await;
+
+        assert!(db.mark_invite_claimed(&id).await.unwrap());
+        let row = db.get_invite(&id).await.unwrap().unwrap();
+        assert_eq!(row.status, InviteStatus::Claimed);
+
+        // Idempotent on already-claimed rows.
+        assert!(!db.mark_invite_claimed(&id).await.unwrap());
+
+        // Cannot un-revoke via claim.
+        let j = input(31, "t", &["claim2.example.eu"]);
+        let jid = insert(&db, &j).await;
+        db.revoke_invite(&jid).await.unwrap();
+        assert!(!db.mark_invite_claimed(&jid).await.unwrap());
+        let row = db.get_invite(&jid).await.unwrap().unwrap();
+        assert_eq!(row.status, InviteStatus::Revoked);
+    }
+
+    #[tokio::test]
+    async fn any_active_invite_claims_treats_claimed_as_active() {
+        let db = temp_db().await;
+        let i = input(40, "t", &["active.example.eu"]);
+        let id = insert(&db, &i).await;
+        db.mark_invite_claimed(&id).await.unwrap();
+
+        let got = db
+            .any_active_invite_claims(&["active.example.eu".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(got.as_deref(), Some("active.example.eu"));
     }
 
     #[tokio::test]
