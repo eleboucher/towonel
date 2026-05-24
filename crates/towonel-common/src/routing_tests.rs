@@ -191,7 +191,7 @@ fn live_agents_filter_hides_offline_agents() {
 }
 
 #[test]
-fn signed_agents_intersected_with_liveness() {
+fn signed_agents_ignores_liveness_filter() {
     let kp = TenantKeypair::generate();
     let live_agent = AgentKeypair::generate();
     let dead_agent = AgentKeypair::generate();
@@ -218,25 +218,7 @@ fn signed_agents_intersected_with_liveness() {
     let table = RouteTable::from_entries_with_liveness(&entries, &policy, Some(&live));
 
     assert!(table.signed_agents().contains(&live_agent.id()));
-    assert!(!table.signed_agents().contains(&dead_agent.id()));
-}
-
-#[test]
-fn signed_agents_unfiltered_when_no_liveness() {
-    let kp = TenantKeypair::generate();
-    let agent = AgentKeypair::generate();
-    let policy = policy_for(&kp, &["app.example.eu"]);
-    let entries = vec![sign_entry(
-        &kp,
-        1,
-        ConfigOp::UpsertAgent {
-            agent_id: agent.id(),
-        },
-    )];
-
-    let table = RouteTable::from_entries_with_liveness(&entries, &policy, None);
-
-    assert!(table.signed_agents().contains(&agent.id()));
+    assert!(table.signed_agents().contains(&dead_agent.id()));
 }
 
 #[test]
