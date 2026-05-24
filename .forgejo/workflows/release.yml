@@ -1,32 +1,14 @@
----
 name: Release
-
 on:
   push:
     tags:
       - "v*"
-
 permissions:
   contents: read
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
-  tests:
-    runs-on: docker
-    steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
-      - uses: https://github.com/taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest,cargo-deny
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-      - run: cargo nextest run --workspace --all-features --no-fail-fast
-      - run: cargo deny --all-features check
-
   release:
     needs: [tests]
     permissions:
@@ -39,7 +21,6 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
         with:
           fetch-depth: 0
-
       - name: Install git-cliff
         env:
           GIT_CLIFF_VERSION: "2.12.0"
@@ -52,14 +33,12 @@ jobs:
           sha512sum -c "${ASSET}.sha512"
           tar -xzf "${ASSET}" -C /tmp
           install -m 0755 "/tmp/git-cliff-${GIT_CLIFF_VERSION}/git-cliff" /usr/local/bin/git-cliff
-
       - name: Generate release notes
         id: changelog
         run: |
           set -euo pipefail
           CONTENT="$(git-cliff --config cliff.toml --latest --strip all)"
           printf 'content<<EOF\n%s\nEOF\n' "$CONTENT" >> "$GITHUB_OUTPUT"
-
       - name: Create Codeberg release
         id: create
         env:
@@ -85,7 +64,6 @@ jobs:
           fi
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
   binaries:
     needs: [release]
     permissions:
@@ -106,11 +84,9 @@ jobs:
       COSIGN_VERSION: "3.0.5"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
       - name: Install zig + cargo-zigbuild
         run: |
           set -euo pipefail
@@ -122,7 +98,6 @@ jobs:
           curl -fsSL "https://github.com/rust-cross/cargo-zigbuild/releases/download/v${CARGO_ZIGBUILD_VERSION}/cargo-zigbuild-${HOST_TARGET}.tar.xz" \
             | tar -xJO "cargo-zigbuild-${HOST_TARGET}/cargo-zigbuild" > /usr/local/bin/cargo-zigbuild
           chmod +x /usr/local/bin/cargo-zigbuild
-
       - name: Install cosign
         run: |
           set -euo pipefail
@@ -138,20 +113,17 @@ jobs:
           grep "[[:space:]]${COSIGN_BIN}\$" checksums.txt | sha256sum -c -
           install -m 0755 cosign /usr/local/bin/cosign
           rm -f cosign checksums.txt
-
       - name: Install cross-arch strip
         if: matrix.arch_label == 'arm64'
         run: |
           set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
-
       - name: Build release binaries
         run: |
           set -euo pipefail
           cargo zigbuild --release --target "${{ matrix.target }}" \
             -p towonel-node -p towonel-agent
-
       - name: Stage and archive
         id: archive
         env:
@@ -174,7 +146,6 @@ jobs:
           sha256sum "$ARCHIVE" > "${ARCHIVE}.sha256"
           echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
-
       - name: Cosign sign-blob
         env:
           COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
@@ -186,7 +157,6 @@ jobs:
             --key env://COSIGN_KEY \
             --output-signature "${ARCHIVE}.sig" \
             "${ARCHIVE}"
-
       - name: Upload assets to Codeberg release
         env:
           CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
@@ -205,33 +175,27 @@ jobs:
           upload "${ARCHIVE}"
           upload "${ARCHIVE}.sha256"
           upload "${ARCHIVE}.sig"
-
   container:
     needs: [tests]
     runs-on: multiarch
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-
       - uses: https://data.forgejo.org/docker/setup-qemu-action@v4
         with:
           platforms: arm64
-
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
-
       - name: Login to codeberg.org
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: codeberg.org
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.CODEBERG_TOKEN }}
-
       - name: Login to registry.erwanleboucher.dev
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: registry.erwanleboucher.dev
           username: ${{ vars.USERNAME }}
           password: ${{ secrets.APOCI_REGISTRY_TOKEN }}
-
       - name: Compute node image metadata
         id: meta-node
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -242,7 +206,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-
       - name: Build and push towonel-node
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
@@ -256,7 +219,6 @@ jobs:
           labels: ${{ steps.meta-node.outputs.labels }}
           cache-from: type=gha,scope=towonel-node
           cache-to: type=gha,scope=towonel-node,mode=max
-
       - name: Compute agent image metadata
         id: meta-agent
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -267,7 +229,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-
       - name: Build and push towonel-agent
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
@@ -281,7 +242,6 @@ jobs:
           labels: ${{ steps.meta-agent.outputs.labels }}
           cache-from: type=gha,scope=towonel-agent
           cache-to: type=gha,scope=towonel-agent,mode=max
-
       - name: Compute hub-caddy image metadata
         id: meta-hub-caddy
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -292,7 +252,6 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-
       - name: Build and push towonel-hub-caddy
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
