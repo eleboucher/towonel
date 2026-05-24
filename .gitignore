@@ -10,3 +10,4 @@
 /hub.db
 *.sqlite
 *.sqlite-journal
+/.dev/

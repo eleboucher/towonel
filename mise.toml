@@ -41,3 +41,36 @@ run = "cargo deny --all-features check"
 description = "Build docs with warnings as errors"
 env = { RUSTDOCFLAGS = "-D warnings" }
 run = "cargo doc --workspace --all-features --no-deps"
+
+# --- Local hub dev loop (sqlite under .dev/hub, no edge, no TLS) ------------
+# Run `mise run hub-dev` in one terminal, then drive the user/invite API from
+# another. State is in .dev/hub (gitignored); `mise run hub-reset` wipes it.
+
+[tasks.hub-dev]
+description = "Run hub locally on 127.0.0.1:8443 (sqlite, no edge, web API on)"
+env = { TOWONEL_EDGE_ENABLED = "false", TOWONEL_HUB_WEB_ENABLED = "true", TOWONEL_DATA_DIR = ".dev/hub", TOWONEL_HUB_LISTEN_ADDR = "127.0.0.1:8443", TOWONEL_HUB_HEALTH_LISTEN_ADDR = "127.0.0.1:9091", RUST_LOG = "towonel=debug,info" }
+run = "mkdir -p .dev/hub && cargo run -p towonel-node --bin towonel"
+
+[tasks.hub-reset]
+description = "Wipe .dev/hub (operator key, sqlite, generated keys)"
+run = "rm -rf .dev/hub"
+
+[tasks.user-create]
+description = "Create a hub user. Example: mise run user-create -- --email me@local --role operator"
+env = { TOWONEL_DATA_DIR = ".dev/hub" }
+run = "cargo run -p towonel-node --bin towonel -- user create"
+
+[tasks.invite-create]
+description = "Create a tunnel invite. Example: mise run invite-create -- --hostnames app.local.example.eu --owner-email me@local"
+env = { TOWONEL_HUB_URL = "http://127.0.0.1:8443" }
+run = "TOWONEL_OPERATOR_KEY=$(cat .dev/hub/operator.key) cargo run -p towonel-node --bin towonel -- invite create"
+
+[tasks.invite-list]
+description = "List invites on the local hub"
+env = { TOWONEL_HUB_URL = "http://127.0.0.1:8443" }
+run = "TOWONEL_OPERATOR_KEY=$(cat .dev/hub/operator.key) cargo run -p towonel-node --bin towonel -- invite list"
+
+[tasks.invite-revoke]
+description = "Revoke an invite. Example: mise run invite-revoke -- --id <invite_id>"
+env = { TOWONEL_HUB_URL = "http://127.0.0.1:8443" }
+run = "TOWONEL_OPERATOR_KEY=$(cat .dev/hub/operator.key) cargo run -p towonel-node --bin towonel -- invite revoke"
