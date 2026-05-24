@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -6,7 +7,7 @@ use anyhow::Context;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use tokio::io::AsyncWrite;
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -26,6 +27,14 @@ pub type SigningKeyMap = Arc<RwLock<HashMap<Kid, Vec<u8>>>>;
 pub type SessionEventTx = mpsc::Sender<EdgeToHub>;
 pub type SessionEventRx = mpsc::Receiver<EdgeToHub>;
 
+/// Control-frame relay requests share the link but live on their own queue
+/// so a hub stall on auth verification can't back-pressure session events.
+pub type ControlRequestTx = mpsc::Sender<EdgeToHub>;
+pub type ControlRequestRx = mpsc::Receiver<EdgeToHub>;
+
+pub type PendingControl =
+    Arc<Mutex<HashMap<u64, oneshot::Sender<super::hub_client::ControlResponse>>>>;
+
 #[derive(Clone)]
 pub struct HubLinkConfig {
     pub addr: String,
@@ -41,19 +50,28 @@ pub struct HubLinkHandle {
     pub signing_keys: SigningKeyMap,
     pub session_event_tx: SessionEventTx,
     pub session_event_rx: Arc<Mutex<Option<SessionEventRx>>>,
+    pub control_request_tx: ControlRequestTx,
+    pub control_request_rx: Arc<Mutex<Option<ControlRequestRx>>>,
     pub port_reservations: Arc<PortReservations>,
+    pub next_request_id: Arc<AtomicU64>,
+    pub pending_control: PendingControl,
 }
 
 impl HubLinkHandle {
     pub fn new(capacity: usize) -> Self {
         let (route_tx, _) = broadcast::channel(capacity);
         let (session_event_tx, session_event_rx) = mpsc::channel(capacity);
+        let (control_request_tx, control_request_rx) = mpsc::channel(capacity);
         Self {
             route_tx,
             signing_keys: Arc::new(RwLock::new(HashMap::new())),
             session_event_tx,
             session_event_rx: Arc::new(Mutex::new(Some(session_event_rx))),
+            control_request_tx,
+            control_request_rx: Arc::new(Mutex::new(Some(control_request_rx))),
             port_reservations: PortReservations::new(),
+            next_request_id: Arc::new(AtomicU64::new(1)),
+            pending_control: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -74,10 +92,10 @@ pub async fn run_supervisor(
     let mut backoff = redial_backoff().build();
     loop {
         if shutdown.is_cancelled() {
-            return;
+            break;
         }
         let result = tokio::select! {
-            () = shutdown.cancelled() => return,
+            () = shutdown.cancelled() => break,
             r = run_once(&cfg, &handle, &shutdown) => r,
         };
         match result {
@@ -91,10 +109,11 @@ pub async fn run_supervisor(
         }
         let delay = backoff.next().unwrap_or(Duration::from_secs(30));
         tokio::select! {
-            () = shutdown.cancelled() => return,
+            () = shutdown.cancelled() => break,
             () = tokio::time::sleep(delay) => {}
         }
     }
+    drain_pending_control(&handle);
 }
 
 async fn run_once(
@@ -137,31 +156,38 @@ async fn run_once(
         other => anyhow::bail!("expected Welcome, got {other:?}"),
     }
 
-    // mpsc receiver is single-consumer: take it for this link, return
-    // it on disconnect so the next attempt drains the queue.
-    let mut session_rx = {
-        let mut guard = handle
-            .session_event_rx
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        guard.take()
-    };
+    // mpsc receivers are single-consumer: take for this link, restore on disconnect.
+    let mut session_rx = take_rx(&handle.session_event_rx);
+    let mut control_rx = take_rx(&handle.control_request_rx);
     let result = run_loop(
         &mut reader,
         &mut write_half,
         handle,
         shutdown,
         session_rx.as_mut(),
+        control_rx.as_mut(),
     )
     .await;
-    if let Some(rx) = session_rx {
-        let mut guard = handle
-            .session_event_rx
+    restore_rx(&handle.session_event_rx, session_rx);
+    restore_rx(&handle.control_request_rx, control_rx);
+    drain_pending_control(handle);
+    result
+}
+
+fn take_rx<T>(slot: &Arc<Mutex<Option<mpsc::Receiver<T>>>>) -> Option<mpsc::Receiver<T>> {
+    let mut guard = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.take()
+}
+
+fn restore_rx<T>(slot: &Arc<Mutex<Option<mpsc::Receiver<T>>>>, rx: Option<mpsc::Receiver<T>>) {
+    if let Some(rx) = rx {
+        let mut guard = slot
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *guard = Some(rx);
     }
-    result
 }
 
 async fn run_loop<R, W>(
@@ -170,6 +196,7 @@ async fn run_loop<R, W>(
     handle: &HubLinkHandle,
     shutdown: &CancellationToken,
     mut session_rx: Option<&mut SessionEventRx>,
+    mut control_rx: Option<&mut ControlRequestRx>,
 ) -> anyhow::Result<()>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -182,18 +209,25 @@ where
                 let frame = frame.context("read hub frame")?;
                 handle_frame(frame, handle);
             }
-            outbound = recv_session_event(session_rx.as_deref_mut()) => {
+            outbound = recv_outbound(session_rx.as_deref_mut()) => {
                 if let Some(ev) = outbound {
                     write_edge_to_hub(writer, &ev)
                         .await
                         .context("send session event")?;
                 }
             }
+            outbound = recv_outbound(control_rx.as_deref_mut()) => {
+                if let Some(ev) = outbound {
+                    write_edge_to_hub(writer, &ev)
+                        .await
+                        .context("send control request")?;
+                }
+            }
         }
     }
 }
 
-async fn recv_session_event(rx: Option<&mut SessionEventRx>) -> Option<EdgeToHub> {
+async fn recv_outbound(rx: Option<&mut mpsc::Receiver<EdgeToHub>>) -> Option<EdgeToHub> {
     match rx {
         Some(rx) => rx.recv().await,
         None => std::future::pending().await,
@@ -214,6 +248,11 @@ where
         .await
         .context("send Hello")?;
     Ok(())
+}
+
+#[cfg(test)]
+pub fn deliver_hub_frame_for_test(handle: &HubLinkHandle, frame: HubToEdge) {
+    handle_frame(frame, handle);
 }
 
 fn handle_frame(frame: HubToEdge, handle: &HubLinkHandle) {
@@ -255,6 +294,45 @@ fn handle_frame(frame: HubToEdge, handle: &HubLinkHandle) {
                 "applied port reservations delta"
             );
         }
+        HubToEdge::ControlResponse {
+            request_id,
+            status,
+            body,
+        } => {
+            let sender = {
+                let mut guard = handle
+                    .pending_control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard.remove(&request_id)
+            };
+            match sender {
+                Some(tx) => {
+                    if tx.send((status, body)).is_err() {
+                        tracing::debug!(request_id, "control response receiver gone (timed out?)");
+                    }
+                }
+                None => {
+                    tracing::debug!(request_id, "control response for unknown request_id");
+                }
+            }
+        }
+    }
+}
+
+/// Drops any oneshot senders still waiting; receivers wake with `RecvError`
+/// instead of hanging until their timeout.
+fn drain_pending_control(handle: &HubLinkHandle) {
+    let mut guard = handle
+        .pending_control
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !guard.is_empty() {
+        tracing::debug!(
+            pending = guard.len(),
+            "dropping pending control requests on link disconnect"
+        );
+        guard.clear();
     }
 }
 

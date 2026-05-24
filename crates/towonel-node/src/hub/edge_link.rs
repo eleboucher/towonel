@@ -5,7 +5,7 @@ use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 
@@ -15,11 +15,16 @@ use towonel_common::edge_link::{
 use towonel_common::identity::AgentId;
 use towonel_common::routing::RouteTable;
 use towonel_common::time::now_ms;
+use towonel_common::tunnel::CONTROL_STATUS_INTERNAL_ERROR;
+
+use crate::edge::hub_client::ControlFrameHandler;
 
 use super::api::AppState;
 use super::live_edges::EdgeId;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
+
+const MAX_INFLIGHT_CONTROL: usize = 32;
 
 pub type LinkPsk = [u8; 32];
 
@@ -28,6 +33,7 @@ pub struct EdgeLinkServer {
     pub psk: Arc<LinkPsk>,
     pub hub_id: [u8; 32],
     pub state: Arc<AppState>,
+    pub control_handler: Arc<dyn ControlFrameHandler>,
 }
 
 impl EdgeLinkServer {
@@ -38,6 +44,7 @@ impl EdgeLinkServer {
         psk: Arc<LinkPsk>,
         hub_id: [u8; 32],
         state: Arc<AppState>,
+        control_handler: Arc<dyn ControlFrameHandler>,
     ) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(listen_addr).await?;
         info!(listen = %listen_addr, "hub edge_link listening");
@@ -46,6 +53,7 @@ impl EdgeLinkServer {
             psk,
             hub_id,
             state,
+            control_handler,
         })
     }
 
@@ -55,6 +63,7 @@ impl EdgeLinkServer {
             psk,
             hub_id,
             state,
+            control_handler,
         } = self;
         loop {
             tokio::select! {
@@ -66,12 +75,20 @@ impl EdgeLinkServer {
                     let (stream, peer) = accept?;
                     let psk_clone = Arc::clone(&psk);
                     let state_clone = Arc::clone(&state);
+                    let handler_clone = Arc::clone(&control_handler);
                     let route_rx = state.route_tx.subscribe();
                     let shutdown = shutdown.clone();
                     tokio::spawn(async move {
                         let span = info_span!("edge_link", peer = %peer);
                         if let Err(e) = handle_connection(
-                            stream, peer, &psk_clone, hub_id, state_clone, route_rx, shutdown,
+                            stream,
+                            peer,
+                            &psk_clone,
+                            hub_id,
+                            state_clone,
+                            handler_clone,
+                            route_rx,
+                            shutdown,
                         )
                         .instrument(span)
                         .await
@@ -85,12 +102,17 @@ impl EdgeLinkServer {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "private per-connection entry point; bundling these into a struct would obscure ownership of the half-streams"
+)]
 async fn handle_connection(
     stream: TcpStream,
     peer: SocketAddr,
     expected_psk: &LinkPsk,
     hub_id: [u8; 32],
     state: Arc<AppState>,
+    control_handler: Arc<dyn ControlFrameHandler>,
     route_rx: broadcast::Receiver<RouteTable>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()> {
@@ -150,7 +172,17 @@ async fn handle_connection(
         state.clone(),
     ));
 
-    let result = read_loop(reader, &state, edge_id, shutdown.clone()).await;
+    let control_semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_CONTROL));
+    let result = read_loop(
+        reader,
+        &state,
+        edge_id,
+        &control_handler,
+        &control_semaphore,
+        writer_tx.clone(),
+        shutdown.clone(),
+    )
+    .await;
 
     drop(writer_tx);
     pusher_task.abort();
@@ -165,6 +197,9 @@ async fn read_loop<R>(
     mut reader: R,
     state: &Arc<AppState>,
     edge_id: EdgeId,
+    control_handler: &Arc<dyn ControlFrameHandler>,
+    control_semaphore: &Arc<Semaphore>,
+    writer_tx: mpsc::Sender<HubToEdge>,
     shutdown: CancellationToken,
 ) -> anyhow::Result<()>
 where
@@ -187,6 +222,49 @@ where
                     Ok(EdgeToHub::SessionsSnapshot { sessions }) => {
                         for (agent_id, tenant_id) in sessions {
                             bump_liveness(state, agent_id, tenant_id).await;
+                        }
+                    }
+                    Ok(EdgeToHub::ControlRequest { request_id, frame }) => {
+                        if let Ok(permit) = Arc::clone(control_semaphore).try_acquire_owned() {
+                            // Spawn so a slow handler doesn't block the read loop.
+                            let handler = Arc::clone(control_handler);
+                            let writer_tx = writer_tx.clone();
+                            tokio::spawn(async move {
+                                let _permit = permit;
+                                let (status, body) = match handler.handle(frame).await {
+                                    Ok(resp) => resp,
+                                    Err(e) => {
+                                        warn!(request_id, error = %e, "control handler errored");
+                                        (CONTROL_STATUS_INTERNAL_ERROR, Vec::new())
+                                    }
+                                };
+                                if writer_tx
+                                    .send(HubToEdge::ControlResponse {
+                                        request_id,
+                                        status,
+                                        body,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    tracing::debug!(request_id, "control response writer closed");
+                                }
+                            });
+                        } else {
+                            warn!(request_id, "control queue at capacity; refusing");
+                            if writer_tx
+                                .try_send(HubToEdge::ControlResponse {
+                                    request_id,
+                                    status: CONTROL_STATUS_INTERNAL_ERROR,
+                                    body: Vec::new(),
+                                })
+                                .is_err()
+                            {
+                                tracing::debug!(
+                                    request_id,
+                                    "writer queue full while reporting overload"
+                                );
+                            }
                         }
                     }
                     Err(e) => return Err(anyhow::anyhow!("read frame: {e}")),

@@ -1,8 +1,10 @@
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio_stream::Stream;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -11,9 +13,11 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use towonel_common::edge_link::EdgeToHub;
 use towonel_common::identity::{AgentId, TenantId};
 use towonel_common::routing::RouteTable;
-use towonel_common::tunnel::CONTROL_STATUS_NOT_IMPLEMENTED;
+use towonel_common::tunnel::{CONTROL_STATUS_INTERNAL_ERROR, CONTROL_STATUS_NOT_IMPLEMENTED};
 
 use super::hub_link::HubLinkHandle;
+
+const CONTROL_RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Late-binding handle the hub fills with its `LivenessStore` once
 /// `AppState` is built; empty before then.
@@ -125,6 +129,15 @@ impl RemoteHubClient {
     pub const fn new(link: HubLinkHandle) -> Self {
         Self { link }
     }
+
+    fn forget_pending(&self, request_id: u64) {
+        let mut guard = self
+            .link
+            .pending_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.remove(&request_id);
+    }
 }
 
 #[async_trait::async_trait]
@@ -140,10 +153,39 @@ impl HubClient for RemoteHubClient {
         }))
     }
 
-    async fn handle_control_frame(&self, _frame: Vec<u8>) -> anyhow::Result<ControlResponse> {
-        // Remote control-frame proxying isn't wired through the link yet;
-        // the agent presenter logs the rejection but doesn't gate on it.
-        Ok((CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new()))
+    async fn handle_control_frame(&self, frame: Vec<u8>) -> anyhow::Result<ControlResponse> {
+        let request_id = self.link.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut guard = self
+                .link
+                .pending_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.insert(request_id, tx);
+        }
+        let send_result = self
+            .link
+            .control_request_tx
+            .try_send(EdgeToHub::ControlRequest { request_id, frame });
+        if let Err(e) = send_result {
+            self.forget_pending(request_id);
+            tracing::warn!(error = %e, "hub_link control request queue full or closed");
+            return Ok((CONTROL_STATUS_INTERNAL_ERROR, Vec::new()));
+        }
+
+        match tokio::time::timeout(CONTROL_RELAY_TIMEOUT, rx).await {
+            Ok(Ok(resp)) => Ok(resp),
+            Ok(Err(_)) => {
+                tracing::debug!(request_id, "control relay sender dropped");
+                Ok((CONTROL_STATUS_INTERNAL_ERROR, Vec::new()))
+            }
+            Err(_) => {
+                self.forget_pending(request_id);
+                tracing::warn!(request_id, "control relay timed out");
+                Ok((CONTROL_STATUS_INTERNAL_ERROR, Vec::new()))
+            }
+        }
     }
 
     async fn record_session_added(&self, tenant_id: TenantId, agent_id: AgentId) {
@@ -203,6 +245,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(status, CONTROL_STATUS_NOT_IMPLEMENTED);
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remote_client_relays_control_frame_round_trip() {
+        use towonel_common::edge_link::HubToEdge;
+
+        let handle = HubLinkHandle::new(8);
+        let client = RemoteHubClient::new(handle.clone());
+
+        let mut outbound = handle
+            .control_request_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("control_request_rx already taken");
+
+        let call =
+            tokio::spawn(async move { client.handle_control_frame(vec![9, 9, 9]).await.unwrap() });
+
+        let req = outbound.recv().await.expect("outbound request missing");
+        let request_id = match req {
+            EdgeToHub::ControlRequest { request_id, frame } => {
+                assert_eq!(frame, vec![9, 9, 9]);
+                request_id
+            }
+            other => panic!("expected ControlRequest, got {other:?}"),
+        };
+
+        crate::edge::hub_link::deliver_hub_frame_for_test(
+            &handle,
+            HubToEdge::ControlResponse {
+                request_id,
+                status: 0,
+                body: vec![1, 2, 3],
+            },
+        );
+
+        let (status, body) = tokio::time::timeout(Duration::from_secs(2), call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, 0);
+        assert_eq!(body, vec![1, 2, 3]);
+    }
+
+    #[tokio::test]
+    async fn remote_client_returns_internal_error_when_link_drops_mid_rpc() {
+        let handle = HubLinkHandle::new(8);
+        let client = RemoteHubClient::new(handle.clone());
+
+        // Simulates `drain_pending_control` on disconnect — same effect on the caller.
+        let _outbound = handle
+            .control_request_rx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("control_request_rx already taken");
+
+        let call = tokio::spawn(async move { client.handle_control_frame(vec![1]).await.unwrap() });
+
+        for _ in 0..100 {
+            tokio::task::yield_now().await;
+            let cleared = {
+                let mut guard = handle
+                    .pending_control
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if guard.is_empty() {
+                    false
+                } else {
+                    guard.clear();
+                    true
+                }
+            };
+            if cleared {
+                break;
+            }
+        }
+
+        let (status, body) = tokio::time::timeout(Duration::from_secs(2), call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, CONTROL_STATUS_INTERNAL_ERROR);
         assert!(body.is_empty());
     }
 

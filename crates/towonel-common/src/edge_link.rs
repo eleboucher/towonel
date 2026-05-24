@@ -4,7 +4,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::identity::{AgentId, PQ_PUB_KEY_LEN, TenantId};
 use crate::routing::RouteTable;
 
-pub const EDGE_LINK_VERSION: u16 = 1;
+pub const EDGE_LINK_VERSION: u16 = 2;
 
 pub const EDGE_LINK_MAX_FRAME: usize = 16 * 1024 * 1024;
 
@@ -49,6 +49,12 @@ pub enum EdgeToHub {
     SessionsSnapshot {
         sessions: Vec<(AgentId, TenantId)>,
     },
+    /// Opaque control frame the hub must verify and respond to.
+    ControlRequest {
+        request_id: u64,
+        #[serde(with = "serde_bytes")]
+        frame: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +87,14 @@ pub enum HubToEdge {
     PortReservationsChanged {
         added: Vec<PortReservationEntry>,
         removed: Vec<PortReservationEntry>,
+    },
+    /// Reply to `EdgeToHub::ControlRequest`. `status` uses the same byte
+    /// codes as the tunnel control frames (see `towonel_common::tunnel`).
+    ControlResponse {
+        request_id: u64,
+        status: u8,
+        #[serde(with = "serde_bytes")]
+        body: Vec<u8>,
     },
 }
 
@@ -300,6 +314,44 @@ mod tests {
                 assert!(removed.is_empty());
             }
             other => panic!("expected PortReservationsChanged, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn edge_to_hub_round_trip_control_request() {
+        let msg = EdgeToHub::ControlRequest {
+            request_id: 0xDEAD_BEEF_CAFE_F00D,
+            frame: vec![0x01, 0x02, 0x03, 0x04],
+        };
+        let mut buf = Vec::new();
+        write_edge_to_hub(&mut buf, &msg).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let got = read_edge_to_hub(&mut cur).await.unwrap();
+        assert_eq!(got, msg);
+    }
+
+    #[tokio::test]
+    async fn hub_to_edge_round_trip_control_response() {
+        let msg = HubToEdge::ControlResponse {
+            request_id: 7,
+            status: 0,
+            body: vec![0xAA, 0xBB],
+        };
+        let mut buf = Vec::new();
+        write_hub_to_edge(&mut buf, &msg).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let got = read_hub_to_edge(&mut cur).await.unwrap();
+        match got {
+            HubToEdge::ControlResponse {
+                request_id,
+                status,
+                body,
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(status, 0);
+                assert_eq!(body, vec![0xAA, 0xBB]);
+            }
+            other => panic!("expected ControlResponse, got {other:?}"),
         }
     }
 

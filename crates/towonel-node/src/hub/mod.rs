@@ -6,6 +6,7 @@ pub mod db;
 pub mod edge_link;
 pub mod live_edges;
 pub mod liveness;
+pub mod mail;
 pub mod metrics;
 pub mod signing;
 
@@ -244,6 +245,10 @@ pub struct HubParams {
     pub web_enabled: bool,
     pub ports_require_reservation: bool,
     pub oidc: crate::config::OidcConfig,
+    /// `None` disables verification/reset/invite mailing. When `web_enabled`
+    /// is true the hub refuses to start without one (login is verification-
+    /// gated, so unverified users would be locked out).
+    pub mailer: Option<mail::SharedMailer>,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -377,6 +382,7 @@ impl Hub {
             live_edges: Arc::new(live_edges::LiveEdges::new()),
             liveness,
             web_enabled: self.p.web_enabled,
+            mailer: self.p.mailer.clone(),
             port_reservations_tx: tokio::sync::broadcast::channel(64).0,
             ports_require_reservation: self.p.ports_require_reservation,
             port_index: arc_swap::ArcSwap::from_pointee(api::PortIndex::default()),
@@ -392,12 +398,14 @@ impl Hub {
 
         spawn_background_loops(&state);
 
-        if let Some(cell) = self.control_handler_cell.as_ref() {
-            let handler: Arc<dyn crate::edge::hub_client::ControlFrameHandler> =
-                Arc::new(control::HubControlHandler::new(Arc::clone(&state)));
-            if cell.set(handler).is_err() {
-                tracing::warn!("hub control handler cell was already set; ignoring");
-            }
+        // Build once and share between the colocated in-process path and the
+        // edge_link server so the nonce replay cache is global to the hub.
+        let control_handler: Arc<dyn crate::edge::hub_client::ControlFrameHandler> =
+            Arc::new(control::HubControlHandler::new(Arc::clone(&state)));
+        if let Some(cell) = self.control_handler_cell.as_ref()
+            && cell.set(Arc::clone(&control_handler)).is_err()
+        {
+            tracing::warn!("hub control handler cell was already set; ignoring");
         }
 
         if let Some(cell) = self.liveness_cell.as_ref()
@@ -446,6 +454,7 @@ impl Hub {
                     psk,
                     *self.p.identity.node_id.as_bytes(),
                     Arc::clone(&state),
+                    Arc::clone(&control_handler),
                 )
                 .await?;
                 let shutdown = link_shutdown.clone();
