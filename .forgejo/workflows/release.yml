@@ -46,19 +46,31 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF#refs/tags/}"
+          if [ -z "${CODEBERG_TOKEN:-}" ]; then
+            echo "CODEBERG_TOKEN secret is empty or missing" >&2
+            exit 1
+          fi
           RESPONSE="$(jq -n \
             --arg tag "$TAG" \
             --arg name "$TAG" \
             --arg body "$RELEASE_BODY" \
             '{tag_name: $tag, name: $name, body: $body, draft: false, prerelease: false}' \
-            | curl -fsSL -X POST \
+            | curl -sS -X POST \
+                -w '\n%{http_code}' \
                 -H "Authorization: token ${CODEBERG_TOKEN}" \
                 -H "Content-Type: application/json" \
                 --data-binary @- \
                 "https://codeberg.org/api/v1/repos/${GITHUB_REPOSITORY}/releases")"
-          RELEASE_ID="$(echo "$RESPONSE" | jq -r '.id')"
+          HTTP_CODE="${RESPONSE##*$'\n'}"
+          BODY="${RESPONSE%$'\n'*}"
+          if [ "$HTTP_CODE" != "201" ]; then
+            echo "Codeberg release create failed: HTTP $HTTP_CODE" >&2
+            echo "$BODY" >&2
+            exit 1
+          fi
+          RELEASE_ID="$(echo "$BODY" | jq -r '.id')"
           if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
-            echo "failed to parse release id from response: $RESPONSE" >&2
+            echo "failed to parse release id from response: $BODY" >&2
             exit 1
           fi
           echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
@@ -165,11 +177,20 @@ jobs:
           set -euo pipefail
           upload() {
             local file="$1"
-            curl -fsSL -X POST \
+            local response http_code body
+            response="$(curl -sS -X POST \
+              -w '\n%{http_code}' \
               -H "Authorization: token ${CODEBERG_TOKEN}" \
               -H "Content-Type: application/octet-stream" \
               --data-binary "@${file}" \
-              "https://codeberg.org/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$(basename "${file}")"
+              "https://codeberg.org/api/v1/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}/assets?name=$(basename "${file}")")"
+            http_code="${response##*$'\n'}"
+            body="${response%$'\n'*}"
+            if [ "$http_code" != "201" ]; then
+              echo "asset upload failed for ${file}: HTTP $http_code" >&2
+              echo "$body" >&2
+              return 1
+            fi
           }
           upload "${ARCHIVE}"
           upload "${ARCHIVE}.sha256"
