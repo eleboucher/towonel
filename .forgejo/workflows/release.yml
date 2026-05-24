@@ -10,7 +10,6 @@ concurrency:
   cancel-in-progress: true
 jobs:
   release:
-    needs: [tests]
     permissions:
       contents: write
     runs-on: docker
