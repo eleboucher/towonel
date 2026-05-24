@@ -492,7 +492,7 @@ impl NodeConfig {
             .transpose()?
             .map(std::sync::Arc::new);
         if let Some(addr) = edge_hub_link_addr.as_deref() {
-            validate_socket_addr("TOWONEL_EDGE_HUB_LINK_ADDR", addr)?;
+            validate_host_port("TOWONEL_EDGE_HUB_LINK_ADDR", addr)?;
         }
 
         let edge_listen_addr = edge_listen_addr.unwrap_or_else(|| "0.0.0.0:443".to_string());
@@ -758,6 +758,23 @@ fn validate_socket_addr(label: &str, raw: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("{label} is not a valid host:port: {e}"))
 }
 
+fn validate_host_port(label: &str, raw: &str) -> anyhow::Result<()> {
+    let (host, port) = raw
+        .trim()
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("{label} is not a valid host:port: {raw:?}"))?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    if host.is_empty() {
+        anyhow::bail!("{label} is not a valid host:port: empty host");
+    }
+    port.parse::<u16>()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{label} is not a valid host:port: {e}"))
+}
+
 fn validate_hub_public_url(raw: &str) -> anyhow::Result<()> {
     let url = url::Url::parse(raw)
         .map_err(|e| anyhow::anyhow!("TOWONEL_HUB_PUBLIC_URL is not a valid URL: {e}"))?;
@@ -898,6 +915,17 @@ mod tests {
         validate_socket_addr("X", "0.0.0.0:44.3").unwrap_err();
         validate_socket_addr("X", "0.0.0.0").unwrap_err();
         validate_socket_addr("X", "not-an-addr").unwrap_err();
+    }
+
+    #[test]
+    fn host_port_validation_accepts_dns_names() {
+        validate_host_port("X", "0.0.0.0:443").unwrap();
+        validate_host_port("X", "[::1]:443").unwrap();
+        validate_host_port("X", "hub.example.com:51444").unwrap();
+        validate_host_port("X", "hub.example.com").unwrap_err();
+        validate_host_port("X", ":51444").unwrap_err();
+        validate_host_port("X", "hub.example.com:notaport").unwrap_err();
+        validate_host_port("X", "hub.example.com:70000").unwrap_err();
     }
 
     #[test]
