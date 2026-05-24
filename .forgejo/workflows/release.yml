@@ -10,7 +10,6 @@ concurrency:
   cancel-in-progress: true
 jobs:
   release:
-    needs: [tests]
     permissions:
       contents: write
     runs-on: docker
@@ -176,7 +175,6 @@ jobs:
           upload "${ARCHIVE}.sha256"
           upload "${ARCHIVE}.sig"
   container:
-    needs: [tests]
     runs-on: multiarch
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
