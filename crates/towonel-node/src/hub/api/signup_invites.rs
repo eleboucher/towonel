@@ -23,6 +23,8 @@ pub(super) struct MintRequest {
     role: String,
     #[serde(default)]
     expires_in_days: Option<u32>,
+    #[serde(default)]
+    recipient_email: Option<String>,
 }
 
 fn default_role() -> String {
@@ -63,11 +65,23 @@ pub(super) async fn post_signup_invite(
 
     if let Err(e) = state
         .db
-        .insert_signup_invite(&code, &body.role, expires_at_ms, now)
+        .insert_signup_invite(
+            &code,
+            &body.role,
+            expires_at_ms,
+            body.recipient_email.as_deref(),
+            now,
+        )
         .await
     {
         warn!(error = %e, "insert_signup_invite failed");
         return internal_error();
+    }
+
+    if let (Some(to), Some(mailer)) = (body.recipient_email.as_deref(), state.mailer.as_ref())
+        && let Err(e) = mailer.send_signup_invite(to, &code).await
+    {
+        warn!(error = %e, recipient = %to, "send_signup_invite mail failed");
     }
 
     let (actor_kind, actor_user_id) = principal_actor(&actor);

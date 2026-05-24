@@ -184,6 +184,17 @@ pub struct HubConfig {
     /// `TOWONEL_HUB_PORTS_REQUIRE_RESERVATION`.
     pub ports_require_reservation: bool,
     pub oidc: OidcConfig,
+    pub console_url: Option<String>,
+    pub mail: Option<MailConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MailConfig {
+    pub api_key: String,
+    pub api_secret: zeroize::Zeroizing<String>,
+    pub from_email: String,
+    pub from_name: String,
+    pub sandbox: bool,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -334,6 +345,13 @@ struct RawEnv {
     hub_oidc_codeberg_client_id: Option<String>,
     hub_oidc_codeberg_client_secret: Option<String>,
     hub_oidc_codeberg_redirect_uri: Option<String>,
+    hub_console_url: Option<String>,
+
+    mail_mailjet_api_key: Option<String>,
+    mail_mailjet_api_secret: Option<String>,
+    mail_from_email: Option<String>,
+    mail_from_name: Option<String>,
+    mail_sandbox: Option<bool>,
 
     edge_enabled: Option<bool>,
     edge_listen_addr: Option<String>,
@@ -397,6 +415,12 @@ impl NodeConfig {
             hub_oidc_codeberg_client_id,
             hub_oidc_codeberg_client_secret,
             hub_oidc_codeberg_redirect_uri,
+            hub_console_url,
+            mail_mailjet_api_key,
+            mail_mailjet_api_secret,
+            mail_from_email,
+            mail_from_name,
+            mail_sandbox,
             edge_enabled,
             edge_listen_addr,
             edge_health_listen_addr,
@@ -447,6 +471,22 @@ impl NodeConfig {
             )?,
         };
 
+        let console_url = hub_console_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        if let Some(url) = console_url.as_deref() {
+            validate_console_url(url)?;
+        }
+        let mail = build_mail_config(
+            mail_mailjet_api_key,
+            mail_mailjet_api_secret,
+            mail_from_email,
+            mail_from_name,
+            mail_sandbox,
+        )?;
+
         let hub = build_hub_config(HubInputs {
             enabled: hub_enabled,
             listen_addr: hub_listen_addr,
@@ -468,6 +508,8 @@ impl NodeConfig {
             web_enabled: hub_web_enabled,
             ports_require_reservation: hub_ports_require_reservation,
             oidc,
+            console_url,
+            mail,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -562,9 +604,15 @@ struct HubInputs<'a> {
     web_enabled: Option<bool>,
     ports_require_reservation: Option<bool>,
     oidc: OidcConfig,
+    console_url: Option<String>,
+    mail: Option<MailConfig>,
     data_dir: Option<&'a Path>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear destructure + per-field defaults; splitting hides the wiring"
+)]
 fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
     let HubInputs {
         enabled,
@@ -587,6 +635,8 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         web_enabled,
         ports_require_reservation,
         oidc,
+        console_url,
+        mail,
         data_dir,
     } = inputs;
 
@@ -640,6 +690,15 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         None
     };
 
+    if hub_enabled && web_enabled.unwrap_or(false) && mail.is_none() {
+        anyhow::bail!(
+            "TOWONEL_HUB_WEB_ENABLED=true requires mail to be configured: set \
+             TOWONEL_MAIL_MAILJET_API_KEY, TOWONEL_MAIL_MAILJET_API_SECRET, and \
+             TOWONEL_MAIL_FROM_EMAIL — signup is verification-gated, so unverified \
+             accounts would be locked out without a mailer"
+        );
+    }
+
     Ok(HubConfig {
         enabled: hub_enabled,
         database: DatabaseConfig {
@@ -669,7 +728,62 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
         oidc,
+        console_url,
+        mail,
     })
+}
+
+fn validate_console_url(raw: &str) -> anyhow::Result<()> {
+    let url = url::Url::parse(raw)
+        .map_err(|e| anyhow::anyhow!("TOWONEL_HUB_CONSOLE_URL is not a valid URL: {e}"))?;
+    if url.scheme() != "https" && url.scheme() != "http" {
+        anyhow::bail!(
+            "TOWONEL_HUB_CONSOLE_URL must use http:// or https:// (got {}://)",
+            url.scheme()
+        );
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        anyhow::bail!("TOWONEL_HUB_CONSOLE_URL must include a host");
+    }
+    Ok(())
+}
+
+/// Partial config errors loudly rather than silently disabling mail.
+fn build_mail_config(
+    api_key: Option<String>,
+    api_secret: Option<String>,
+    from_email: Option<String>,
+    from_name: Option<String>,
+    sandbox: Option<bool>,
+) -> anyhow::Result<Option<MailConfig>> {
+    let any = api_key.is_some() || api_secret.is_some() || from_email.is_some();
+    if !any {
+        return Ok(None);
+    }
+    let require = |name: &str, v: Option<String>| -> anyhow::Result<String> {
+        v.map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("TOWONEL_MAIL_{name} is required when any TOWONEL_MAIL_* is set")
+            })
+    };
+    let api_key = require("MAILJET_API_KEY", api_key)?;
+    let api_secret = require("MAILJET_API_SECRET", api_secret)?;
+    let from_email = require("FROM_EMAIL", from_email)?;
+    if !from_email.contains('@') {
+        anyhow::bail!("TOWONEL_MAIL_FROM_EMAIL is not a valid email");
+    }
+    let from_name = from_name
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Towonel".to_string());
+    Ok(Some(MailConfig {
+        api_key,
+        api_secret: zeroize::Zeroizing::new(api_secret),
+        from_email,
+        from_name,
+        sandbox: sandbox.unwrap_or(false),
+    }))
 }
 
 /// Partial configuration is an error rather than a silent fallback so a

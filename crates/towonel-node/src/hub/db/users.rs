@@ -10,6 +10,7 @@ pub struct NewUser<'a> {
     pub email: &'a str,
     pub password_hash: &'a str,
     pub role: &'a str,
+    pub email_verified_at_ms: Option<i64>,
     pub now_ms: i64,
 }
 
@@ -20,6 +21,7 @@ pub struct UserRow {
     pub password_hash: String,
     pub role: String,
     pub disabled_at_ms: Option<i64>,
+    pub email_verified_at_ms: Option<i64>,
     pub created_at_ms: i64,
 }
 
@@ -31,6 +33,7 @@ impl From<users::Model> for UserRow {
             password_hash: m.password_hash,
             role: m.role,
             disabled_at_ms: m.disabled_at_ms,
+            email_verified_at_ms: m.email_verified_at_ms,
             created_at_ms: m.created_at_ms,
         }
     }
@@ -44,6 +47,7 @@ impl Db {
             password_hash: ActiveValue::Set(u.password_hash.to_string()),
             role: ActiveValue::Set(u.role.to_string()),
             disabled_at_ms: ActiveValue::Set(None),
+            email_verified_at_ms: ActiveValue::Set(u.email_verified_at_ms),
             created_at_ms: ActiveValue::Set(u.now_ms),
             updated_at_ms: ActiveValue::Set(u.now_ms),
         };

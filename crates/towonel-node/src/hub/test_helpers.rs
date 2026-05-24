@@ -15,7 +15,57 @@ use super::api::{
     router_unlimited,
 };
 use super::db::temp_db;
+use super::mail::Mailer;
 use super::signing::get_or_create_active_signing_key;
+
+/// Recording mailer used by API tests; captures every send so tests can
+/// inspect the recipient, kind, and one-shot token.
+#[derive(Debug, Default)]
+pub(super) struct TestMailer {
+    pub sent: tokio::sync::Mutex<Vec<TestMail>>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct TestMail {
+    pub kind: TestMailKind,
+    pub to: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TestMailKind {
+    Verification,
+    PasswordReset,
+    SignupInvite,
+}
+
+#[async_trait::async_trait]
+impl Mailer for TestMailer {
+    async fn send_verification(&self, to: &str, token: &str) -> anyhow::Result<()> {
+        self.sent.lock().await.push(TestMail {
+            kind: TestMailKind::Verification,
+            to: to.to_string(),
+            token: token.to_string(),
+        });
+        Ok(())
+    }
+    async fn send_password_reset(&self, to: &str, token: &str) -> anyhow::Result<()> {
+        self.sent.lock().await.push(TestMail {
+            kind: TestMailKind::PasswordReset,
+            to: to.to_string(),
+            token: token.to_string(),
+        });
+        Ok(())
+    }
+    async fn send_signup_invite(&self, to: &str, code: &str) -> anyhow::Result<()> {
+        self.sent.lock().await.push(TestMail {
+            kind: TestMailKind::SignupInvite,
+            to: to.to_string(),
+            token: code.to_string(),
+        });
+        Ok(())
+    }
+}
 
 pub(super) const OPERATOR_KEY: &str = "test-operator-api-key";
 
@@ -28,6 +78,7 @@ fn fake_endpoint_id() -> iroh::EndpointId {
 pub(super) struct TestHub {
     pub base_url: String,
     pub state: Arc<AppState>,
+    pub mailer: Arc<TestMailer>,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -37,6 +88,21 @@ impl TestHub {
     }
 
     pub(super) async fn start_with(ports_require_reservation: bool) -> Self {
+        // Init once so test failures show the hub's `warn!`/`error!` lines.
+        // Safe to call repeatedly; only the first wins.
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(|| {
+            drop(
+                tracing_subscriber::fmt()
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| "warn".into()),
+                    )
+                    .with_test_writer()
+                    .try_init(),
+            );
+        });
         let db = temp_db().await;
         let (route_tx, _route_rx) = broadcast::channel(16);
         let policy = arc_swap::ArcSwap::from_pointee(OwnershipPolicy::new());
@@ -48,6 +114,7 @@ impl TestHub {
                 .expect("generate test signing key"),
         );
 
+        let mailer = Arc::new(TestMailer::default());
         let state = Arc::new(AppState {
             db: db.clone(),
             route_tx,
@@ -78,6 +145,7 @@ impl TestHub {
             live_edges: Arc::new(super::live_edges::LiveEdges::new()),
             liveness: Arc::new(super::liveness::InMemoryLivenessStore::new()),
             web_enabled: true,
+            mailer: Some(Arc::clone(&mailer) as super::mail::SharedMailer),
             port_reservations_tx: tokio::sync::broadcast::channel(64).0,
             ports_require_reservation,
             oidc: super::api::OidcRuntimes::default(),
@@ -90,13 +158,21 @@ impl TestHub {
         let addr: SocketAddr = listener.local_addr().expect("local_addr");
         let base_url = format!("http://{addr}");
 
+        // ConnectInfo<SocketAddr> is required by handlers that key on the
+        // peer IP (login lockout, etc). Production uses this same call shape.
         let task = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("server task");
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .expect("server task");
         });
 
         Self {
             base_url,
             state,
+            mailer,
             _task: task,
         }
     }
@@ -117,7 +193,13 @@ async fn send_json(
     };
     let resp = req.send().await.expect("send request");
     let status = resp.status();
-    let json = resp.json::<Value>().await.expect("decode json");
+    let bytes = resp.bytes().await.expect("read body");
+    let json: Value = serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+        panic!(
+            "decode json (status={status}, body={:?}): {e}",
+            std::str::from_utf8(&bytes).unwrap_or("<non-utf8>")
+        )
+    });
     (status, json)
 }
 

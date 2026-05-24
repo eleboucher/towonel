@@ -14,6 +14,7 @@ use crate::hub::db;
 use crate::hub::db::admin_actions::NewAdminAction;
 use crate::hub::db::users::NewUser;
 
+use super::verify::issue_and_send_verification;
 use super::{
     AppState, LOGIN_MAX_FAILURES, conflict, error_response, internal_error, invalid_request,
     json_ok, json_with_status, unauthorized,
@@ -48,10 +49,6 @@ struct AuthResponse {
     user: AuthUser,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "linear happy path with explicit rollback branches; splitting hides the ordering"
-)]
 pub(super) async fn post_signup(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<SignupRequest>,
@@ -67,13 +64,8 @@ pub(super) async fn post_signup(
     }
 
     let now_ms_i = now_ms_i64();
-    let sentinel = format!("claim:{now_ms_i}:{}", new_id(8));
 
-    let claimed = match state
-        .db
-        .claim_signup_invite(&body.code, &sentinel, now_ms_i)
-        .await
-    {
+    let claimed = match state.db.claim_signup_invite(&body.code, now_ms_i).await {
         Ok(Some(c)) => c,
         Ok(None) => return invalid_request("invalid or expired invite code"),
         Err(e) => {
@@ -87,11 +79,7 @@ pub(super) async fn post_signup(
         Ok(h) => h,
         Err(e) => {
             warn!(error = %e, "password hash failed");
-            if let Err(rel_err) = state
-                .db
-                .release_signup_invite(&claimed.code, &sentinel)
-                .await
-            {
+            if let Err(rel_err) = state.db.release_signup_invite(&claimed.code).await {
                 warn!(error = %rel_err, "release_signup_invite after failure");
             }
             return internal_error();
@@ -105,6 +93,7 @@ pub(super) async fn post_signup(
             email: &body.email,
             password_hash: &pw_hash,
             role: &claimed.role,
+            email_verified_at_ms: None,
             now_ms: now_ms_i,
         })
         .await
@@ -113,11 +102,7 @@ pub(super) async fn post_signup(
         if !is_dup {
             warn!(error = %e, "insert_user failed");
         }
-        if let Err(rel_err) = state
-            .db
-            .release_signup_invite(&claimed.code, &sentinel)
-            .await
-        {
+        if let Err(rel_err) = state.db.release_signup_invite(&claimed.code).await {
             warn!(error = %rel_err, "release_signup_invite after insert_user failure");
         }
         return if is_dup {
@@ -129,18 +114,14 @@ pub(super) async fn post_signup(
 
     if let Err(e) = state
         .db
-        .finalize_signup_invite(&claimed.code, &sentinel, &user_id)
+        .finalize_signup_invite(&claimed.code, &user_id)
         .await
     {
         warn!(error = %e, "finalize_signup_invite failed");
         if let Err(del_err) = state.db.delete_user(&user_id).await {
             warn!(error = %del_err, "delete_user during signup rollback");
         }
-        if let Err(rel_err) = state
-            .db
-            .release_signup_invite(&claimed.code, &sentinel)
-            .await
-        {
+        if let Err(rel_err) = state.db.release_signup_invite(&claimed.code).await {
             warn!(error = %rel_err, "release_signup_invite after finalize failure");
         }
         return internal_error();
@@ -166,7 +147,14 @@ pub(super) async fn post_signup(
         warn!(error = %e, "insert_admin_action signup failed");
     }
 
-    issue_session_response(&state, &user_id, &body.email, &claimed.role).await
+    if let Err(e) = issue_and_send_verification(&state, &user_id, &body.email).await {
+        warn!(error = %e, "issue_and_send_verification on signup failed");
+    }
+
+    json_ok(serde_json::json!({
+        "verification_required": true,
+        "email": body.email,
+    }))
 }
 
 pub(super) async fn post_login(
@@ -236,6 +224,15 @@ pub(super) async fn post_login(
         // unreachable per real_user check above, but be defensive
         return unauthorized("invalid credentials");
     };
+    // Don't bump the IP lockout: the password was correct. Otherwise an
+    // attacker could freeze any known-unverified email from anywhere.
+    if user.email_verified_at_ms.is_none() {
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "email_unverified",
+            "verify your email — check your inbox or request a new link",
+        );
+    }
     state.login_limiter.invalidate(&email_key).await;
     state.ip_login_limiter.invalidate(&ip_key).await;
     issue_session_response(&state, &user.id, &user.email, &user.role).await

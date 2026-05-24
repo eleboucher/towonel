@@ -29,7 +29,7 @@ pub async fn cmd_signup_invite_create(
     let expires_at_ms =
         expires_in_days.map(|d| now_ms.saturating_add(i64::from(d) * 24 * 60 * 60 * 1000));
 
-    db.insert_signup_invite(&code, &role, expires_at_ms, now_ms)
+    db.insert_signup_invite(&code, &role, expires_at_ms, None, now_ms)
         .await
         .context("failed to insert signup invite row")?;
 

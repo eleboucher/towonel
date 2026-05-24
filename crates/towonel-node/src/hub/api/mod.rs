@@ -5,9 +5,11 @@ mod entries;
 mod invites;
 mod metrics_handler;
 mod oidc;
+mod password_reset;
 mod ports;
 mod signup_invites;
 mod users;
+mod verify;
 
 pub use oidc::{OidcRuntimes, build_runtimes as build_oidc_runtimes};
 
@@ -17,7 +19,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use axum::Router;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -34,6 +36,7 @@ use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
 use tracing::Level;
 
+use super::auth::middleware::OperatorPrincipal;
 use super::db;
 use super::edge_link::PortReservationDelta;
 use super::metrics::HubMetrics;
@@ -171,6 +174,7 @@ pub struct AppState {
     pub live_edges: Arc<super::live_edges::LiveEdges>,
     pub liveness: super::liveness::SharedLivenessStore,
     pub web_enabled: bool,
+    pub mailer: Option<super::mail::SharedMailer>,
     pub port_reservations_tx: broadcast::Sender<PortReservationDelta>,
     pub ports_require_reservation: bool,
     /// Port → (tenant, service) index, computed without the liveness filter
@@ -388,7 +392,10 @@ fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         )
         .route("/v1/ports", get(ports::list_all_ports))
         .route("/v1/edges", get(entries::list_edges))
-        .layer(middleware::from_fn_with_state(state.clone(), operator_auth))
+        .layer(middleware::from_extractor_with_state::<
+            OperatorPrincipal,
+            Arc<AppState>,
+        >(state.clone()))
 }
 
 fn invites_routes() -> Router<Arc<AppState>> {
@@ -408,6 +415,19 @@ fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
             .route("/v1/auth/login", post(auth::post_login))
             .route("/v1/auth/logout", post(auth::post_logout))
             .route("/v1/auth/me", get(auth::get_me))
+            .route(
+                "/v1/auth/verify",
+                post(verify::post_verify).get(verify::get_verify),
+            )
+            .route("/v1/auth/verify/resend", post(verify::post_resend))
+            .route(
+                "/v1/auth/password/reset",
+                post(password_reset::post_request),
+            )
+            .route(
+                "/v1/auth/password/reset/confirm",
+                post(password_reset::post_confirm),
+            )
             .route("/v1/auth/providers", get(oidc::list_providers))
             .route("/v1/auth/oidc/{provider}/start", get(oidc::start))
             .route("/v1/auth/oidc/{provider}/callback", get(oidc::callback));
@@ -584,28 +604,6 @@ pub(super) fn cbor_response<T: Serialize>(value: &T) -> Response {
 pub(super) fn parse_invite_id(s: &str) -> Option<[u8; INVITE_ID_LEN]> {
     let bytes = B64.decode(s).ok()?;
     bytes.as_slice().try_into().ok()
-}
-
-async fn operator_auth(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    req: axum::extract::Request,
-    next: Next,
-) -> Response {
-    let Some(auth) = headers.get(header::AUTHORIZATION) else {
-        return unauthorized("missing Authorization header");
-    };
-    let Ok(auth) = auth.to_str() else {
-        return unauthorized("malformed Authorization header");
-    };
-    let Some(token) = auth.strip_prefix("Bearer ") else {
-        return unauthorized("Authorization must be `Bearer <operator_api_key>`");
-    };
-
-    if !constant_time_eq(token.as_bytes(), state.operator_api_key.as_bytes()) {
-        return unauthorized("invalid operator API key");
-    }
-    next.run(req).await
 }
 
 pub(super) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {

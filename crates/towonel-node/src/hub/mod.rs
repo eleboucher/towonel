@@ -245,9 +245,6 @@ pub struct HubParams {
     pub web_enabled: bool,
     pub ports_require_reservation: bool,
     pub oidc: crate::config::OidcConfig,
-    /// `None` disables verification/reset/invite mailing. When `web_enabled`
-    /// is true the hub refuses to start without one (login is verification-
-    /// gated, so unverified users would be locked out).
     pub mailer: Option<mail::SharedMailer>,
 }
 

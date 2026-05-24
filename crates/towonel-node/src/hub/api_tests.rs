@@ -7,7 +7,8 @@ use towonel_common::identity::{AgentKeypair, TenantId, TenantKeypair};
 use towonel_common::invite::{INVITE_ID_LEN, InviteToken};
 
 use super::test_helpers::{
-    OPERATOR_KEY, TestHub, create_invite, delete_json, get_json, post_json, tenant_from_token,
+    OPERATOR_KEY, TestHub, TestMailKind, create_invite, delete_json, get_json, post_json,
+    tenant_from_token,
 };
 
 // POST /v1/invites (create)
@@ -1439,4 +1440,337 @@ async fn refresh_rate_limits_per_agent() {
     assert_eq!(resp.status(), 429);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["code"], "rate_limited");
+}
+
+// --- email verification + password reset + signup-invite mailing ---
+
+/// Mint a signup invite via the hub's operator API and return its code.
+async fn mint_signup_invite(hub: &TestHub, client: &reqwest::Client) -> String {
+    let (status, body) = post_json(
+        client,
+        &hub.url("/v1/signup-invites"),
+        json!({"role": "user"}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200, "mint_signup_invite: {body}");
+    body["code"].as_str().expect("code").to_string()
+}
+
+/// Drain any background pending mail-sends so the next assertion is stable.
+/// In practice the API handler awaits the mailer inline, but the helper is
+/// here so future async batching doesn't require touching every test.
+async fn snapshot_mails(hub: &TestHub) -> Vec<super::test_helpers::TestMail> {
+    hub.mailer.sent.lock().await.clone()
+}
+
+#[tokio::test]
+async fn signup_sends_verification_and_returns_no_session() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let code = mint_signup_invite(&hub, &client).await;
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/auth/signup"),
+        json!({"code": code, "email": "alice@example.test", "password": "hunter22!"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "signup: {body}");
+    assert_eq!(body["verification_required"], true);
+    assert_eq!(body["email"], "alice@example.test");
+    // Critical: signup must not authenticate the caller.
+    assert_eq!(
+        body.get("user").map(Value::is_object),
+        None,
+        "signup must not return an authed user before verification"
+    );
+
+    let mails = snapshot_mails(&hub).await;
+    assert_eq!(mails.len(), 1);
+    assert_eq!(mails[0].kind, TestMailKind::Verification);
+    assert_eq!(mails[0].to, "alice@example.test");
+}
+
+#[tokio::test]
+async fn login_blocked_until_email_verified() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let code = mint_signup_invite(&hub, &client).await;
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/signup"),
+        json!({"code": code, "email": "bob@example.test", "password": "hunter22!"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+
+    // First login attempt: correct password but unverified → 403.
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/auth/login"),
+        json!({"email": "bob@example.test", "password": "hunter22!"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(body["error"]["code"], "email_unverified");
+
+    // Verify by consuming the token captured by the TestMailer.
+    let token = snapshot_mails(&hub).await[0].token.clone();
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/verify"),
+        json!({"token": token}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+
+    // Now login must succeed.
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/auth/login"),
+        json!({"email": "bob@example.test", "password": "hunter22!"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "post-verify login failed: {body}");
+    assert_eq!(body["user"]["email"], "bob@example.test");
+}
+
+#[tokio::test]
+async fn verify_token_is_single_use() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let code = mint_signup_invite(&hub, &client).await;
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/signup"),
+        json!({"code": code, "email": "carol@example.test", "password": "hunter22!"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let token = snapshot_mails(&hub).await[0].token.clone();
+
+    let (s1, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/verify"),
+        json!({"token": token.clone()}),
+        None,
+    )
+    .await;
+    assert_eq!(s1, 200);
+
+    // Second use must fail. A retry-replay window would let a leaked email
+    // link be consumed twice; we want exactly-once.
+    let (s2, body) = post_json(
+        &client,
+        &hub.url("/v1/auth/verify"),
+        json!({"token": token}),
+        None,
+    )
+    .await;
+    assert_eq!(s2, 400);
+    assert_eq!(body["error"]["code"], "token_invalid");
+}
+
+#[tokio::test]
+async fn verify_resend_does_not_enumerate() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    // Unknown email — must still return 200 with the same generic message.
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/auth/verify/resend"),
+        json!({"email": "nobody@example.test"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["ok"], true);
+    assert!(
+        snapshot_mails(&hub).await.is_empty(),
+        "no mail for unknown user"
+    );
+
+    // Real, already-verified user — also 200, also no mail.
+    let code = mint_signup_invite(&hub, &client).await;
+    let _ = post_json(
+        &client,
+        &hub.url("/v1/auth/signup"),
+        json!({"code": code, "email": "dave@example.test", "password": "hunter22!"}),
+        None,
+    )
+    .await;
+    let token = snapshot_mails(&hub).await[0].token.clone();
+    let _ = post_json(
+        &client,
+        &hub.url("/v1/auth/verify"),
+        json!({"token": token}),
+        None,
+    )
+    .await;
+    let before = snapshot_mails(&hub).await.len();
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/auth/verify/resend"),
+        json!({"email": "dave@example.test"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["ok"], true);
+    assert_eq!(
+        snapshot_mails(&hub).await.len(),
+        before,
+        "no resend for already-verified user"
+    );
+}
+
+#[tokio::test]
+async fn password_reset_does_not_enumerate_and_invalidates_sessions() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    // Unknown email path: still 200, still no mail.
+    let (status, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/password/reset"),
+        json!({"email": "ghost@example.test"}),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(
+        snapshot_mails(&hub)
+            .await
+            .iter()
+            .all(|m| m.kind != TestMailKind::PasswordReset),
+    );
+
+    // Set up an existing verified user.
+    let code = mint_signup_invite(&hub, &client).await;
+    let _ = post_json(
+        &client,
+        &hub.url("/v1/auth/signup"),
+        json!({"code": code, "email": "eve@example.test", "password": "old-pass!"}),
+        None,
+    )
+    .await;
+    let verify_token = snapshot_mails(&hub).await[0].token.clone();
+    let _ = post_json(
+        &client,
+        &hub.url("/v1/auth/verify"),
+        json!({"token": verify_token}),
+        None,
+    )
+    .await;
+
+    // Log in to mint a session — we'll prove it gets invalidated.
+    let login_resp = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "eve@example.test", "password": "old-pass!"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(login_resp.status(), 200);
+    let session_cookie = login_resp
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|s| s.starts_with("towonel_session="))
+        .expect("session cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+
+    // Sanity: /v1/auth/me succeeds with the cookie.
+    let me = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 200);
+
+    // Request reset → captures a token via TestMailer.
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/password/reset"),
+        json!({"email": "eve@example.test"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let reset_token = snapshot_mails(&hub)
+        .await
+        .iter()
+        .rev()
+        .find(|m| m.kind == TestMailKind::PasswordReset)
+        .expect("reset mail")
+        .token
+        .clone();
+
+    // Confirm with a new password.
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/password/reset/confirm"),
+        json!({"token": reset_token, "new_password": "new-pass!"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+
+    // The old cookie must no longer authenticate — sessions are wiped on reset.
+    let me = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &session_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(me.status(), 401);
+
+    // And the new password must work.
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/login"),
+        json!({"email": "eve@example.test", "password": "new-pass!"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+}
+
+#[tokio::test]
+async fn signup_invite_with_recipient_sends_mail() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/signup-invites"),
+        json!({"role": "user", "recipient_email": "newjoiner@example.test"}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let code = body["code"].as_str().unwrap().to_string();
+
+    let mails = snapshot_mails(&hub).await;
+    let sent = mails
+        .iter()
+        .find(|m| m.kind == TestMailKind::SignupInvite)
+        .expect("signup invite mail");
+    assert_eq!(sent.to, "newjoiner@example.test");
+    assert_eq!(
+        sent.token, code,
+        "invite mail carries the same code returned to operator"
+    );
 }

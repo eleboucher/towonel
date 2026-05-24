@@ -1,9 +1,11 @@
 pub mod admin_actions;
+pub mod email_verification_tokens;
 pub mod entries;
 pub mod hub_init_canary;
 pub mod hub_signing_keys;
 pub mod invite_hostnames;
 pub mod invites;
+pub mod password_reset_tokens;
 pub mod port_reservations;
 pub mod sessions;
 pub mod signup_invites;

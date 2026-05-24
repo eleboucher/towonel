@@ -309,13 +309,8 @@ async fn signup_via_oidc(
     code: &str,
 ) -> Result<String, &'static str> {
     let now_ms_i = now_ms_i64();
-    let sentinel = format!("oidc:{now_ms_i}:{}", random_code(8));
 
-    let claimed = match state
-        .db
-        .claim_signup_invite(code, &sentinel, now_ms_i)
-        .await
-    {
+    let claimed = match state.db.claim_signup_invite(code, now_ms_i).await {
         Ok(Some(c)) => c,
         Ok(None) => return Err("invite_invalid"),
         Err(e) => {
@@ -336,6 +331,7 @@ async fn signup_via_oidc(
             email,
             password_hash: "",
             role: &claimed.role,
+            email_verified_at_ms: Some(now_ms_i),
             now_ms: now_ms_i,
         })
         .await
@@ -344,11 +340,7 @@ async fn signup_via_oidc(
         if !dup {
             warn!(error = %e, "insert_user (oidc) failed");
         }
-        if let Err(rel_err) = state
-            .db
-            .release_signup_invite(&claimed.code, &sentinel)
-            .await
-        {
+        if let Err(rel_err) = state.db.release_signup_invite(&claimed.code).await {
             warn!(error = %rel_err, "release_signup_invite after oidc insert_user failure");
         }
         return Err(if dup { "email_taken" } else { "internal_error" });
@@ -356,7 +348,7 @@ async fn signup_via_oidc(
 
     if let Err(e) = state
         .db
-        .finalize_signup_invite(&claimed.code, &sentinel, &user_id)
+        .finalize_signup_invite(&claimed.code, &user_id)
         .await
     {
         warn!(error = %e, "finalize_signup_invite failed (oidc)");

@@ -621,6 +621,7 @@ async fn build_hub_params(
         .clone()
         .ok_or_else(|| anyhow::anyhow!("hub_kek was not loaded during config"))?;
     let public_url = default_public_url(&config.hub);
+    let mailer = build_mailer(&config.hub, &public_url)?;
     Ok(hub::HubParams {
         listen_addr: config.hub.listen_addr.clone(),
         health_listen_addr: config.hub.health_listen_addr.clone(),
@@ -642,7 +643,31 @@ async fn build_hub_params(
         web_enabled: config.hub.web_enabled,
         ports_require_reservation: config.hub.ports_require_reservation,
         oidc: config.hub.oidc.clone(),
+        mailer,
     })
+}
+
+fn build_mailer(
+    hub: &config::HubConfig,
+    public_url: &str,
+) -> anyhow::Result<Option<hub::mail::SharedMailer>> {
+    let Some(mail) = hub.mail.as_ref() else {
+        return Ok(None);
+    };
+    let link_base = hub.console_url.as_ref().map_or_else(
+        || hub::mail::LinkBase::Hub(public_url.to_string()),
+        |url| hub::mail::LinkBase::Console(url.clone()),
+    );
+    let settings = hub::mail::MailjetSettings {
+        api_key: mail.api_key.clone(),
+        api_secret: mail.api_secret.clone(),
+        from_email: mail.from_email.clone(),
+        from_name: mail.from_name.clone(),
+        link_base,
+        sandbox: mail.sandbox,
+    };
+    let mailer = hub::mail::MailjetMailer::new(settings)?;
+    Ok(Some(std::sync::Arc::new(mailer)))
 }
 
 /// Build the `OwnershipPolicy` from the operator's tenant allowlist in config.

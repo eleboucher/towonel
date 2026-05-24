@@ -12,6 +12,7 @@ pub struct Model {
     pub expires_at_ms: Option<i64>,
     pub redeemed_by_user_id: Option<String>,
     pub redeemed_at_ms: Option<i64>,
+    pub recipient_email: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
