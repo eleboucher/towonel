@@ -319,7 +319,10 @@ impl Hub {
         let signer = Arc::new(signing::get_or_create_active_signing_key(&db, &self.p.kek).await?);
         info!(kid = signer.kid(), "active hub signing key loaded");
 
-        let oidc = api::build_oidc_runtimes(&self.p.oidc).await?;
+        // Before OIDC so build_oidc_runtimes can seed JWKS metrics.
+        let metrics = metrics::HubMetrics::new();
+
+        let oidc = api::build_oidc_runtimes(&self.p.oidc, &metrics).await?;
         if oidc.codeberg.is_some() {
             info!("OIDC provider 'codeberg' configured");
         }
@@ -351,7 +354,6 @@ impl Hub {
             Err(e) => tracing::warn!(error = %e, "initial route broadcast skipped"),
         }
 
-        let metrics = metrics::HubMetrics::new();
         let state = Arc::new(api::AppState {
             db,
             route_tx: self.p.route_tx.clone(),
@@ -364,6 +366,7 @@ impl Hub {
                 software_version: self.p.identity.software_version,
             },
             operator_api_key: self.p.operator_api_key.clone(),
+            use_secure_cookies: self.p.public_url.starts_with("https://"),
             public_url: self.p.public_url.clone(),
             invite_lock: tokio::sync::Mutex::new(()),
             metrics,
