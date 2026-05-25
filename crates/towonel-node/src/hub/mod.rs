@@ -444,6 +444,9 @@ impl Hub {
             .into_make_service_with_connect_info::<std::net::SocketAddr>();
         let health_app = api::health_router(Arc::clone(&state));
 
+        let health_listener = tokio::net::TcpListener::bind(&self.p.health_listen_addr).await?;
+        info!(listen = %self.p.health_listen_addr, "hub health/metrics listening");
+
         let api_listener = tokio::net::TcpListener::bind(&self.p.listen_addr).await?;
         let acme = if let Some(tls) = self.p.tls.as_ref() {
             let email = tls.acme_email.clone().ok_or_else(|| {
@@ -468,9 +471,6 @@ impl Hub {
             tls = acme.is_some(),
             "hub API listening"
         );
-
-        let health_listener = tokio::net::TcpListener::bind(&self.p.health_listen_addr).await?;
-        info!(listen = %self.p.health_listen_addr, "hub health/metrics listening");
 
         let link_shutdown = tokio_util::sync::CancellationToken::new();
         let link_task = match (self.p.link_listen_addr.clone(), self.p.link_psk.clone()) {
