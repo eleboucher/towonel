@@ -57,6 +57,22 @@ pub(super) async fn post_signup_invite(
         return invalid_request("role must be 'user' or 'operator'");
     }
 
+    // Validate + normalize so a typo doesn't produce an invite that
+    // can never be redeemed (binding check compares normalized forms).
+    let recipient_email_normalized = match body.recipient_email.as_deref() {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else if let Err(msg) = crate::hub::api::auth::validate_email(trimmed) {
+                return invalid_request(msg);
+            } else {
+                Some(crate::hub::db::users::normalize_email(trimmed))
+            }
+        }
+        None => None,
+    };
+
     let now = now_ms_i64();
     let expires_at_ms = body
         .expires_in_days
@@ -69,7 +85,7 @@ pub(super) async fn post_signup_invite(
             &code,
             &body.role,
             expires_at_ms,
-            body.recipient_email.as_deref(),
+            recipient_email_normalized.as_deref(),
             now,
         )
         .await
@@ -78,7 +94,9 @@ pub(super) async fn post_signup_invite(
         return internal_error();
     }
 
-    if let (Some(to), Some(mailer)) = (body.recipient_email.as_deref(), state.mailer.as_ref())
+    // Send to the normalized form so mail "To:", audit, and the
+    // claim-time comparison all use the same string.
+    if let (Some(to), Some(mailer)) = (recipient_email_normalized.as_deref(), state.mailer.as_ref())
         && let Err(e) = mailer.send_signup_invite(to, &code).await
     {
         warn!(error = %e, recipient = %to, "send_signup_invite mail failed");

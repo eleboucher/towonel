@@ -127,6 +127,7 @@ impl TestHub {
                 software_version: "0.0.0-test",
             },
             operator_api_key: zeroize::Zeroizing::new(OPERATOR_KEY.to_string()),
+            use_secure_cookies: true,
             public_url: "https://hub.test.example".to_string(),
             invite_lock: tokio::sync::Mutex::new(()),
             metrics: super::metrics::HubMetrics::new(),

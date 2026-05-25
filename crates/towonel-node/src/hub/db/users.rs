@@ -5,6 +5,11 @@ use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
 use super::Db;
 use super::entities::users;
 
+#[must_use]
+pub fn normalize_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
 pub struct NewUser<'a> {
     pub id: &'a str,
     pub email: &'a str,
@@ -43,7 +48,7 @@ impl Db {
     pub async fn insert_user(&self, u: NewUser<'_>) -> anyhow::Result<()> {
         let model = users::ActiveModel {
             id: ActiveValue::Set(u.id.to_string()),
-            email: ActiveValue::Set(u.email.to_string()),
+            email: ActiveValue::Set(normalize_email(u.email)),
             password_hash: ActiveValue::Set(u.password_hash.to_string()),
             role: ActiveValue::Set(u.role.to_string()),
             disabled_at_ms: ActiveValue::Set(None),
@@ -63,8 +68,9 @@ impl Db {
     }
 
     pub async fn find_user_by_email(&self, email: &str) -> anyhow::Result<Option<UserRow>> {
+        let normalized = normalize_email(email);
         let row = users::Entity::find()
-            .filter(users::Column::Email.eq(email))
+            .filter(users::Column::Email.eq(&normalized))
             .one(&self.conn)
             .await?;
         Ok(row.map(UserRow::from))
@@ -113,5 +119,36 @@ impl Db {
             .all(&self.conn)
             .await?;
         Ok(rows.into_iter().map(UserRow::from).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_email;
+
+    #[test]
+    fn lowercases_ascii() {
+        assert_eq!(normalize_email("Alice@EXAMPLE.com"), "alice@example.com");
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        assert_eq!(
+            normalize_email("  alice@example.com  "),
+            "alice@example.com"
+        );
+        assert_eq!(normalize_email("\talice@x\n"), "alice@x");
+    }
+
+    #[test]
+    fn leaves_non_ascii_uppercase_alone() {
+        assert_eq!(normalize_email("JOSÉ@x.com"), "josÉ@x.com");
+    }
+
+    #[test]
+    fn idempotent() {
+        let once = normalize_email("Foo@Bar.Com");
+        let twice = normalize_email(&once);
+        assert_eq!(once, twice);
     }
 }

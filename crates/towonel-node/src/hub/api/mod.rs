@@ -135,6 +135,9 @@ pub struct AppState {
     pub operator_api_key: zeroize::Zeroizing<String>,
     /// Public URL of the hub (e.g. "<https://node.towonel.example.eu:8443>").
     pub public_url: String,
+    /// `Secure` flag on auth cookies. Computed once from `public_url`
+    /// so per-response checks can't drift.
+    pub use_secure_cookies: bool,
     /// Serializes every mutator of [`AppState::policy`] (invite create +
     /// invite revoke + tenant delete) so the copy-on-write snapshots can't
     /// race-stomp each other. Despite the historical name this is the
@@ -430,6 +433,11 @@ fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
             )
             .route("/v1/auth/providers", get(oidc::list_providers))
             .route("/v1/auth/oidc/{provider}/start", get(oidc::start))
+            // POST so SameSite=Lax cookies don't ride cross-site
+            // top-level navigation (CSRF). Same for /unlink below.
+            .route("/v1/auth/oidc/{provider}/link", post(oidc::link))
+            .route("/v1/auth/oidc/{provider}/unlink", post(oidc::unlink))
+            .route("/v1/auth/oidc/identities", get(oidc::list_identities))
             .route("/v1/auth/oidc/{provider}/callback", get(oidc::callback));
     }
     r

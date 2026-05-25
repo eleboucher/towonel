@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use prometheus::{IntCounter, IntCounterVec, IntGauge, Registry};
-use towonel_common::metrics::{register_counter, register_counter_vec, register_gauge};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry};
+use towonel_common::metrics::{
+    register_counter, register_counter_vec, register_gauge, register_gauge_vec,
+};
 
 /// Reasons the hub rejects a signed config entry. Values become the
 /// `reason=""` label on `towonel_hub_entries_rejected`; keep them stable —
@@ -33,6 +35,13 @@ pub struct HubMetrics {
     pub entries_rejected: IntCounterVec,
     pub tenants_total: IntGauge,
     pub requests_total: IntCounterVec,
+    /// OIDC metadata refresh attempts by provider and outcome
+    /// (`success` / `failure`).
+    pub oidc_jwks_refresh_total: IntCounterVec,
+    /// Unix-seconds of the last successful OIDC metadata refresh per
+    /// provider. Alert when `time() - this` exceeds 2× the refresh
+    /// interval.
+    pub oidc_jwks_last_refresh_success_timestamp_seconds: IntGaugeVec,
     registry: Arc<Registry>,
 }
 
@@ -62,6 +71,18 @@ impl HubMetrics {
                 "towonel_hub_requests_total",
                 "HTTP requests to the hub API, by matched route and response status",
                 &["endpoint", "status"],
+            ),
+            oidc_jwks_refresh_total: register_counter_vec(
+                &r,
+                "towonel_hub_oidc_jwks_refresh_total",
+                "OIDC provider-metadata refresh attempts by provider and outcome",
+                &["provider", "outcome"],
+            ),
+            oidc_jwks_last_refresh_success_timestamp_seconds: register_gauge_vec(
+                &r,
+                "towonel_hub_oidc_jwks_last_refresh_success_timestamp_seconds",
+                "Unix timestamp of the most recent successful OIDC metadata refresh per provider",
+                &["provider"],
             ),
             registry: Arc::new(r),
         }

@@ -49,6 +49,7 @@ struct AuthResponse {
     user: AuthUser,
 }
 
+#[expect(clippy::too_many_lines, reason = "linear signup with rollback arms")]
 pub(super) async fn post_signup(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<SignupRequest>,
@@ -73,6 +74,20 @@ pub(super) async fn post_signup(
             return internal_error();
         }
     };
+
+    if let Some(expected) = claimed.recipient_email.as_deref() {
+        let supplied = db::users::normalize_email(&body.email);
+        if supplied != expected {
+            if let Err(rel_err) = state.db.release_signup_invite(&claimed.code).await {
+                warn!(error = %rel_err, "release_signup_invite on recipient mismatch");
+            }
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "invite_recipient_mismatch",
+                "this invite is bound to a different email",
+            );
+        }
+    }
 
     let user_id = new_id(16);
     let pw_hash = match password::hash(&body.password).await {
@@ -137,6 +152,7 @@ pub(super) async fn post_signup(
             target_kind: "user",
             target_id: Some(&user_id),
             metadata: Some(serde_json::json!({
+                "email": db::users::normalize_email(&body.email),
                 "role": claimed.role,
                 "signup_invite_code": claimed.code,
             })),
@@ -164,7 +180,7 @@ pub(super) async fn post_login(
     axum::Json(body): axum::Json<LoginRequest>,
 ) -> Response {
     let bad_request = validate_email(&body.email).is_err() || body.password.is_empty();
-    let email_key = body.email.to_lowercase();
+    let email_key = db::users::normalize_email(&body.email);
     let ip_key = client_ip_key(&peer, &headers);
 
     // IP-keyed lockout is what actually blocks. Per-email is also counted
@@ -288,7 +304,7 @@ pub(super) async fn post_logout(
         warn!(error = %e, "delete_session on logout");
     }
 
-    let secure = is_https_public_url(&state.public_url);
+    let secure = state.use_secure_cookies;
     let cookie = session::clear_cookie_header(secure);
     let mut resp = json_ok(serde_json::json!({"ok": true}));
     if let Ok(v) = HeaderValue::from_str(&cookie) {
@@ -336,7 +352,7 @@ async fn issue_session_response(
         return internal_error();
     }
 
-    let secure = is_https_public_url(&state.public_url);
+    let secure = state.use_secure_cookies;
     let cookie = session::set_cookie_header(
         &s.cookie_value,
         u64::try_from(SESSION_TTL_MS / 1000).unwrap_or(7 * 24 * 60 * 60),
@@ -355,7 +371,7 @@ async fn issue_session_response(
     resp
 }
 
-fn validate_email(email: &str) -> Result<(), &'static str> {
+pub(super) fn validate_email(email: &str) -> Result<(), &'static str> {
     if email.is_empty() || email.len() > 254 {
         return Err("email length out of range");
     }
@@ -377,10 +393,6 @@ const fn validate_password(password: &str) -> Result<(), &'static str> {
         return Err("password too long");
     }
     Ok(())
-}
-
-fn is_https_public_url(url: &str) -> bool {
-    url.starts_with("https://")
 }
 
 fn now_ms_i64() -> i64 {
