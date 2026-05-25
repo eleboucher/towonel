@@ -1,4 +1,15 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["local>eleboucher/renovate-config"]
+  "extends": ["forgejo>eleboucher/renovate-config"],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 5am on monday"]
+  },
+  "packageRules": [
+    {
+      "description": "Keep rust-toolchain.toml and mise.toml in sync on Rust bumps",
+      "matchDepNames": ["rust"],
+      "groupName": "rust toolchain"
+    }
+  ]
 }
