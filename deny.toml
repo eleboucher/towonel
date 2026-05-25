@@ -6,13 +6,8 @@ no-default-features = false
 version = 2
 yanked = "deny"
 ignore = [
-  # Transitive via iroh → iroh-metrics → postcard → heapless. No safe upgrade.
-  "RUSTSEC-2023-0089", # atomic-polyfill unmaintained
   # Transitive via netdev/netwatch → netlink-packet-*. No safe upgrade.
   "RUSTSEC-2024-0436", # paste unmaintained
-  # Transitive via iroh → hickory-resolver =0.26.0-beta.4. No safe upgrade.
-  "RUSTSEC-2026-0119", # hickory-proto
-  "RUSTSEC-2026-0120", # hickory-net
 ]
 
 [licenses]
