@@ -1774,3 +1774,263 @@ async fn signup_invite_with_recipient_sends_mail() {
         "invite mail carries the same code returned to operator"
     );
 }
+
+#[tokio::test]
+async fn signup_invite_rejects_malformed_recipient_email() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/signup-invites"),
+        json!({"role": "user", "recipient_email": "not-an-email"}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 400, "should reject malformed: {body}");
+    assert_eq!(body["error"]["code"], "invalid_request");
+}
+
+/// Sign up + verify + log in; returns the session cookie header value.
+async fn signup_and_login_user(
+    hub: &TestHub,
+    client: &reqwest::Client,
+    email: &str,
+    password: &str,
+) -> String {
+    let code = mint_signup_invite(hub, client).await;
+    let (s, _) = post_json(
+        client,
+        &hub.url("/v1/auth/signup"),
+        json!({"code": code, "email": email, "password": password}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let mails = snapshot_mails(hub).await;
+    let verify_token = mails
+        .iter()
+        .rev()
+        .find(|m| m.kind == TestMailKind::Verification && m.to == email)
+        .expect("verification mail")
+        .token
+        .clone();
+    let (s, _) = post_json(
+        client,
+        &hub.url("/v1/auth/verify"),
+        json!({"token": verify_token}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+
+    let resp = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": email, "password": password}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    resp.headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|s| s.starts_with("towonel_session="))
+        .expect("session cookie")
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn list_identities_returns_user_own_identities_only() {
+    use super::db::user_oauth_identities::NewOauthIdentity;
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let alice_cookie =
+        signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let bob_cookie = signup_and_login_user(&hub, &client, "bob@example.test", "hunter22!").await;
+
+    let user_id_for = async |cookie: &str| -> String {
+        let body: Value = client
+            .get(hub.url("/v1/auth/me"))
+            .header(reqwest::header::COOKIE, cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        body["id"].as_str().unwrap().to_string()
+    };
+    let alice_id = user_id_for(&alice_cookie).await;
+    let bob_id = user_id_for(&bob_cookie).await;
+
+    hub.state
+        .db
+        .insert_oauth_identity(NewOauthIdentity {
+            provider: "codeberg",
+            subject: "alice-subject",
+            user_id: &alice_id,
+            email: Some("alice@example.test"),
+            now_ms: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+    hub.state
+        .db
+        .insert_oauth_identity(NewOauthIdentity {
+            provider: "codeberg",
+            subject: "bob-subject",
+            user_id: &bob_id,
+            email: Some("bob@example.test"),
+            now_ms: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+    let body: Value = client
+        .get(hub.url("/v1/auth/oidc/identities"))
+        .header(reqwest::header::COOKIE, &alice_cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let identities = body["identities"].as_array().unwrap();
+    assert_eq!(identities.len(), 1, "alice must see only her own identity");
+    assert_eq!(identities[0]["provider"], "codeberg");
+    assert_eq!(identities[0]["email"], "alice@example.test");
+    assert_ne!(
+        identities[0]["email"], "bob@example.test",
+        "bob's identity must not leak"
+    );
+}
+
+#[tokio::test]
+async fn list_identities_requires_authentication() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(hub.url("/v1/auth/oidc/identities"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn unlink_removes_identity_for_caller() {
+    use super::db::user_oauth_identities::NewOauthIdentity;
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let me_body: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me_body["id"].as_str().unwrap().to_string();
+
+    hub.state
+        .db
+        .insert_oauth_identity(NewOauthIdentity {
+            provider: "codeberg",
+            subject: "codeberg-subject-9999",
+            user_id: &user_id,
+            email: Some("alice@example.test"),
+            now_ms: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(hub.url("/v1/auth/oidc/codeberg/unlink"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // The identity must be gone from the DB after a successful unlink.
+    let still = hub
+        .state
+        .db
+        .find_oauth_identity("codeberg", "codeberg-subject-9999")
+        .await
+        .unwrap();
+    assert!(still.is_none());
+}
+
+#[tokio::test]
+async fn unlink_unknown_provider_returns_not_found() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+
+    let resp = client
+        .post(hub.url("/v1/auth/oidc/codeberg/unlink"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn unlink_blocks_self_lockout_when_no_password_and_no_other_identity() {
+    use super::db::user_oauth_identities::NewOauthIdentity;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let me_body: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me_body["id"].as_str().unwrap().to_string();
+
+    // OIDC-only account (no password) with exactly one identity —
+    // unlinking it would lock the user out.
+    hub.state
+        .db
+        .insert_oauth_identity(NewOauthIdentity {
+            provider: "codeberg",
+            subject: "codeberg-subject-9999",
+            user_id: &user_id,
+            email: Some("alice@example.test"),
+            now_ms: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+    super::db::entities::users::Entity::update_many()
+        .col_expr(
+            super::db::entities::users::Column::PasswordHash,
+            sea_orm::sea_query::Expr::value(""),
+        )
+        .filter(super::db::entities::users::Column::Id.eq(&user_id))
+        .exec(&hub.state.db.conn)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(hub.url("/v1/auth/oidc/codeberg/unlink"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "would_lock_out");
+}
