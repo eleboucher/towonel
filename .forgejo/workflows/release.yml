@@ -182,7 +182,7 @@ jobs:
           ARCHIVE="${{ steps.archive.outputs.archive }}"
           cosign sign-blob --yes \
             --key env://COSIGN_KEY \
-            --output-signature "${ARCHIVE}.sig" \
+            --bundle "${ARCHIVE}.cosign.bundle" \
             "${ARCHIVE}"
       - name: Upload assets to Codeberg release
         env:
@@ -210,7 +210,7 @@ jobs:
           }
           upload "${ARCHIVE}"
           upload "${ARCHIVE}.sha256"
-          upload "${ARCHIVE}.sig"
+          upload "${ARCHIVE}.cosign.bundle"
   container:
     runs-on: multiarch
     steps:
