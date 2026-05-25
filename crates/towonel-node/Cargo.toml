@@ -59,6 +59,7 @@ smallvec = { workspace = true }
 fastrand = { workspace = true }
 envy = { workspace = true }
 tabled = { workspace = true }
+totp-rs = { workspace = true }
 ppp = { workspace = true }
 ipnet = { workspace = true }
 

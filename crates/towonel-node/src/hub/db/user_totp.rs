@@ -1,0 +1,87 @@
+#![allow(dead_code, reason = "consumed by web routes once mounted")]
+
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
+
+use super::Db;
+use super::entities::user_totp;
+
+#[derive(Debug, Clone)]
+pub struct UserTotpRow {
+    pub user_id: String,
+    pub secret_encrypted: Vec<u8>,
+    pub confirmed_at_ms: Option<i64>,
+    pub last_used_step: Option<i64>,
+}
+
+impl From<user_totp::Model> for UserTotpRow {
+    fn from(m: user_totp::Model) -> Self {
+        Self {
+            user_id: m.user_id,
+            secret_encrypted: m.secret_encrypted,
+            confirmed_at_ms: m.confirmed_at_ms,
+            last_used_step: m.last_used_step,
+        }
+    }
+}
+
+impl Db {
+    pub async fn find_user_totp(&self, user_id: &str) -> anyhow::Result<Option<UserTotpRow>> {
+        let row = user_totp::Entity::find_by_id(user_id.to_string())
+            .one(&self.conn)
+            .await?;
+        Ok(row.map(UserTotpRow::from))
+    }
+
+    pub async fn upsert_pending_totp(
+        &self,
+        user_id: &str,
+        secret_encrypted: &[u8],
+        now_ms: i64,
+    ) -> anyhow::Result<()> {
+        // Delete-then-insert: portable across SQLite and Postgres.
+        user_totp::Entity::delete_by_id(user_id.to_string())
+            .exec(&self.conn)
+            .await?;
+        let model = user_totp::ActiveModel {
+            user_id: ActiveValue::Set(user_id.to_string()),
+            secret_encrypted: ActiveValue::Set(secret_encrypted.to_vec()),
+            confirmed_at_ms: ActiveValue::Set(None),
+            last_used_step: ActiveValue::Set(None),
+            created_at_ms: ActiveValue::Set(now_ms),
+        };
+        user_totp::Entity::insert(model).exec(&self.conn).await?;
+        Ok(())
+    }
+
+    pub async fn confirm_totp(&self, user_id: &str, now_ms: i64) -> anyhow::Result<bool> {
+        let result = user_totp::Entity::update_many()
+            .col_expr(
+                user_totp::Column::ConfirmedAtMs,
+                sea_orm::sea_query::Expr::value(now_ms),
+            )
+            .filter(user_totp::Column::UserId.eq(user_id))
+            .filter(user_totp::Column::ConfirmedAtMs.is_null())
+            .exec(&self.conn)
+            .await?;
+        Ok(result.rows_affected == 1)
+    }
+
+    pub async fn set_totp_last_used_step(&self, user_id: &str, step: i64) -> anyhow::Result<()> {
+        user_totp::Entity::update_many()
+            .col_expr(
+                user_totp::Column::LastUsedStep,
+                sea_orm::sea_query::Expr::value(step),
+            )
+            .filter(user_totp::Column::UserId.eq(user_id))
+            .exec(&self.conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_user_totp(&self, user_id: &str) -> anyhow::Result<()> {
+        user_totp::Entity::delete_by_id(user_id.to_string())
+            .exec(&self.conn)
+            .await?;
+        Ok(())
+    }
+}

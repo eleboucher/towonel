@@ -107,7 +107,7 @@ impl TestHub {
         let (route_tx, _route_rx) = broadcast::channel(16);
         let policy = arc_swap::ArcSwap::from_pointee(OwnershipPolicy::new());
 
-        let kek = HubKek::generate();
+        let kek = Arc::new(HubKek::generate());
         let signer = Arc::new(
             get_or_create_active_signing_key(&db, &kek)
                 .await
@@ -136,12 +136,14 @@ impl TestHub {
             tcp_port_lock: tokio::sync::Mutex::new(()),
             udp_port_lock: tokio::sync::Mutex::new(()),
             signer,
+            kek: Arc::clone(&kek),
             refresh_limiter: new_refresh_limiter(),
             login_limiter: new_login_limiter(),
             ip_login_limiter: new_login_limiter(),
             login_sentinel_hash: super::api::compute_login_sentinel_hash()
                 .await
                 .expect("compute sentinel hash for tests"),
+            twofa_attempt_limiter: super::api::new_twofa_attempt_limiter(),
             port_index: arc_swap::ArcSwap::from_pointee(super::api::PortIndex::default()),
             live_edges: Arc::new(super::live_edges::LiveEdges::new()),
             liveness: Arc::new(super::liveness::InMemoryLivenessStore::new()),

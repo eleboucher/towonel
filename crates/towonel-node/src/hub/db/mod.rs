@@ -8,6 +8,7 @@ pub mod app_settings;
 pub mod auth_tokens;
 pub(super) mod entities;
 mod invites;
+pub mod login_challenges;
 mod migration;
 pub mod port_reservations;
 pub mod sessions;
@@ -15,7 +16,9 @@ mod signing_keys;
 pub mod signup_invites;
 pub mod tenant_ownership;
 mod types;
+pub mod user_backup_codes;
 pub mod user_oauth_identities;
+pub mod user_totp;
 pub mod users;
 
 pub use types::*;

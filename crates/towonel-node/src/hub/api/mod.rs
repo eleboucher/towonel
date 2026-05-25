@@ -9,6 +9,7 @@ mod oidc;
 mod password_reset;
 mod ports;
 mod signup_invites;
+mod twofa;
 mod users;
 mod verify;
 
@@ -33,6 +34,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::MakeRequestUuid;
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use towonel_common::invite::{INVITE_ID_LEN, InviteHashKey};
+use towonel_common::kek::HubKek;
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
 use tracing::Level;
@@ -103,6 +105,21 @@ pub type LoginLimiter = moka::future::Cache<String, Arc<std::sync::atomic::Atomi
 pub const LOGIN_MAX_FAILURES: u32 = 10;
 pub const LOGIN_LOCKOUT_WINDOW_SECS: u64 = 15 * 60;
 
+/// Per-challenge counter. At [`TWOFA_MAX_ATTEMPTS_PER_CHALLENGE`] failures
+/// the verify handler consumes the challenge so a stolen password can't
+/// brute-force the 6-digit space inside the challenge TTL.
+pub type TwoFaAttemptLimiter = moka::future::Cache<String, Arc<std::sync::atomic::AtomicU32>>;
+
+pub const TWOFA_MAX_ATTEMPTS_PER_CHALLENGE: u32 = 5;
+
+#[must_use]
+pub fn new_twofa_attempt_limiter() -> TwoFaAttemptLimiter {
+    moka::future::Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(Duration::from_secs(LOGIN_LOCKOUT_WINDOW_SECS))
+        .build()
+}
+
 /// Compute the PHC hash that login uses as a fall-back verify target when
 /// the supplied email does not exist (or is disabled). Spending the same
 /// argon2 CPU on those paths closes the user-enumeration timing oracle.
@@ -161,6 +178,8 @@ pub struct AppState {
     /// fast path independent of TCP claims.
     pub udp_port_lock: Mutex<()>,
     pub signer: Arc<HubSigner>,
+    /// At-rest KEK: seals signing keys and TOTP secrets.
+    pub kek: Arc<HubKek>,
     pub refresh_limiter: RefreshLimiter,
     /// Per-email counter for failed logins. Audit/observability only — the
     /// IP-keyed counter below is what actually blocks. A per-email lockout
@@ -175,6 +194,7 @@ pub struct AppState {
     /// the user-not-found and user-disabled paths spend the same argon2 CPU
     /// as a real verify, closing a user-enumeration timing oracle.
     pub login_sentinel_hash: String,
+    pub twofa_attempt_limiter: TwoFaAttemptLimiter,
     pub live_edges: Arc<super::live_edges::LiveEdges>,
     pub liveness: super::liveness::SharedLivenessStore,
     pub web_enabled: bool,
@@ -443,6 +463,15 @@ fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
                 "/v1/auth/password/reset/confirm",
                 post(password_reset::post_confirm),
             )
+            .route("/v1/auth/2fa/setup", post(twofa::post_setup))
+            .route("/v1/auth/2fa/confirm", post(twofa::post_confirm))
+            .route("/v1/auth/2fa/disable", post(twofa::post_disable))
+            .route(
+                "/v1/auth/2fa/backup/regenerate",
+                post(twofa::post_regenerate),
+            )
+            .route("/v1/auth/2fa/verify", post(auth::post_twofa_verify))
+            .route("/v1/auth/2fa/status", get(twofa::get_status))
             .route("/v1/auth/providers", get(oidc::list_providers))
             .route("/v1/auth/oidc/{provider}/start", get(oidc::start))
             // POST so SameSite=Lax cookies don't ride cross-site

@@ -2,15 +2,26 @@
 
 use std::sync::Arc;
 
-use axum::extract::FromRequestParts;
-use axum::http::header;
+use axum::extract::{FromRequestParts, MatchedPath};
 use axum::http::request::Parts;
+use axum::http::{StatusCode, header};
 use axum::response::Response;
 use towonel_common::time::now_ms;
 
 use super::session;
-use crate::hub::api::{AppState, internal_error, not_found, unauthorized};
+use crate::hub::api::{AppState, error_response, internal_error, not_found, unauthorized};
 use crate::hub::db::users::UserRow;
+
+// Routes an unenrolled operator can still reach so the UI can drive
+// enrollment + offer a way out.
+const TWOFA_ENROLLMENT_ALLOWED_PATHS: &[&str] = &[
+    "/v1/auth/me",
+    "/v1/auth/logout",
+    "/v1/auth/2fa/setup",
+    "/v1/auth/2fa/confirm",
+    "/v1/auth/2fa/status",
+    "/v1/auth/2fa/disable",
+];
 
 #[derive(Debug, Clone)]
 pub enum Principal {
@@ -72,6 +83,7 @@ impl FromRequestParts<Arc<AppState>> for Principal {
                 if let Some(user) = user
                     && user.disabled_at_ms.is_none()
                 {
+                    enforce_operator_twofa(parts, state, &user).await?;
                     return Ok(Self::User(user));
                 }
             }
@@ -79,6 +91,40 @@ impl FromRequestParts<Arc<AppState>> for Principal {
 
         Err(unauthorized("authentication required"))
     }
+}
+
+async fn enforce_operator_twofa(
+    parts: &Parts,
+    state: &Arc<AppState>,
+    user: &UserRow,
+) -> Result<(), Response> {
+    if user.role != "operator" {
+        return Ok(());
+    }
+    let matched = parts
+        .extensions
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str);
+    if matches!(matched, Some(p) if TWOFA_ENROLLMENT_ALLOWED_PATHS.contains(&p)) {
+        return Ok(());
+    }
+    let confirmed = state
+        .db
+        .find_user_totp(&user.id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "find_user_totp failed");
+            internal_error()
+        })?
+        .is_some_and(|r| r.confirmed_at_ms.is_some());
+    if confirmed {
+        return Ok(());
+    }
+    Err(error_response(
+        StatusCode::FORBIDDEN,
+        "twofa_setup_required",
+        "enroll in two-factor authentication before using this endpoint",
+    ))
 }
 
 pub struct OperatorPrincipal(pub Principal);

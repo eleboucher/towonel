@@ -21,6 +21,7 @@ mod m20260616_000002_signup_invite_recipient;
 mod m20260616_000003_lowercase_emails;
 mod m20260616_000004_oauth_one_per_provider;
 mod m20260617_000000_app_settings;
+mod m20260618_000000_user_2fa;
 
 pub struct Migrator;
 
@@ -49,6 +50,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260616_000003_lowercase_emails::Migration),
             Box::new(m20260616_000004_oauth_one_per_provider::Migration),
             Box::new(m20260617_000000_app_settings::Migration),
+            Box::new(m20260618_000000_user_2fa::Migration),
         ]
     }
 }

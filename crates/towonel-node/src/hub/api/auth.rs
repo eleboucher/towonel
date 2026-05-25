@@ -12,6 +12,7 @@ use crate::hub::auth::middleware::Principal;
 use crate::hub::auth::{password, session};
 use crate::hub::db;
 use crate::hub::db::admin_actions::NewAdminAction;
+use crate::hub::db::login_challenges::NewLoginChallenge;
 use crate::hub::db::users::NewUser;
 
 use super::verify::issue_and_send_verification;
@@ -21,6 +22,7 @@ use super::{
 };
 
 const SESSION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+const LOGIN_CHALLENGE_TTL_MS: i64 = 5 * 60 * 1000;
 const PASSWORD_MIN_LEN: usize = 8;
 const PASSWORD_MAX_LEN: usize = 128;
 
@@ -42,6 +44,14 @@ struct AuthUser {
     id: String,
     email: String,
     role: String,
+}
+
+#[derive(Debug, Serialize)]
+struct MeResponse {
+    id: String,
+    email: Option<String>,
+    role: String,
+    twofa_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -249,9 +259,140 @@ pub(super) async fn post_login(
             "verify your email — check your inbox or request a new link",
         );
     }
+    // IP counter only cleared once a session is actually issued; otherwise
+    // a stolen-password attacker could refresh it on every challenge.
     state.login_limiter.invalidate(&email_key).await;
+
+    match state.db.find_user_totp(&user.id).await {
+        Ok(Some(totp_row)) if totp_row.confirmed_at_ms.is_some() => {
+            issue_login_challenge_response(&state, &user.id).await
+        }
+        Ok(_) => {
+            state.ip_login_limiter.invalidate(&ip_key).await;
+            issue_session_response(&state, &user.id, &user.email, &user.role).await
+        }
+        Err(e) => {
+            warn!(error = %e, "find_user_totp failed during login");
+            internal_error()
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct TwoFaVerifyRequest {
+    challenge_token: String,
+    code: String,
+}
+
+pub(super) async fn post_twofa_verify(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<TwoFaVerifyRequest>,
+) -> Response {
+    let ip_key = client_ip_key(&peer, &headers);
+    if let Some(counter) = state.ip_login_limiter.get(&ip_key).await
+        && counter.load(std::sync::atomic::Ordering::Relaxed) >= LOGIN_MAX_FAILURES
+    {
+        return error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many failed attempts from this IP; try again later",
+        );
+    }
+
+    let Some((challenge_id, token_hash)) = session::parse(body.challenge_token.trim()) else {
+        record_login_failure(&state, "<twofa>", &ip_key).await;
+        return unauthorized("invalid or expired challenge");
+    };
+    let now = now_ms_i64();
+    let row = match state
+        .db
+        .find_active_login_challenge(&challenge_id, &token_hash, now)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            record_login_failure(&state, "<twofa>", &ip_key).await;
+            return unauthorized("invalid or expired challenge");
+        }
+        Err(e) => {
+            warn!(error = %e, "find_active_login_challenge failed");
+            return internal_error();
+        }
+    };
+
+    let user = match state.db.find_user_by_id(&row.user_id).await {
+        Ok(Some(u)) if u.disabled_at_ms.is_none() => u,
+        Ok(_) => {
+            record_login_failure(&state, "<twofa>", &ip_key).await;
+            return unauthorized("account unavailable");
+        }
+        Err(e) => {
+            warn!(error = %e, "find_user_by_id during 2fa verify");
+            return internal_error();
+        }
+    };
+    let totp_row = match state.db.find_user_totp(&user.id).await {
+        Ok(Some(r)) if r.confirmed_at_ms.is_some() => r,
+        _ => {
+            record_login_failure(&state, "<twofa>", &ip_key).await;
+            return unauthorized("invalid or expired challenge");
+        }
+    };
+
+    let ok = super::twofa::verify_code_or_backup(&state, &user, &totp_row, body.code.trim()).await;
+    if !ok {
+        record_login_failure(&state, "<twofa>", &ip_key).await;
+        let attempts = state
+            .twofa_attempt_limiter
+            .get_with(row.id.clone(), async {
+                Arc::new(std::sync::atomic::AtomicU32::new(0))
+            })
+            .await
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        if attempts >= super::TWOFA_MAX_ATTEMPTS_PER_CHALLENGE
+            && let Err(e) = state.db.consume_login_challenge(&row.id, now).await
+        {
+            warn!(error = %e, "consume_login_challenge after max attempts failed");
+        }
+        return unauthorized("invalid code");
+    }
+    match state.db.consume_login_challenge(&row.id, now).await {
+        Ok(true) => {}
+        Ok(false) => return unauthorized("invalid or expired challenge"),
+        Err(e) => {
+            warn!(error = %e, "consume_login_challenge failed");
+            return internal_error();
+        }
+    }
+    state.twofa_attempt_limiter.invalidate(&row.id).await;
     state.ip_login_limiter.invalidate(&ip_key).await;
     issue_session_response(&state, &user.id, &user.email, &user.role).await
+}
+
+async fn issue_login_challenge_response(state: &Arc<AppState>, user_id: &str) -> Response {
+    let now = now_ms_i64();
+    let s = session::mint();
+    if let Err(e) = state
+        .db
+        .insert_login_challenge(NewLoginChallenge {
+            id: &s.id,
+            user_id,
+            token_hash: &s.token_hash,
+            expires_at_ms: now.saturating_add(LOGIN_CHALLENGE_TTL_MS),
+            now_ms: now,
+        })
+        .await
+    {
+        warn!(error = %e, "insert_login_challenge failed");
+        return internal_error();
+    }
+    json_ok(serde_json::json!({
+        "twofa_required": true,
+        "challenge_token": s.cookie_value,
+    }))
 }
 
 /// Resolve the client IP used for the lockout counter. When the hub sits
@@ -313,16 +454,31 @@ pub(super) async fn post_logout(
     resp
 }
 
-pub(super) async fn get_me(principal: Principal) -> Response {
+pub(super) async fn get_me(State(state): State<Arc<AppState>>, principal: Principal) -> Response {
     match principal {
-        Principal::User(u) => json_ok(AuthUser {
-            id: u.id,
-            email: u.email,
-            role: u.role,
-        }),
+        Principal::User(u) => {
+            let twofa_enabled = state
+                .db
+                .find_user_totp(&u.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|r| r.confirmed_at_ms.is_some());
+            json_ok(MeResponse {
+                id: u.id,
+                email: Some(u.email),
+                role: u.role,
+                twofa_enabled,
+            })
+        }
         Principal::OperatorKey => json_with_status(
             StatusCode::OK,
-            serde_json::json!({"id": "operator-key", "email": null, "role": "operator"}),
+            serde_json::json!({
+                "id": "operator-key",
+                "email": null,
+                "role": "operator",
+                "twofa_enabled": true,
+            }),
         ),
     }
 }

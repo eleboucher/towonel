@@ -321,6 +321,9 @@ async fn list_invites_scope_for_operator_role_user() {
         .set_user_role(&admin_id, "operator", 1)
         .await
         .expect("set_user_role");
+    // Operator role gates on 2FA; enroll to clear the gate before the
+    // rest of the test exercises invite scoping.
+    enroll_2fa(&hub, &client, &admin_cookie).await;
 
     let mine_resp = client
         .get(hub.url("/v1/invites"))
@@ -2436,4 +2439,458 @@ async fn concurrent_reserves_respect_quota() {
         .await
         .unwrap();
     assert_eq!(count, 3, "DB count must match the quota — no slip-through");
+}
+
+async fn current_totp(state: &super::api::AppState, user_id: &str) -> String {
+    let row = state.db.find_user_totp(user_id).await.unwrap().unwrap();
+    let secret = super::auth::totp::unseal(&row.secret_encrypted, &state.kek).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    super::auth::totp::generate_at(&secret, now)
+}
+
+async fn enroll_2fa(hub: &TestHub, client: &reqwest::Client, cookie: &str) -> Vec<String> {
+    let setup: Value = client
+        .post(hub.url("/v1/auth/2fa/setup"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(setup["secret_base32"].is_string(), "setup: {setup}");
+    assert!(setup["otpauth_url"].is_string(), "setup: {setup}");
+
+    let me: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me["id"].as_str().unwrap().to_string();
+    let code = current_totp(&hub.state, &user_id).await;
+
+    let confirm: Value = client
+        .post(hub.url("/v1/auth/2fa/confirm"))
+        .header(reqwest::header::COOKIE, cookie)
+        .json(&json!({"code": code}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    confirm["backup_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn twofa_setup_then_confirm_marks_enabled() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let backups = enroll_2fa(&hub, &client, &cookie).await;
+    assert_eq!(backups.len(), 10, "must issue exactly ten backup codes");
+
+    let status: Value = client
+        .get(hub.url("/v1/auth/2fa/status"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["enabled"], true);
+    assert_eq!(status["pending"], false);
+    assert_eq!(status["backup_codes_remaining"], 10);
+}
+
+#[tokio::test]
+async fn login_without_twofa_returns_session_directly() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let _cookie = signup_and_login_user(&hub, &client, "carol@example.test", "hunter22!").await;
+    let resp = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "carol@example.test", "password": "hunter22!"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let has_session = resp
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|s| s.starts_with("towonel_session="));
+    assert!(has_session, "session cookie must be set when no 2FA");
+}
+
+#[tokio::test]
+async fn login_with_twofa_returns_challenge_not_session() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "dave@example.test", "hunter22!").await;
+    enroll_2fa(&hub, &client, &cookie).await;
+
+    let resp = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "dave@example.test", "password": "hunter22!"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let has_session = resp
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|s| s.starts_with("towonel_session="));
+    assert!(
+        !has_session,
+        "session cookie must NOT be set when 2FA required"
+    );
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["twofa_required"], true);
+    assert!(body["challenge_token"].is_string());
+}
+
+#[tokio::test]
+async fn twofa_verify_with_correct_code_issues_session() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "eve@example.test", "hunter22!").await;
+    enroll_2fa(&hub, &client, &cookie).await;
+
+    let login_body: Value = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "eve@example.test", "password": "hunter22!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let challenge = login_body["challenge_token"].as_str().unwrap();
+
+    let me: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me["id"].as_str().unwrap();
+    let code = current_totp(&hub.state, user_id).await;
+
+    let resp = client
+        .post(hub.url("/v1/auth/2fa/verify"))
+        .json(&json!({"challenge_token": challenge, "code": code}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let session = resp
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|s| s.starts_with("towonel_session="));
+    assert!(session.is_some(), "2FA verify must set session cookie");
+}
+
+#[tokio::test]
+async fn twofa_verify_replay_within_window_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "frank@example.test", "hunter22!").await;
+    enroll_2fa(&hub, &client, &cookie).await;
+
+    let me: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me["id"].as_str().unwrap().to_string();
+
+    // First login completes with the current code.
+    let login1: Value = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "frank@example.test", "password": "hunter22!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let chal1 = login1["challenge_token"].as_str().unwrap().to_string();
+    let code = current_totp(&hub.state, &user_id).await;
+    let r1 = client
+        .post(hub.url("/v1/auth/2fa/verify"))
+        .json(&json!({"challenge_token": chal1, "code": code}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), 200);
+
+    // Second login with the SAME code must be rejected (replay guard).
+    let login2: Value = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "frank@example.test", "password": "hunter22!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let chal2 = login2["challenge_token"].as_str().unwrap().to_string();
+    let r2 = client
+        .post(hub.url("/v1/auth/2fa/verify"))
+        .json(&json!({"challenge_token": chal2, "code": code}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), 401, "replayed code must be rejected");
+}
+
+#[tokio::test]
+async fn twofa_challenge_burned_after_max_failed_attempts() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "ivy@example.test", "hunter22!").await;
+    enroll_2fa(&hub, &client, &cookie).await;
+
+    let login: Value = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "ivy@example.test", "password": "hunter22!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let challenge = login["challenge_token"].as_str().unwrap().to_string();
+
+    // Burn the challenge by submitting wrong codes up to the bound.
+    for _ in 0..super::api::TWOFA_MAX_ATTEMPTS_PER_CHALLENGE {
+        let r = client
+            .post(hub.url("/v1/auth/2fa/verify"))
+            .json(&json!({"challenge_token": challenge, "code": "000000"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 401);
+    }
+
+    // Even a correct code on the same challenge must now fail.
+    let me: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me["id"].as_str().unwrap();
+    let code = current_totp(&hub.state, user_id).await;
+    let r = client
+        .post(hub.url("/v1/auth/2fa/verify"))
+        .json(&json!({"challenge_token": challenge, "code": code}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        401,
+        "challenge must be invalid after exceeding attempt cap"
+    );
+}
+
+#[tokio::test]
+async fn twofa_backup_code_works_once() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "grace@example.test", "hunter22!").await;
+    let backups = enroll_2fa(&hub, &client, &cookie).await;
+    let backup = backups.into_iter().next().unwrap();
+
+    // First use: succeed.
+    let login1: Value = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "grace@example.test", "password": "hunter22!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let chal1 = login1["challenge_token"].as_str().unwrap().to_string();
+    let r1 = client
+        .post(hub.url("/v1/auth/2fa/verify"))
+        .json(&json!({"challenge_token": chal1, "code": backup}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), 200);
+
+    // Second use: same backup code is now consumed -> 401.
+    let login2: Value = client
+        .post(hub.url("/v1/auth/login"))
+        .json(&json!({"email": "grace@example.test", "password": "hunter22!"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let chal2 = login2["challenge_token"].as_str().unwrap().to_string();
+    let r2 = client
+        .post(hub.url("/v1/auth/2fa/verify"))
+        .json(&json!({"challenge_token": chal2, "code": backup}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), 401, "consumed backup code must not work again");
+}
+
+#[tokio::test]
+async fn twofa_disable_requires_password_and_code() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "henry@example.test", "hunter22!").await;
+    let backups = enroll_2fa(&hub, &client, &cookie).await;
+    // Use a backup code as the second factor — sidesteps the TOTP replay
+    // window so the test is deterministic regardless of which 30s step we
+    // land in.
+    let backup_code = backups
+        .into_iter()
+        .next()
+        .expect("at least one backup code");
+
+    let r1 = client
+        .post(hub.url("/v1/auth/2fa/disable"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"password": "wrong", "code": backup_code.clone()}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), 401);
+
+    let r2 = client
+        .post(hub.url("/v1/auth/2fa/disable"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"password": "hunter22!", "code": ""}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), 401);
+
+    let r3 = client
+        .post(hub.url("/v1/auth/2fa/disable"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"password": "hunter22!", "code": backup_code}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r3.status(), 200, "disable with backup code must succeed");
+
+    let status: Value = client
+        .get(hub.url("/v1/auth/2fa/status"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["enabled"], false);
+    assert_eq!(status["pending"], false);
+    assert_eq!(status["backup_codes_remaining"], 0);
+}
+
+#[tokio::test]
+async fn operator_without_twofa_blocked_from_privileged_routes() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let cookie = signup_and_login_user(&hub, &client, "op@example.test", "hunter22!").await;
+    let me: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me["id"].as_str().unwrap().to_string();
+    let now = i64::try_from(towonel_common::time::now_ms()).unwrap();
+    hub.state
+        .db
+        .set_user_role(&user_id, "operator", now)
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(hub.url("/v1/edges"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "twofa_setup_required");
+
+    // The enrollment surface must stay reachable so the UI has a way out.
+    let r2 = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), 200);
+
+    let r3 = client
+        .post(hub.url("/v1/auth/2fa/setup"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r3.status(), 200);
+
+    let code = current_totp(&hub.state, &user_id).await;
+    let r4 = client
+        .post(hub.url("/v1/auth/2fa/confirm"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"code": code}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r4.status(), 200);
+
+    let r5 = client
+        .get(hub.url("/v1/edges"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r5.status(), 200);
 }
