@@ -216,11 +216,10 @@ impl From<InviteRow> for InviteSummary {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub(super) struct ListInvitesQuery {
-    /// `mine` (default) returns only invites the caller owns. `all` is the
-    /// operator-wide view used by the admin console; non-operators silently
-    /// fall back to `mine` so navigating to an admin URL can't leak rows.
+    /// `all` is honored only for operator principals; everyone else gets the
+    /// ownership-scoped list regardless of what they pass.
     #[serde(default)]
     scope: Option<String>,
 }

@@ -287,6 +287,77 @@ async fn list_invites_requires_operator_auth() {
     assert_eq!(status, 401);
 }
 
+#[tokio::test]
+async fn list_invites_scope_for_operator_role_user() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let user_cookie =
+        signup_and_login_user(&hub, &client, "regular@example.test", "hunter22!").await;
+    let admin_cookie =
+        signup_and_login_user(&hub, &client, "admin@example.test", "hunter22!").await;
+    let admin_id = user_id_by_email(&hub, "admin@example.test").await;
+
+    for (cookie, host) in [
+        (&user_cookie, "u.regular.test"),
+        (&admin_cookie, "u.admin.test"),
+    ] {
+        let resp = client
+            .post(hub.url("/v1/invites"))
+            .header(reqwest::header::COOKIE, cookie.as_str())
+            .json(&json!({
+                "name": host,
+                "hostnames": [host],
+                "expires_in_secs": 3600,
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    hub.state
+        .db
+        .set_user_role(&admin_id, "operator", 1)
+        .await
+        .expect("set_user_role");
+
+    let mine_resp = client
+        .get(hub.url("/v1/invites"))
+        .header(reqwest::header::COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mine_resp.status(), 200);
+    let mine: Value = mine_resp.json().await.unwrap();
+    let mine_invites = mine["invites"].as_array().unwrap();
+    assert_eq!(mine_invites.len(), 1);
+    assert_eq!(mine_invites[0]["hostnames"][0], "u.admin.test");
+
+    let all_resp = client
+        .get(hub.url("/v1/invites?scope=all"))
+        .header(reqwest::header::COOKIE, &admin_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(all_resp.status(), 200);
+    let all: Value = all_resp.json().await.unwrap();
+    assert_eq!(all["invites"].as_array().unwrap().len(), 2);
+
+    // scope=all from a non-operator must be silently ignored.
+    let leaked_resp = client
+        .get(hub.url("/v1/invites?scope=all"))
+        .header(reqwest::header::COOKIE, &user_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(leaked_resp.status(), 200);
+    let leaked: Value = leaked_resp.json().await.unwrap();
+    let leaked_invites = leaked["invites"].as_array().unwrap();
+    assert_eq!(leaked_invites.len(), 1);
+    assert_eq!(leaked_invites[0]["hostnames"][0], "u.regular.test");
+}
+
 // DELETE /v1/invites/{id} (revoke)
 
 #[tokio::test]
