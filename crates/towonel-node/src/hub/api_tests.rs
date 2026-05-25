@@ -2034,3 +2034,335 @@ async fn unlink_blocks_self_lockout_when_no_password_and_no_other_identity() {
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["code"], "would_lock_out");
 }
+
+async fn user_id_by_email(hub: &TestHub, email: &str) -> String {
+    hub.state
+        .db
+        .find_user_by_email(email)
+        .await
+        .expect("find_user_by_email")
+        .expect("user exists after signup")
+        .id
+}
+
+#[tokio::test]
+async fn non_owner_user_gets_403_on_port_reserve() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let cookie = signup_and_login_user(&hub, &client, "noone@example.test", "hunter22!").await;
+
+    let token = create_invite(&hub, &client, "tenant-a", &["a.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let resp = client
+        .post(hub.url(&format!("/v1/tenants/{}/ports", tenant.id())))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"protocol": "tcp", "preferred": 22100}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden");
+}
+
+#[tokio::test]
+async fn owner_user_can_reserve_port() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let cookie = signup_and_login_user(&hub, &client, "owner@example.test", "hunter22!").await;
+    let user_id = user_id_by_email(&hub, "owner@example.test").await;
+
+    let token = create_invite(&hub, &client, "tenant-owner", &["a.owner.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    hub.state
+        .db
+        .insert_tenant_ownership(super::db::tenant_ownership::NewTenantOwnership {
+            user_id: &user_id,
+            tenant_id: tenant.id().as_bytes(),
+            invite_id: &[0u8; 16],
+            display_name: "test",
+            now_ms: 1,
+        })
+        .await
+        .expect("insert_tenant_ownership");
+
+    let resp = client
+        .post(hub.url(&format!("/v1/tenants/{}/ports", tenant.id())))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"protocol": "tcp", "preferred": 22200}))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(status, 201, "expected 201, got {status}: {body}");
+    assert_eq!(body["port"], 22200);
+}
+
+#[tokio::test]
+async fn user_port_quota_enforced() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    hub.state
+        .db
+        .set_setting_int(super::db::app_settings::USER_PORT_QUOTA_KEY, 2, 1)
+        .await
+        .unwrap();
+
+    let cookie = signup_and_login_user(&hub, &client, "quota@example.test", "hunter22!").await;
+    let user_id = user_id_by_email(&hub, "quota@example.test").await;
+
+    let token = create_invite(&hub, &client, "tenant-quota", &["a.quota.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    hub.state
+        .db
+        .insert_tenant_ownership(super::db::tenant_ownership::NewTenantOwnership {
+            user_id: &user_id,
+            tenant_id: tenant.id().as_bytes(),
+            invite_id: &[1u8; 16],
+            display_name: "test",
+            now_ms: 1,
+        })
+        .await
+        .unwrap();
+
+    for port in [22300u16, 22301] {
+        let resp = client
+            .post(hub.url(&format!("/v1/tenants/{}/ports", tenant.id())))
+            .header(reqwest::header::COOKIE, &cookie)
+            .json(&json!({"protocol": "tcp", "preferred": port}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 201, "port {port} should succeed");
+    }
+
+    let resp = client
+        .post(hub.url(&format!("/v1/tenants/{}/ports", tenant.id())))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&json!({"protocol": "tcp", "preferred": 22302}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "port_quota_exceeded");
+}
+
+#[tokio::test]
+async fn operator_bearer_bypasses_quota() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    hub.state
+        .db
+        .set_setting_int(super::db::app_settings::USER_PORT_QUOTA_KEY, 0, 1)
+        .await
+        .unwrap();
+
+    let token = create_invite(&hub, &client, "op-tenant", &["a.op.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "tcp", "preferred": 22400}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "operator should bypass quota: {body}");
+}
+
+#[tokio::test]
+async fn available_ports_skips_reserved() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "avail-tenant", &["a.avail.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let _ = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "tcp", "preferred": 10_000}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+
+    let (status, body) = get_json(
+        &client,
+        &hub.url("/v1/ports/available?protocol=tcp&count=5"),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let ports: Vec<u16> = body["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| u16::try_from(v.as_u64().unwrap()).unwrap())
+        .collect();
+    assert_eq!(ports.len(), 5);
+    assert!(
+        !ports.contains(&10_000),
+        "reserved port leaked into available list"
+    );
+    assert!(ports.iter().all(|p| (10_000..=32_767).contains(p)));
+}
+
+#[tokio::test]
+async fn operator_can_read_and_update_quota_setting() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = get_json(
+        &client,
+        &hub.url("/v1/settings/user-port-quota"),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["value"], 10);
+
+    let resp = client
+        .put(hub.url("/v1/settings/user-port-quota"))
+        .bearer_auth(OPERATOR_KEY)
+        .json(&json!({"value": 25}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["value"], 25);
+
+    let (_status, body) = get_json(
+        &client,
+        &hub.url("/v1/settings/user-port-quota"),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(body["value"], 25);
+}
+
+#[tokio::test]
+async fn non_owner_user_gets_403_on_list_ports() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let cookie = signup_and_login_user(&hub, &client, "lister@example.test", "hunter22!").await;
+
+    let token = create_invite(&hub, &client, "tenant-list", &["a.list.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let resp = client
+        .get(hub.url(&format!("/v1/tenants/{}/ports", tenant.id())))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden");
+}
+
+#[tokio::test]
+async fn non_owner_user_gets_403_on_delete_port() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let cookie = signup_and_login_user(&hub, &client, "deleter@example.test", "hunter22!").await;
+
+    let token = create_invite(&hub, &client, "tenant-del", &["a.del.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let resp = client
+        .delete(hub.url(&format!("/v1/tenants/{}/ports/tcp/22500", tenant.id())))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "forbidden");
+}
+
+#[tokio::test]
+async fn concurrent_reserves_respect_quota() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    hub.state
+        .db
+        .set_setting_int(super::db::app_settings::USER_PORT_QUOTA_KEY, 3, 1)
+        .await
+        .unwrap();
+
+    let cookie = signup_and_login_user(&hub, &client, "race@example.test", "hunter22!").await;
+    let user_id = user_id_by_email(&hub, "race@example.test").await;
+
+    let token = create_invite(&hub, &client, "tenant-race", &["a.race.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    hub.state
+        .db
+        .insert_tenant_ownership(super::db::tenant_ownership::NewTenantOwnership {
+            user_id: &user_id,
+            tenant_id: tenant.id().as_bytes(),
+            invite_id: &[3u8; 16],
+            display_name: "test",
+            now_ms: 1,
+        })
+        .await
+        .unwrap();
+
+    // Mix of tcp and udp to cover the cross-protocol race the locks now guard against.
+    let url = hub.url(&format!("/v1/tenants/{}/ports", tenant.id()));
+    let mut handles = Vec::new();
+    for (i, proto) in ["tcp", "tcp", "tcp", "udp", "udp", "udp", "tcp", "udp"]
+        .iter()
+        .enumerate()
+    {
+        let client = client.clone();
+        let url = url.clone();
+        let cookie = cookie.clone();
+        let proto = (*proto).to_string();
+        let port = 22_600u16 + u16::try_from(i).unwrap();
+        handles.push(tokio::spawn(async move {
+            client
+                .post(&url)
+                .header(reqwest::header::COOKIE, &cookie)
+                .json(&json!({"protocol": proto, "preferred": port}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }));
+    }
+    let mut created = 0;
+    let mut quota_exceeded = 0;
+    let mut other = 0;
+    for h in handles {
+        match h.await.unwrap() {
+            201 => created += 1,
+            403 => quota_exceeded += 1,
+            _ => other += 1,
+        }
+    }
+    assert_eq!(created, 3, "exactly quota=3 should succeed");
+    assert_eq!(quota_exceeded, 5, "the remaining 5 should be quota-blocked");
+    assert_eq!(other, 0);
+
+    let count = hub
+        .state
+        .db
+        .count_port_reservations_for_user(&user_id)
+        .await
+        .unwrap();
+    assert_eq!(count, 3, "DB count must match the quota — no slip-through");
+}

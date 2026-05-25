@@ -1,4 +1,5 @@
 mod agent_refresh;
+mod app_settings;
 mod auth;
 mod bootstrap;
 mod entries;
@@ -366,6 +367,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         .propagate_x_request_id()
         .into_inner();
 
+    let tenant_member = tenant_member_routes();
     Router::new()
         .merge(rate_limited_public)
         .merge(signed_public)
@@ -373,6 +375,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         .merge(operator_routes)
         .merge(invites_routes)
         .merge(web_admin)
+        .merge(tenant_member)
         .layer(middleware::from_fn_with_state(
             state.clone(),
             record_request_metric,
@@ -385,6 +388,20 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
 fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tenants/{id}", delete(entries::delete_tenant))
+        .route("/v1/ports", get(ports::list_all_ports))
+        .route("/v1/edges", get(entries::list_edges))
+        .route(
+            "/v1/settings/user-port-quota",
+            get(app_settings::get_user_port_quota).put(app_settings::put_user_port_quota),
+        )
+        .layer(middleware::from_extractor_with_state::<
+            OperatorPrincipal,
+            Arc<AppState>,
+        >(state.clone()))
+}
+
+fn tenant_member_routes() -> Router<Arc<AppState>> {
+    Router::new()
         .route(
             "/v1/tenants/{id}/ports",
             post(ports::post_port).get(ports::list_ports),
@@ -393,12 +410,7 @@ fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
             "/v1/tenants/{id}/ports/{proto}/{port}",
             delete(ports::delete_port),
         )
-        .route("/v1/ports", get(ports::list_all_ports))
-        .route("/v1/edges", get(entries::list_edges))
-        .layer(middleware::from_extractor_with_state::<
-            OperatorPrincipal,
-            Arc<AppState>,
-        >(state.clone()))
+        .route("/v1/ports/available", get(ports::get_available_ports))
 }
 
 fn invites_routes() -> Router<Arc<AppState>> {

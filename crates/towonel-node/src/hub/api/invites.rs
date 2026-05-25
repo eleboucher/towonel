@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -216,9 +216,19 @@ impl From<InviteRow> for InviteSummary {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct ListInvitesQuery {
+    /// `mine` (default) returns only invites the caller owns. `all` is the
+    /// operator-wide view used by the admin console; non-operators silently
+    /// fall back to `mine` so navigating to an admin URL can't leak rows.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
 pub(super) async fn list_invites(
     State(state): State<Arc<AppState>>,
     principal: Principal,
+    Query(query): Query<ListInvitesQuery>,
 ) -> Response {
     let rows = match state.db.list_invites().await {
         Ok(r) => r,
@@ -228,10 +238,11 @@ pub(super) async fn list_invites(
         }
     };
 
-    let filtered: Vec<InviteRow> = match &principal {
-        Principal::OperatorKey => rows,
-        Principal::User(u) if u.role == "operator" => rows,
-        Principal::User(u) => {
+    let want_all = matches!(query.scope.as_deref(), Some("all")) && principal.is_operator();
+
+    let filtered: Vec<InviteRow> = match (&principal, want_all) {
+        (_, true) | (Principal::OperatorKey, _) => rows,
+        (Principal::User(u), false) => {
             let owned = match state.db.list_invite_ids_for_user(&u.id).await {
                 Ok(ids) => ids,
                 Err(e) => {

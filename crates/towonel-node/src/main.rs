@@ -67,7 +67,7 @@ enum Command {
         #[command(subcommand)]
         action: UserAction,
     },
-    /// Operator-only: mint signup invite codes for the web frontend.
+    /// Operator-only: create signup invite codes for the web frontend.
     SignupInvite {
         #[command(subcommand)]
         action: SignupInviteAction,
@@ -237,7 +237,7 @@ enum PortAction {
 
 #[derive(Subcommand)]
 enum SignupInviteAction {
-    /// Mint a new signup code and print it to stdout.
+    /// Create a new signup code and print it to stdout.
     Create {
         /// Role granted on redemption: `user` or `operator`.
         #[arg(long, default_value = "user")]

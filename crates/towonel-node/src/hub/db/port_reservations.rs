@@ -1,4 +1,7 @@
-use sea_orm::{ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
+    QueryOrder, Statement,
+};
 use towonel_common::identity::TenantId;
 
 use super::entities::port_reservations;
@@ -104,6 +107,27 @@ impl Db {
         }
         let rows = query.all(&self.conn).await?;
         rows.into_iter().map(model_to_row).collect()
+    }
+
+    /// Sum across every tenant the user owns — quota is global, not per-tenant.
+    pub async fn count_port_reservations_for_user(&self, user_id: &str) -> anyhow::Result<i64> {
+        let backend = self.conn.get_database_backend();
+        let stmt = Statement::from_sql_and_values(
+            backend,
+            r"
+            SELECT COUNT(*) AS n
+              FROM port_reservations pr
+              JOIN tenant_ownership t ON t.tenant_id = pr.tenant_id
+             WHERE t.user_id = $1
+            ",
+            [user_id.into()],
+        );
+        let row = self
+            .conn
+            .query_one(stmt)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("COUNT(*) returned no row"))?;
+        Ok(row.try_get::<i64>("", "n")?)
     }
 
     pub async fn tenant_owns_shared_port(
@@ -235,6 +259,96 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(db.list_port_reservations(Some(&t)).await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn count_for_user_sums_across_their_tenants() {
+        use crate::hub::db::tenant_ownership::NewTenantOwnership;
+        use crate::hub::db::users::NewUser;
+        let db = temp_db().await;
+        // tenant_ownership has FK → users.id.
+        for (id, email) in [("alice", "alice@x.test"), ("bob", "bob@x.test")] {
+            db.insert_user(NewUser {
+                id,
+                email,
+                password_hash: "x",
+                role: "user",
+                email_verified_at_ms: Some(1),
+                now_ms: 1,
+            })
+            .await
+            .unwrap();
+        }
+        let t1 = tenant();
+        let t2 = tenant();
+        let t_other = tenant();
+        db.insert_tenant_ownership(NewTenantOwnership {
+            user_id: "alice",
+            tenant_id: t1.as_bytes(),
+            invite_id: &[0u8; 16],
+            display_name: "t1",
+            now_ms: 1,
+        })
+        .await
+        .unwrap();
+        db.insert_tenant_ownership(NewTenantOwnership {
+            user_id: "alice",
+            tenant_id: t2.as_bytes(),
+            invite_id: &[1u8; 16],
+            display_name: "t2",
+            now_ms: 1,
+        })
+        .await
+        .unwrap();
+        db.insert_tenant_ownership(NewTenantOwnership {
+            user_id: "bob",
+            tenant_id: t_other.as_bytes(),
+            invite_id: &[2u8; 16],
+            display_name: "t_other",
+            now_ms: 1,
+        })
+        .await
+        .unwrap();
+        // Two reservations on alice's tenants, one on bob's.
+        db.insert_port_reservation(&NewPortReservation {
+            tenant_id: t1,
+            ip_address: None,
+            port: 30_000,
+            protocol: PortProtocol::Tcp,
+            label: None,
+            claimed_at_ms: 1,
+        })
+        .await
+        .unwrap();
+        db.insert_port_reservation(&NewPortReservation {
+            tenant_id: t2,
+            ip_address: None,
+            port: 30_001,
+            protocol: PortProtocol::Tcp,
+            label: None,
+            claimed_at_ms: 1,
+        })
+        .await
+        .unwrap();
+        db.insert_port_reservation(&NewPortReservation {
+            tenant_id: t_other,
+            ip_address: None,
+            port: 30_002,
+            protocol: PortProtocol::Tcp,
+            label: None,
+            claimed_at_ms: 1,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            db.count_port_reservations_for_user("alice").await.unwrap(),
+            2
+        );
+        assert_eq!(db.count_port_reservations_for_user("bob").await.unwrap(), 1);
+        assert_eq!(
+            db.count_port_reservations_for_user("nobody").await.unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

@@ -50,6 +50,19 @@ impl Db {
         Ok(row.map(into_row))
     }
 
+    pub async fn find_tenant_ownership(
+        &self,
+        user_id: &str,
+        tenant_id: &[u8],
+    ) -> anyhow::Result<Option<TenantOwnershipRow>> {
+        let row = tenant_ownership::Entity::find()
+            .filter(tenant_ownership::Column::UserId.eq(user_id))
+            .filter(tenant_ownership::Column::TenantId.eq(tenant_id.to_vec()))
+            .one(&self.conn)
+            .await?;
+        Ok(row.map(into_row))
+    }
+
     pub async fn list_invite_ids_for_user(&self, user_id: &str) -> anyhow::Result<Vec<Vec<u8>>> {
         let rows = tenant_ownership::Entity::find()
             .filter(tenant_ownership::Column::UserId.eq(user_id))

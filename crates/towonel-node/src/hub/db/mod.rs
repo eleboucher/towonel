@@ -4,6 +4,7 @@
 )]
 
 pub mod admin_actions;
+pub mod app_settings;
 pub mod auth_tokens;
 pub(super) mod entities;
 mod invites;

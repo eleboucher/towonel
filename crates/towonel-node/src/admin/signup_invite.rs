@@ -1,4 +1,4 @@
-//! Direct DB write to mint signup codes from the CLI, so operators can hand
+//! Direct DB write to create signup codes from the CLI, so operators can hand
 //! out invite links without needing the web frontend to be reachable.
 
 use anyhow::{Context, anyhow};
@@ -24,7 +24,7 @@ pub async fn cmd_signup_invite_create(
         .await
         .with_context(|| format!("failed to open DB at {url}"))?;
 
-    let code = mint_code();
+    let code = generate_code();
     let now_ms = i64::try_from(towonel_common::time::now_ms()).unwrap_or(i64::MAX);
     let expires_at_ms =
         expires_in_days.map(|d| now_ms.saturating_add(i64::from(d) * 24 * 60 * 60 * 1000));
@@ -63,7 +63,7 @@ fn load_database_from_env() -> DatabaseConfig {
     }
 }
 
-fn mint_code() -> String {
+fn generate_code() -> String {
     let mut buf = [0u8; 18];
     getrandom::fill(&mut buf).expect("OS RNG");
     B64.encode(buf)

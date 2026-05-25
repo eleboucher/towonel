@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
@@ -9,11 +9,14 @@ use towonel_common::identity::TenantId;
 use towonel_common::time::now_ms;
 use tracing::warn;
 
+use crate::hub::auth::middleware::Principal;
+use crate::hub::db::app_settings::{DEFAULT_USER_PORT_QUOTA, USER_PORT_QUOTA_KEY};
 use crate::hub::db::port_reservations::{NewPortReservation, PortProtocol, PortReservationRow};
 use crate::hub::edge_link::PortReservationDelta;
 
 use super::{
-    AppState, conflict, internal_error, invalid_request, json_ok, json_with_status, not_found,
+    AppState, conflict, error_response, internal_error, invalid_request, json_ok, json_with_status,
+    not_found,
 };
 
 const MIN_RESERVABLE_PORT: u16 = 1024;
@@ -93,12 +96,18 @@ impl From<PortReservationRow> for PortRowWithTenant {
 
 pub(super) async fn post_port(
     State(state): State<Arc<AppState>>,
+    principal: Principal,
     Path(id): Path<String>,
     axum::Json(req): axum::Json<ReservePortRequest>,
 ) -> Response {
     let tenant_id: TenantId = match id.parse() {
         Ok(t) => t,
         Err(e) => return invalid_request(format!("invalid tenant_id: {e}")),
+    };
+
+    let owner_user_id = match authorize_tenant(&state, &principal, &tenant_id).await {
+        Ok(uid) => uid,
+        Err(resp) => return resp,
     };
 
     let Some(protocol) = PortProtocol::parse(&req.protocol) else {
@@ -118,12 +127,25 @@ pub(super) async fn post_port(
         return invalid_request(msg);
     }
 
-    // Serializes the check-then-insert window so a concurrent auto-pick
-    // can't land on the same port.
-    let _guard = match protocol {
-        PortProtocol::Tcp => state.tcp_port_lock.lock().await,
-        PortProtocol::Udp => state.udp_port_lock.lock().await,
+    // Users hold both locks (tcp→udp) so concurrent TCP+UDP can't both pass
+    // the quota check. Operators bypass the quota and only need one lock.
+    let (_tcp_guard, _udp_guard) = if owner_user_id.is_some() {
+        (
+            Some(state.tcp_port_lock.lock().await),
+            Some(state.udp_port_lock.lock().await),
+        )
+    } else {
+        match protocol {
+            PortProtocol::Tcp => (Some(state.tcp_port_lock.lock().await), None),
+            PortProtocol::Udp => (None, Some(state.udp_port_lock.lock().await)),
+        }
     };
+
+    if let Some(user_id) = owner_user_id.as_deref()
+        && let Err(resp) = enforce_user_port_quota(&state, user_id).await
+    {
+        return resp;
+    }
 
     let port = match req.preferred {
         Some(p) => p,
@@ -197,12 +219,16 @@ fn broadcast_delta(
 
 pub(super) async fn list_ports(
     State(state): State<Arc<AppState>>,
+    principal: Principal,
     Path(id): Path<String>,
 ) -> Response {
     let tenant_id: TenantId = match id.parse() {
         Ok(t) => t,
         Err(e) => return invalid_request(format!("invalid tenant_id: {e}")),
     };
+    if let Err(resp) = authorize_tenant(&state, &principal, &tenant_id).await {
+        return resp;
+    }
     match state.db.list_port_reservations(Some(&tenant_id)).await {
         Ok(rows) => json_ok(serde_json::json!({
             "ports": rows.into_iter().map(PortRow::from).collect::<Vec<_>>(),
@@ -228,12 +254,16 @@ pub(super) async fn list_all_ports(State(state): State<Arc<AppState>>) -> Respon
 
 pub(super) async fn delete_port(
     State(state): State<Arc<AppState>>,
+    principal: Principal,
     Path((id, proto_str, port)): Path<(String, String, u16)>,
 ) -> Response {
     let tenant_id: TenantId = match id.parse() {
         Ok(t) => t,
         Err(e) => return invalid_request(format!("invalid tenant_id: {e}")),
     };
+    if let Err(resp) = authorize_tenant(&state, &principal, &tenant_id).await {
+        return resp;
+    }
     let Some(protocol) = PortProtocol::parse(&proto_str) else {
         return invalid_request("protocol must be \"tcp\" or \"udp\"");
     };
@@ -262,6 +292,118 @@ pub(super) async fn delete_port(
             internal_error()
         }
     }
+}
+
+/// `Ok(None)` for operator principals (skip the quota check at the call site).
+/// `Ok(Some(user_id))` for users who own the tenant. 403 otherwise.
+async fn authorize_tenant(
+    state: &Arc<AppState>,
+    principal: &Principal,
+    tenant_id: &TenantId,
+) -> Result<Option<String>, Response> {
+    if principal.is_operator() {
+        return Ok(None);
+    }
+    let Principal::User(user) = principal else {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "not authorized for this tenant",
+        ));
+    };
+    match state
+        .db
+        .find_tenant_ownership(&user.id, tenant_id.as_bytes())
+        .await
+    {
+        Ok(Some(_)) => Ok(Some(user.id.clone())),
+        Ok(None) => Err(error_response(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "not authorized for this tenant",
+        )),
+        Err(e) => {
+            warn!(error = %e, "find_tenant_ownership failed");
+            Err(internal_error())
+        }
+    }
+}
+
+async fn enforce_user_port_quota(state: &Arc<AppState>, user_id: &str) -> Result<(), Response> {
+    let quota = match state.db.get_setting_int(USER_PORT_QUOTA_KEY).await {
+        Ok(Some(v)) => v,
+        Ok(None) => DEFAULT_USER_PORT_QUOTA,
+        Err(e) => {
+            warn!(error = %e, "get_setting_int user_port_quota failed");
+            return Err(internal_error());
+        }
+    };
+    let used = match state.db.count_port_reservations_for_user(user_id).await {
+        Ok(n) => n,
+        Err(e) => {
+            warn!(error = %e, "count_port_reservations_for_user failed");
+            return Err(internal_error());
+        }
+    };
+    if used >= quota {
+        return Err(error_response(
+            StatusCode::FORBIDDEN,
+            "port_quota_exceeded",
+            format!("user already holds {used} of {quota} allowed port reservations"),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AvailablePortsQuery {
+    protocol: String,
+    #[serde(default)]
+    count: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+struct AvailablePortsResponse {
+    protocol: String,
+    range_start: u16,
+    range_end: u16,
+    ports: Vec<u16>,
+}
+
+pub(super) async fn get_available_ports(
+    State(state): State<Arc<AppState>>,
+    _principal: Principal,
+    Query(q): Query<AvailablePortsQuery>,
+) -> Response {
+    let Some(protocol) = PortProtocol::parse(&q.protocol) else {
+        return invalid_request("protocol must be \"tcp\" or \"udp\"");
+    };
+    let count = q.count.unwrap_or(20).clamp(1, 200);
+
+    let existing = match state.db.list_port_reservations(None).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!(error = %e, "list_port_reservations failed in get_available_ports");
+            return internal_error();
+        }
+    };
+    let used: std::collections::HashSet<u16> = existing
+        .into_iter()
+        .filter(|r| r.protocol == protocol && r.ip_address.is_none())
+        .map(|r| r.port)
+        .collect();
+
+    let ports: Vec<u16> = (AUTO_PICK_START..=AUTO_PICK_END)
+        .filter(|p| !used.contains(p) && !HUB_RESERVED_PORTS.contains(p))
+        .take(count as usize)
+        .collect();
+
+    json_ok(AvailablePortsResponse {
+        protocol: protocol.as_str().to_string(),
+        range_start: AUTO_PICK_START,
+        range_end: AUTO_PICK_END,
+        ports,
+    })
 }
 
 fn validate_port_allowed(port: u16) -> Result<(), String> {

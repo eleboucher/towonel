@@ -18,7 +18,7 @@ const ID_BYTES: usize = 16;
 const ROLES: &[&str] = &["user", "operator"];
 
 #[derive(Debug, Deserialize)]
-pub(super) struct MintRequest {
+pub(super) struct CreateSignupInviteRequest {
     #[serde(default = "default_role")]
     role: String,
     #[serde(default)]
@@ -32,7 +32,7 @@ fn default_role() -> String {
 }
 
 #[derive(Debug, Serialize)]
-struct MintResponse {
+struct CreateSignupInviteResponse {
     code: String,
     role: String,
     expires_at_ms: Option<i64>,
@@ -51,7 +51,7 @@ struct SignupInviteEntry {
 pub(super) async fn post_signup_invite(
     State(state): State<Arc<AppState>>,
     OperatorPrincipal(actor): OperatorPrincipal,
-    axum::Json(body): axum::Json<MintRequest>,
+    axum::Json(body): axum::Json<CreateSignupInviteRequest>,
 ) -> Response {
     if !ROLES.contains(&body.role.as_str()) {
         return invalid_request("role must be 'user' or 'operator'");
@@ -123,7 +123,7 @@ pub(super) async fn post_signup_invite(
         warn!(error = %e, "insert_admin_action failed");
     }
 
-    json_ok(MintResponse {
+    json_ok(CreateSignupInviteResponse {
         code,
         role: body.role,
         expires_at_ms,
