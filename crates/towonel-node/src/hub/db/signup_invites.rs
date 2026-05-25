@@ -8,6 +8,11 @@ use super::Db;
 pub struct ClaimedInvite {
     pub code: String,
     pub role: String,
+    /// Returned so the signup handlers can refuse claims where the
+    /// supplied email (password) or IdP-asserted email (OIDC) does not
+    /// match what the invite was issued for. Without this binding, an
+    /// invite-code holder can squat any email they like.
+    pub recipient_email: Option<String>,
 }
 
 impl Db {
@@ -30,7 +35,7 @@ impl Db {
              WHERE code = $2
                AND redeemed_at_ms IS NULL
                AND (expires_at_ms IS NULL OR expires_at_ms > $1)
-            RETURNING code, role
+            RETURNING code, role, recipient_email
             ",
             [now_ms.into(), code.into()],
         );
@@ -39,6 +44,7 @@ impl Db {
         Ok(Some(ClaimedInvite {
             code: row.try_get::<String>("", "code")?,
             role: row.try_get::<String>("", "role")?,
+            recipient_email: row.try_get::<Option<String>>("", "recipient_email")?,
         }))
     }
 
@@ -99,7 +105,7 @@ impl Db {
             expires_at_ms: ActiveValue::Set(expires_at_ms),
             redeemed_by_user_id: ActiveValue::Set(None),
             redeemed_at_ms: ActiveValue::Set(None),
-            recipient_email: ActiveValue::Set(recipient_email.map(str::to_string)),
+            recipient_email: ActiveValue::Set(recipient_email.map(super::users::normalize_email)),
         };
         signup_invites::Entity::insert(model)
             .exec(&self.conn)

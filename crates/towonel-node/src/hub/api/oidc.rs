@@ -1,18 +1,10 @@
-//! `OpenID` Connect login.
-//!
-//! Flow:
-//! 1. `GET /v1/auth/oidc/{provider}/start?signup_code=&next=` — generate
-//!    PKCE + nonce, stash in [`PendingOidcFlow`], 302 to the provider.
-//! 2. Provider redirects back to `/v1/auth/oidc/{provider}/callback?code=&state=`.
-//! 3. Look up the pending flow by state, exchange code, verify the
-//!    `id_token`, and either mint a session for the linked user, or claim
-//!    the attached `signup_code` and create a new linked account.
+//! `OpenID` Connect login, signup-via-invite, and identity linking.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
@@ -24,35 +16,36 @@ use tracing::warn;
 use zeroize::Zeroizing;
 
 use crate::config::OidcProviderConfig;
+use crate::hub::auth::middleware::Principal;
 use crate::hub::auth::session;
 use crate::hub::db::admin_actions::NewAdminAction;
 use crate::hub::db::user_oauth_identities::NewOauthIdentity;
 use crate::hub::db::users::NewUser;
 
 use super::signup_invites::{now_ms_i64, random_code};
-use super::{AppState, json_with_status};
+use super::{AppState, json_ok, json_with_status};
 
 const FLOW_TTL: Duration = Duration::from_mins(10);
 const SESSION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 pub type OidcHttpClient = openidconnect::reqwest::Client;
 
+type ConfiguredCoreClient = CoreClient<
+    openidconnect::EndpointSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointNotSet,
+    openidconnect::EndpointMaybeSet,
+    openidconnect::EndpointMaybeSet,
+>;
+
 #[derive(Clone)]
 pub struct OidcProviderRuntime {
     pub display_name: &'static str,
-    pub client: Arc<
-        CoreClient<
-            openidconnect::EndpointSet,
-            openidconnect::EndpointNotSet,
-            openidconnect::EndpointNotSet,
-            openidconnect::EndpointNotSet,
-            openidconnect::EndpointMaybeSet,
-            openidconnect::EndpointMaybeSet,
-        >,
-    >,
+    /// Swapped by the JWKS refresher on `IdP` key rotation.
+    pub client: Arc<arc_swap::ArcSwap<ConfiguredCoreClient>>,
     pub http: Arc<OidcHttpClient>,
     pub scopes: Vec<String>,
-    /// Pending flows, keyed by the CSRF state nonce we sent to the provider.
     pub pending: moka::future::Cache<String, PendingOidcFlow>,
 }
 
@@ -60,8 +53,14 @@ pub struct OidcProviderRuntime {
 pub struct PendingOidcFlow {
     pub pkce_verifier_secret: Zeroizing<String>,
     pub nonce: String,
-    pub signup_code: Option<String>,
     pub next: String,
+    pub kind: OidcFlowKind,
+}
+
+#[derive(Clone)]
+pub enum OidcFlowKind {
+    LoginOrSignup { signup_code: Option<String> },
+    Link { user_id: String },
 }
 
 #[derive(Default, Clone)]
@@ -86,50 +85,157 @@ impl OidcRuntimes {
     }
 }
 
-/// Discovery failure is fatal so a deploy with wrong issuer/client-id
-/// surfaces at startup, not on the first user's callback.
-pub async fn build_runtimes(cfg: &crate::config::OidcConfig) -> anyhow::Result<OidcRuntimes> {
+pub async fn build_runtimes(
+    cfg: &crate::config::OidcConfig,
+    metrics: &super::super::metrics::HubMetrics,
+) -> anyhow::Result<OidcRuntimes> {
     Ok(OidcRuntimes {
         codeberg: match cfg.codeberg.as_ref() {
-            Some(c) => Some(build_provider("Codeberg", c).await?),
+            Some(c) => Some(build_provider("codeberg", "Codeberg", c, metrics).await?),
             None => None,
         },
     })
 }
 
+const JWKS_REFRESH_INTERVAL: Duration = Duration::from_hours(12);
+
 async fn build_provider(
+    provider_id: &'static str,
     display_name: &'static str,
     cfg: &OidcProviderConfig,
+    metrics: &super::super::metrics::HubMetrics,
 ) -> anyhow::Result<OidcProviderRuntime> {
-    let http = openidconnect::reqwest::ClientBuilder::new()
-        .redirect(openidconnect::reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|e| anyhow::anyhow!("oidc http client build failed: {e}"))?;
+    let http = Arc::new(
+        openidconnect::reqwest::ClientBuilder::new()
+            .redirect(openidconnect::reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| anyhow::anyhow!("oidc http client build failed: {e}"))?,
+    );
     let issuer = IssuerUrl::new(cfg.issuer.clone())
         .map_err(|e| anyhow::anyhow!("invalid OIDC issuer {}: {e}", cfg.issuer))?;
-    let metadata = CoreProviderMetadata::discover_async(issuer, &http)
+    let redirect_uri = RedirectUrl::new(cfg.redirect_uri.clone())
+        .map_err(|e| anyhow::anyhow!("invalid redirect_uri {}: {e}", cfg.redirect_uri))?;
+    let metadata = CoreProviderMetadata::discover_async(issuer.clone(), &*http)
         .await
         .map_err(|e| anyhow::anyhow!("OIDC discovery for {display_name} failed: {e}"))?;
-    let client = CoreClient::from_provider_metadata(
-        metadata,
-        ClientId::new(cfg.client_id.clone()),
-        Some(ClientSecret::new(cfg.client_secret.to_string())),
-    )
-    .set_redirect_uri(
-        RedirectUrl::new(cfg.redirect_uri.clone())
-            .map_err(|e| anyhow::anyhow!("invalid redirect_uri {}: {e}", cfg.redirect_uri))?,
+    let parts = ClientParts {
+        client_id: cfg.client_id.clone(),
+        client_secret: cfg.client_secret.clone(),
+        redirect_uri,
+    };
+    let client = build_client(metadata, &parts);
+    let client_swap = Arc::new(arc_swap::ArcSwap::from_pointee(client));
+
+    // Seed the freshness gauge from startup so alerts don't false-fire
+    // for the first refresh interval after a restart.
+    metrics
+        .oidc_jwks_last_refresh_success_timestamp_seconds
+        .with_label_values(&[provider_id])
+        .set(i64::try_from(towonel_common::time::now_ms() / 1000).unwrap_or(i64::MAX));
+
+    spawn_jwks_refresher(
+        provider_id,
+        display_name,
+        issuer,
+        Arc::clone(&http),
+        parts,
+        Arc::clone(&client_swap),
+        metrics.clone(),
     );
+
     let pending = moka::future::Cache::builder()
-        .max_capacity(10_000)
+        .max_capacity(1_000_000)
         .time_to_live(FLOW_TTL)
         .build();
     Ok(OidcProviderRuntime {
         display_name,
-        client: Arc::new(client),
-        http: Arc::new(http),
+        client: client_swap,
+        http,
         scopes: vec!["openid".into(), "email".into(), "profile".into()],
         pending,
     })
+}
+
+#[derive(Clone)]
+struct ClientParts {
+    client_id: String,
+    client_secret: zeroize::Zeroizing<String>,
+    redirect_uri: RedirectUrl,
+}
+
+fn build_client(metadata: CoreProviderMetadata, parts: &ClientParts) -> ConfiguredCoreClient {
+    CoreClient::from_provider_metadata(
+        metadata,
+        ClientId::new(parts.client_id.clone()),
+        Some(ClientSecret::new(parts.client_secret.to_string())),
+    )
+    .set_redirect_uri(parts.redirect_uri.clone())
+}
+
+async fn refresh_provider_metadata(
+    provider_id: &'static str,
+    display_name: &'static str,
+    issuer: &IssuerUrl,
+    http: &OidcHttpClient,
+    parts: &ClientParts,
+    client_swap: &arc_swap::ArcSwap<ConfiguredCoreClient>,
+    metrics: &super::super::metrics::HubMetrics,
+) {
+    match CoreProviderMetadata::discover_async(issuer.clone(), http).await {
+        Ok(meta) => {
+            let client = build_client(meta, parts);
+            client_swap.store(Arc::new(client));
+            metrics
+                .oidc_jwks_refresh_total
+                .with_label_values(&[provider_id, "success"])
+                .inc();
+            metrics
+                .oidc_jwks_last_refresh_success_timestamp_seconds
+                .with_label_values(&[provider_id])
+                .set(i64::try_from(towonel_common::time::now_ms() / 1000).unwrap_or(i64::MAX));
+            tracing::info!(provider = %display_name, "OIDC provider metadata refreshed");
+        }
+        Err(e) => {
+            metrics
+                .oidc_jwks_refresh_total
+                .with_label_values(&[provider_id, "failure"])
+                .inc();
+            tracing::warn!(
+                provider = %display_name,
+                error = %e,
+                "OIDC provider metadata refresh failed; keeping previous client",
+            );
+        }
+    }
+}
+
+fn spawn_jwks_refresher(
+    provider_id: &'static str,
+    display_name: &'static str,
+    issuer: IssuerUrl,
+    http: Arc<OidcHttpClient>,
+    parts: ClientParts,
+    client_swap: Arc<arc_swap::ArcSwap<ConfiguredCoreClient>>,
+    metrics: super::super::metrics::HubMetrics,
+) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(JWKS_REFRESH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            refresh_provider_metadata(
+                provider_id,
+                display_name,
+                &issuer,
+                &http,
+                &parts,
+                &client_swap,
+                &metrics,
+            )
+            .await;
+        }
+    });
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,13 +251,58 @@ pub(super) async fn start(
     Path(provider): Path<String>,
     Query(params): Query<StartParams>,
 ) -> Response {
-    let Some(runtime) = state.oidc.get(&provider) else {
-        return error_redirect(&provider, "provider_disabled");
+    let signup_code = params
+        .signup_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    begin_flow(
+        &state,
+        &provider,
+        OidcFlowKind::LoginOrSignup { signup_code },
+        params.next.as_deref(),
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct LinkParams {
+    #[serde(default)]
+    next: Option<String>,
+}
+
+pub(super) async fn link(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    Query(params): Query<LinkParams>,
+    principal: Principal,
+) -> Response {
+    let Principal::User(user) = principal else {
+        return error_redirect(&provider, "link_requires_user");
+    };
+    begin_flow(
+        &state,
+        &provider,
+        OidcFlowKind::Link { user_id: user.id },
+        params.next.as_deref(),
+    )
+    .await
+}
+
+async fn begin_flow(
+    state: &Arc<AppState>,
+    provider: &str,
+    kind: OidcFlowKind,
+    next: Option<&str>,
+) -> Response {
+    let Some(runtime) = state.oidc.get(provider) else {
+        return error_redirect(provider, "provider_disabled");
     };
 
+    let client = runtime.client.load_full();
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let mut req = runtime
-        .client
+    let mut req = client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
@@ -166,13 +317,8 @@ pub(super) async fn start(
     let flow = PendingOidcFlow {
         pkce_verifier_secret: Zeroizing::new(pkce_verifier.secret().clone()),
         nonce: nonce.secret().clone(),
-        signup_code: params
-            .signup_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string),
-        next: sanitize_next(params.next.as_deref()),
+        next: sanitize_next(next),
+        kind,
     };
     runtime.pending.insert(csrf.secret().clone(), flow).await;
 
@@ -189,17 +335,21 @@ pub(super) struct CallbackParams {
     error: Option<String>,
 }
 
+#[expect(clippy::too_many_lines, reason = "linear OIDC callback")]
 pub(super) async fn callback(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
     Query(params): Query<CallbackParams>,
+    headers: HeaderMap,
 ) -> Response {
     let Some(runtime) = state.oidc.get(&provider) else {
         return error_redirect(&provider, "provider_disabled");
     };
 
     if let Some(err) = params.error.as_deref() {
-        warn!(provider = %provider, error = %err, "OIDC callback returned error");
+        // attacker-controlled — sanitize before logging
+        let sanitized = sanitize_log_field(err, 128);
+        warn!(provider = %provider, error = %sanitized, "OIDC callback returned error");
         return error_redirect(&provider, "provider_error");
     }
     let (Some(code), Some(csrf_state)) = (params.code, params.state) else {
@@ -209,9 +359,12 @@ pub(super) async fn callback(
         return error_redirect(&provider, "expired_or_unknown_state");
     };
 
+    // `PkceCodeVerifier::new` drops the Zeroizing wrapper (upstream
+    // takes plain String); secret lingers until request_async below.
     let pkce_verifier = PkceCodeVerifier::new(flow.pkce_verifier_secret.to_string());
 
-    let token_response = match runtime.client.exchange_code(AuthorizationCode::new(code)) {
+    let client = runtime.client.load_full();
+    let token_response = match client.exchange_code(AuthorizationCode::new(code)) {
         Ok(req) => match req
             .set_pkce_verifier(pkce_verifier)
             .request_async(&*runtime.http)
@@ -233,7 +386,7 @@ pub(super) async fn callback(
         warn!("OIDC token response missing id_token");
         return error_redirect(&provider, "no_id_token");
     };
-    let verifier = runtime.client.id_token_verifier();
+    let verifier = client.id_token_verifier();
     let nonce_check = Nonce::new(flow.nonce.clone());
     let claims = match id_token.claims(&verifier, &nonce_check) {
         Ok(c) => c,
@@ -245,6 +398,7 @@ pub(super) async fn callback(
 
     let subject = claims.subject().as_str().to_string();
     let email = claims.email().map(|e| e.as_str().to_string());
+    let email_verified = claims.email_verified();
 
     let existing = match state.db.find_oauth_identity(&provider, &subject).await {
         Ok(o) => o,
@@ -254,31 +408,237 @@ pub(super) async fn callback(
         }
     };
 
-    let user_id = if let Some(ident) = existing {
-        match state.db.find_user_by_id(&ident.user_id).await {
-            Ok(Some(u)) if u.disabled_at_ms.is_none() => u.id,
-            Ok(Some(_)) => return error_redirect(&provider, "account_disabled"),
-            Ok(None) => return error_redirect(&provider, "linked_user_missing"),
-            Err(e) => {
-                warn!(error = %e, "find_user_by_id failed");
-                return error_redirect(&provider, "internal_error");
-            }
-        }
-    } else {
-        let Some(code) = flow.signup_code.as_deref() else {
-            return error_redirect(&provider, "signup_required");
-        };
-        let Some(email_val) = email else {
-            return error_redirect(&provider, "no_email");
-        };
-        match signup_via_oidc(&state, &provider, &subject, &email_val, code).await {
-            Ok(id) => id,
-            Err(why) => return error_redirect(&provider, why),
-        }
-    };
-
     let next = sanitize_next(Some(&flow.next));
-    issue_session_redirect(&state, &user_id, &next).await
+    match flow.kind {
+        OidcFlowKind::LoginOrSignup { signup_code } => {
+            let user_id = if let Some(ident) = existing {
+                let resolved_id = match state.db.find_user_by_id(&ident.user_id).await {
+                    Ok(Some(u)) if u.disabled_at_ms.is_none() => u.id,
+                    Ok(Some(_)) => return error_redirect(&provider, "account_disabled"),
+                    Ok(None) => return error_redirect(&provider, "linked_user_missing"),
+                    Err(e) => {
+                        warn!(error = %e, "find_user_by_id failed");
+                        return error_redirect(&provider, "internal_error");
+                    }
+                };
+                // Keep the cached email in sync on every login.
+                if email.is_some()
+                    && let Err(e) = state
+                        .db
+                        .touch_oauth_identity_email(
+                            &provider,
+                            &subject,
+                            email.as_deref(),
+                            now_ms_i64(),
+                        )
+                        .await
+                {
+                    warn!(error = %e, "touch_oauth_identity_email failed (login)");
+                }
+                resolved_id
+            } else {
+                let Some(code) = signup_code.as_deref() else {
+                    return error_redirect(&provider, "signup_required");
+                };
+                let Some(email_val) = email else {
+                    return error_redirect(&provider, "no_email");
+                };
+                // IdP-verified email required: otherwise an invite
+                // could be claimed under any address the attacker
+                // wants, pre-squatting the real recipient.
+                if email_verified != Some(true) {
+                    return error_redirect(&provider, "email_unverified_by_idp");
+                }
+                match signup_via_oidc(
+                    &state,
+                    &provider,
+                    &subject,
+                    &email_val,
+                    email_verified,
+                    code,
+                )
+                .await
+                {
+                    Ok(id) => id,
+                    // Point users at the link-from-settings path instead
+                    // of a dead-end "email taken" message.
+                    Err("email_taken") => {
+                        return error_redirect_with_hint(
+                            &provider,
+                            "email_taken",
+                            "link_from_settings",
+                        );
+                    }
+                    Err(why) => return error_redirect(&provider, why),
+                }
+            };
+            issue_session_redirect(&state, &user_id, &next).await
+        }
+        OidcFlowKind::Link { user_id } => {
+            link_callback(
+                &state,
+                &provider,
+                &subject,
+                email.as_deref(),
+                email_verified,
+                &user_id,
+                &headers,
+                &next,
+            )
+            .await
+        }
+    }
+}
+
+/// Attach an identity to `expected_user_id` after re-verifying the
+/// current session still belongs to them.
+#[expect(clippy::too_many_arguments, reason = "linear link callback")]
+async fn link_callback(
+    state: &Arc<AppState>,
+    provider: &str,
+    subject: &str,
+    email: Option<&str>,
+    email_verified: Option<bool>,
+    expected_user_id: &str,
+    headers: &HeaderMap,
+    next: &str,
+) -> Response {
+    match current_session_user_id(state, headers).await {
+        Err(()) => return error_redirect_link(provider, "internal_error"),
+        Ok(None) => return error_redirect(provider, "link_session_expired"),
+        Ok(Some(uid)) if uid != expected_user_id => {
+            return error_redirect_link(provider, "session_mismatch");
+        }
+        Ok(Some(_)) => {}
+    }
+
+    if email_verified != Some(true) {
+        return error_redirect_link(provider, "email_unverified_by_idp");
+    }
+
+    let now_ms_i = now_ms_i64();
+    match state.db.find_oauth_identity(provider, subject).await {
+        // Idempotent re-link: refresh cached email and audit the change.
+        Ok(Some(ident)) if ident.user_id == expected_user_id => {
+            let previous_email = ident.email.clone();
+            if let Err(e) = state
+                .db
+                .touch_oauth_identity_email(provider, subject, email, now_ms_i)
+                .await
+            {
+                warn!(error = %e, "touch_oauth_identity_email failed (re-link)");
+            } else if let Err(audit_err) = state
+                .db
+                .insert_admin_action(NewAdminAction {
+                    id: &random_code(16),
+                    actor_user_id: Some(expected_user_id),
+                    actor_kind: "user",
+                    action: "user.oidc.relink",
+                    target_kind: "user",
+                    target_id: Some(expected_user_id),
+                    metadata: Some(serde_json::json!({
+                        "provider": provider,
+                        "subject": subject,
+                        "previous_email": previous_email,
+                        "email_claim": email,
+                    })),
+                    now_ms: now_ms_i,
+                })
+                .await
+            {
+                warn!(error = %audit_err, "insert_admin_action oidc relink failed");
+            }
+            return redirect_to(next);
+        }
+        Ok(Some(_)) => return error_redirect_link(provider, "identity_in_use"),
+        Ok(None) => {}
+        Err(e) => {
+            warn!(error = %e, "find_oauth_identity failed (link)");
+            return error_redirect_link(provider, "internal_error");
+        }
+    }
+
+    if let Err(e) = state
+        .db
+        .insert_oauth_identity(NewOauthIdentity {
+            provider,
+            subject,
+            user_id: expected_user_id,
+            email,
+            now_ms: now_ms_i,
+        })
+        .await
+    {
+        if !crate::hub::db::is_unique_violation(&e) {
+            warn!(error = %e, "insert_oauth_identity failed (link)");
+            return error_redirect_link(provider, "internal_error");
+        }
+        // (provider, subject) PK vs (user_id, provider) — re-query to
+        // tell which constraint fired.
+        let reason = match state.db.find_oauth_identity(provider, subject).await {
+            Ok(Some(ident)) if ident.user_id != expected_user_id => "identity_in_use",
+            Ok(_) => "provider_already_linked",
+            Err(lookup_err) => {
+                warn!(error = %lookup_err, "find_oauth_identity after dup failed (link)");
+                "internal_error"
+            }
+        };
+        return error_redirect_link(provider, reason);
+    }
+
+    if let Err(e) = state
+        .db
+        .insert_admin_action(NewAdminAction {
+            id: &random_code(16),
+            actor_user_id: Some(expected_user_id),
+            actor_kind: "user",
+            action: "user.oidc.link",
+            target_kind: "user",
+            target_id: Some(expected_user_id),
+            metadata: Some(serde_json::json!({
+                "provider": provider,
+                "subject": subject,
+                "email_claim": email,
+                "email_verified": email_verified,
+            })),
+            now_ms: now_ms_i,
+        })
+        .await
+    {
+        warn!(error = %e, "insert_admin_action oidc link failed");
+    }
+
+    redirect_to(next)
+}
+
+/// `Ok(None)` = no/expired session, `Err(())` = DB error.
+async fn current_session_user_id(
+    state: &Arc<AppState>,
+    headers: &HeaderMap,
+) -> Result<Option<String>, ()> {
+    let Some(cookie_header) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
+        return Ok(None);
+    };
+    let Some(cookie_value) = session::extract_from_cookie_header(cookie_header) else {
+        return Ok(None);
+    };
+    let Some((session_id, token_hash)) = session::parse(cookie_value) else {
+        return Ok(None);
+    };
+    let row = state
+        .db
+        .find_active_session(&session_id, &token_hash, now_ms_i64())
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "find_active_session failed (link callback)");
+        })?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let user = state.db.find_user_by_id(&row.user_id).await.map_err(|e| {
+        warn!(error = %e, "find_user_by_id failed (link callback)");
+    })?;
+    Ok(user.filter(|u| u.disabled_at_ms.is_none()).map(|u| u.id))
 }
 
 #[derive(Serialize)]
@@ -301,11 +661,106 @@ pub(super) async fn list_providers(State(state): State<Arc<AppState>>) -> Respon
     )
 }
 
+#[derive(Serialize)]
+struct ListedIdentity {
+    provider: String,
+    subject: String,
+    email: Option<String>,
+    linked_at_ms: i64,
+}
+
+pub(super) async fn list_identities(
+    State(state): State<Arc<AppState>>,
+    principal: Principal,
+) -> Response {
+    let Principal::User(user) = principal else {
+        return super::unauthorized("authentication required");
+    };
+    let rows = match state.db.list_oauth_identities_for_user(&user.id).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "list_oauth_identities_for_user failed");
+            return super::internal_error();
+        }
+    };
+    let identities: Vec<ListedIdentity> = rows
+        .into_iter()
+        .map(|r| ListedIdentity {
+            provider: r.provider,
+            subject: r.subject,
+            email: r.email,
+            linked_at_ms: r.linked_at_ms,
+        })
+        .collect();
+    json_with_status(
+        StatusCode::OK,
+        serde_json::json!({ "identities": identities }),
+    )
+}
+
+pub(super) async fn unlink(
+    State(state): State<Arc<AppState>>,
+    Path(provider): Path<String>,
+    principal: Principal,
+) -> Response {
+    use crate::hub::db::user_oauth_identities::UnlinkOutcome;
+    let Principal::User(user) = principal else {
+        return super::unauthorized("authentication required");
+    };
+
+    let removed = match state.db.unlink_oauth_identity(&user.id, &provider).await {
+        Ok(UnlinkOutcome::Deleted(r)) => r,
+        Ok(UnlinkOutcome::NotFound) => {
+            return super::error_response(
+                StatusCode::NOT_FOUND,
+                "identity_not_found",
+                "no such identity is linked to this account",
+            );
+        }
+        Ok(UnlinkOutcome::WouldLockOut) => {
+            return super::error_response(
+                StatusCode::FORBIDDEN,
+                "would_lock_out",
+                "set a password or link another provider before unlinking your last sign-in method",
+            );
+        }
+        Err(e) => {
+            warn!(error = %e, "unlink_oauth_identity failed");
+            return super::internal_error();
+        }
+    };
+
+    let now_ms_i = now_ms_i64();
+    if let Err(e) = state
+        .db
+        .insert_admin_action(NewAdminAction {
+            id: &random_code(16),
+            actor_user_id: Some(&user.id),
+            actor_kind: "user",
+            action: "user.oidc.unlink",
+            target_kind: "user",
+            target_id: Some(&user.id),
+            metadata: Some(serde_json::json!({
+                "provider": provider,
+                "subject": removed.subject,
+                "previous_email": removed.email,
+            })),
+            now_ms: now_ms_i,
+        })
+        .await
+    {
+        warn!(error = %e, "insert_admin_action oidc unlink failed");
+    }
+
+    json_ok(serde_json::json!({ "ok": true }))
+}
+
 async fn signup_via_oidc(
     state: &Arc<AppState>,
     provider: &str,
     subject: &str,
     email: &str,
+    email_verified: Option<bool>,
     code: &str,
 ) -> Result<String, &'static str> {
     let now_ms_i = now_ms_i64();
@@ -319,11 +774,20 @@ async fn signup_via_oidc(
         }
     };
 
+    let normalized_email = crate::hub::db::users::normalize_email(email);
+    if let Some(expected) = claimed.recipient_email.as_deref()
+        && normalized_email != expected
+    {
+        if let Err(rel_err) = state.db.release_signup_invite(&claimed.code).await {
+            warn!(error = %rel_err, "release_signup_invite after oidc recipient mismatch");
+        }
+        return Err("invite_recipient_mismatch");
+    }
+
     let user_id = random_code(16);
 
-    // Empty password_hash sentinel marks an OIDC-only account; the
-    // password-login handler routes these through the timing-constant
-    // sentinel verify path.
+    // Empty password_hash = OIDC-only sentinel — auth.rs login routes
+    // these through the timing-constant verify path.
     if let Err(e) = state
         .db
         .insert_user(NewUser {
@@ -346,6 +810,8 @@ async fn signup_via_oidc(
         return Err(if dup { "email_taken" } else { "internal_error" });
     }
 
+    // Rollback arms must release the invite too — orphaned-claim
+    // blocks the legitimate recipient from retrying.
     if let Err(e) = state
         .db
         .finalize_signup_invite(&claimed.code, &user_id)
@@ -354,6 +820,9 @@ async fn signup_via_oidc(
         warn!(error = %e, "finalize_signup_invite failed (oidc)");
         if let Err(del_err) = state.db.delete_user(&user_id).await {
             warn!(error = %del_err, "delete_user rollback (oidc)");
+        }
+        if let Err(rel_err) = state.db.release_signup_invite(&claimed.code).await {
+            warn!(error = %rel_err, "release_signup_invite after oidc finalize failure");
         }
         return Err("internal_error");
     }
@@ -373,6 +842,9 @@ async fn signup_via_oidc(
         if let Err(del_err) = state.db.delete_user(&user_id).await {
             warn!(error = %del_err, "delete_user rollback (oidc link)");
         }
+        if let Err(rel_err) = state.db.release_signup_invite(&claimed.code).await {
+            warn!(error = %rel_err, "release_signup_invite after oidc identity insert failure");
+        }
         return Err("internal_error");
     }
 
@@ -387,6 +859,10 @@ async fn signup_via_oidc(
             target_id: Some(&user_id),
             metadata: Some(serde_json::json!({
                 "provider": provider,
+                "subject": subject,
+                "email_claim": email,
+                "email_verified": email_verified,
+                "role": claimed.role,
                 "signup_invite_code": claimed.code,
             })),
             now_ms: now_ms_i,
@@ -419,7 +895,7 @@ async fn issue_session_redirect(state: &Arc<AppState>, user_id: &str, next: &str
         return error_redirect("oidc", "session_failed");
     }
 
-    let secure = state.public_url.starts_with("https://");
+    let secure = state.use_secure_cookies;
     let cookie = session::set_cookie_header(
         &s.cookie_value,
         u64::try_from(SESSION_TTL_MS / 1000).unwrap_or(7 * 24 * 60 * 60),
@@ -446,7 +922,40 @@ fn error_redirect(provider: &str, reason: &'static str) -> Response {
     redirect_to(&target)
 }
 
-/// Browsers normalise `Location: /\evil.com` to `//evil.com`, so reject
+fn error_redirect_with_hint(provider: &str, reason: &'static str, hint: &'static str) -> Response {
+    let target = format!("/login?oidc_error={reason}&provider={provider}&hint={hint}");
+    redirect_to(&target)
+}
+
+/// Link-flow errors land on `/settings` — the user is already
+/// authenticated, `/login` would be confusing.
+fn error_redirect_link(provider: &str, reason: &'static str) -> Response {
+    let target = format!("/settings?oidc_error={reason}&provider={provider}");
+    redirect_to(&target)
+}
+
+/// Strip controls + Unicode line/paragraph separators + Bidi overrides
+/// (Trojan-Source class), then truncate. For any attacker-controlled
+/// string we pass through `warn!`.
+fn sanitize_log_field(raw: &str, max_len: usize) -> String {
+    raw.chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    *c,
+                    '\u{2028}'
+                        | '\u{2029}'
+                        | '\u{200E}'
+                        | '\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .take(max_len)
+        .collect()
+}
+
+/// Browsers normalise `/\evil.com` to `//evil.com`, so reject
 /// backslashes alongside protocol-relative paths.
 fn sanitize_next(raw: Option<&str>) -> String {
     let candidate = raw.unwrap_or("/").trim();
@@ -465,7 +974,42 @@ fn sanitize_next(raw: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_next;
+    use super::{sanitize_log_field, sanitize_next};
+
+    #[test]
+    fn log_field_strips_ascii_controls() {
+        let polluted = "access_denied\nfake_event=evil\r\t\x1b[31m";
+        assert_eq!(
+            sanitize_log_field(polluted, 128),
+            "access_deniedfake_event=evil[31m"
+        );
+    }
+
+    #[test]
+    fn log_field_strips_unicode_line_separators() {
+        let polluted = "ok\u{2028}injected\u{2029}line";
+        assert_eq!(sanitize_log_field(polluted, 128), "okinjectedline");
+    }
+
+    #[test]
+    fn log_field_strips_bidi_overrides() {
+        let polluted = "front\u{202E}reversed\u{202C}back";
+        assert_eq!(sanitize_log_field(polluted, 128), "frontreversedback");
+    }
+
+    #[test]
+    fn log_field_truncates_to_max_len() {
+        let long = "x".repeat(200);
+        assert_eq!(sanitize_log_field(&long, 32).len(), 32);
+    }
+
+    #[test]
+    fn log_field_keeps_plain_text() {
+        assert_eq!(
+            sanitize_log_field("interaction_required", 128),
+            "interaction_required",
+        );
+    }
 
     #[test]
     fn accepts_plain_absolute_path() {
