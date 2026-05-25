@@ -140,11 +140,16 @@ jobs:
           set -euo pipefail
           apt-get update
           apt-get install -y --no-install-recommends binutils-aarch64-linux-gnu
+      - name: Add Rust target
+        run: rustup target add "${{ matrix.target }}"
       - name: Build release binaries
         run: |
           set -euo pipefail
-          cargo zigbuild --release --target "${{ matrix.target }}" \
-            -p towonel-node -p towonel-agent
+          cargo zigbuild --release --target "${{ matrix.target }}" -p towonel-node
+          cargo zigbuild --release --target "${{ matrix.target }}" -p towonel-agent
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
       - name: Stage and archive
         id: archive
         env:
