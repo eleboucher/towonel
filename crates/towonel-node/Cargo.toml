@@ -62,6 +62,8 @@ tabled = { workspace = true }
 totp-rs = { workspace = true }
 ppp = { workspace = true }
 ipnet = { workspace = true }
+webauthn-rs = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 

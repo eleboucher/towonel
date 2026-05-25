@@ -29,6 +29,7 @@ use towonel_common::kek::HubKek;
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
 use tracing::info;
+use webauthn_rs::WebauthnBuilder;
 
 /// Length of a freshly generated operator API key in bytes (before base64).
 /// 32 bytes = 256 bits, base64url-encoded without padding = 43 chars.
@@ -327,6 +328,26 @@ impl Hub {
             info!("OIDC provider 'codeberg' configured");
         }
 
+        let parsed = url::Url::parse(&self.p.public_url)
+            .map_err(|e| anyhow::anyhow!("invalid public_url for WebAuthn: {e}"))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("public_url has no host for WebAuthn rp_id"))?;
+        let rp_id = host.to_string();
+        let origin_str = parsed.port().map_or_else(
+            || format!("{}://{host}", parsed.scheme()),
+            |p| format!("{}://{host}:{p}", parsed.scheme()),
+        );
+        let rp_origin = url::Url::parse(&origin_str)
+            .map_err(|e| anyhow::anyhow!("constructed WebAuthn origin invalid: {e}"))?;
+        let webauthn = Arc::new(
+            WebauthnBuilder::new(&rp_id, &rp_origin)
+                .map_err(|e| anyhow::anyhow!("WebauthnBuilder::new failed: {e}"))?
+                .rp_name("Towonel")
+                .build()
+                .map_err(|e| anyhow::anyhow!("Webauthn::build failed: {e}"))?,
+        );
+
         let removed: Vec<towonel_common::identity::TenantId> = db.list_tenant_removals().await?;
 
         let mut policy = self.p.static_policy.clone();
@@ -389,6 +410,9 @@ impl Hub {
             ports_require_reservation: self.p.ports_require_reservation,
             port_index: arc_swap::ArcSwap::from_pointee(api::PortIndex::default()),
             oidc,
+            webauthn,
+            passkey_reg_states: api::new_passkey_reg_states(),
+            passkey_auth_states: api::new_passkey_auth_states(),
         });
 
         // Seed the port index from the DB before serving any upsert; the

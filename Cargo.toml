@@ -220,3 +220,5 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = [
 ] }
 opentelemetry-appender-tracing = { version = "0.32", default-features = false }
 tracing-opentelemetry = "0.33"
+webauthn-rs = { version = "0.5" }
+uuid = { version = "1", features = ["v5"] }

@@ -6,6 +6,7 @@ mod entries;
 mod invites;
 mod metrics_handler;
 mod oidc;
+mod passkey;
 mod password_reset;
 mod ports;
 mod signup_invites;
@@ -120,6 +121,28 @@ pub fn new_twofa_attempt_limiter() -> TwoFaAttemptLimiter {
         .build()
 }
 
+pub type PasskeyRegStates = moka::future::Cache<String, webauthn_rs::prelude::PasskeyRegistration>;
+pub type PasskeyAuthStates =
+    moka::future::Cache<String, (String, webauthn_rs::prelude::PasskeyAuthentication)>;
+
+const PASSKEY_CHALLENGE_TTL_SECS: u64 = 5 * 60;
+
+#[must_use]
+pub fn new_passkey_reg_states() -> PasskeyRegStates {
+    moka::future::Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(Duration::from_secs(PASSKEY_CHALLENGE_TTL_SECS))
+        .build()
+}
+
+#[must_use]
+pub fn new_passkey_auth_states() -> PasskeyAuthStates {
+    moka::future::Cache::builder()
+        .max_capacity(10_000)
+        .time_to_live(Duration::from_secs(PASSKEY_CHALLENGE_TTL_SECS))
+        .build()
+}
+
 /// Compute the PHC hash that login uses as a fall-back verify target when
 /// the supplied email does not exist (or is disabled). Spending the same
 /// argon2 CPU on those paths closes the user-enumeration timing oracle.
@@ -209,6 +232,9 @@ pub struct AppState {
     /// Configured OIDC providers (one runtime per provider). Empty means
     /// no OIDC providers are advertised on `/v1/auth/providers`.
     pub oidc: OidcRuntimes,
+    pub webauthn: Arc<webauthn_rs::Webauthn>,
+    pub passkey_reg_states: PasskeyRegStates,
+    pub passkey_auth_states: PasskeyAuthStates,
 }
 
 #[derive(Default)]
@@ -472,6 +498,24 @@ fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
             )
             .route("/v1/auth/2fa/verify", post(auth::post_twofa_verify))
             .route("/v1/auth/2fa/status", get(twofa::get_status))
+            .route("/v1/auth/passkeys", get(passkey::list_passkeys))
+            .route(
+                "/v1/auth/passkeys/register/begin",
+                post(passkey::post_register_begin),
+            )
+            .route(
+                "/v1/auth/passkeys/register/finish",
+                post(passkey::post_register_finish),
+            )
+            .route(
+                "/v1/auth/passkeys/authenticate/begin",
+                post(passkey::post_authenticate_begin),
+            )
+            .route(
+                "/v1/auth/passkeys/authenticate/finish",
+                post(passkey::post_authenticate_finish),
+            )
+            .route("/v1/auth/passkeys/{id}", delete(passkey::delete_passkey))
             .route("/v1/auth/providers", get(oidc::list_providers))
             .route("/v1/auth/oidc/{provider}/start", get(oidc::start))
             // POST so SameSite=Lax cookies don't ride cross-site

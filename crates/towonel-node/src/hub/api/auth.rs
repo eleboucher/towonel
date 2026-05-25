@@ -52,6 +52,7 @@ struct MeResponse {
     email: Option<String>,
     role: String,
     twofa_enabled: bool,
+    passkeys_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -263,18 +264,32 @@ pub(super) async fn post_login(
     // a stolen-password attacker could refresh it on every challenge.
     state.login_limiter.invalidate(&email_key).await;
 
-    match state.db.find_user_totp(&user.id).await {
-        Ok(Some(totp_row)) if totp_row.confirmed_at_ms.is_some() => {
-            issue_login_challenge_response(&state, &user.id).await
-        }
-        Ok(_) => {
-            state.ip_login_limiter.invalidate(&ip_key).await;
-            issue_session_response(&state, &user.id, &user.email, &user.role).await
-        }
+    let totp_enabled = match state.db.find_user_totp(&user.id).await {
+        Ok(r) => r.is_some_and(|row| row.confirmed_at_ms.is_some()),
         Err(e) => {
             warn!(error = %e, "find_user_totp failed during login");
-            internal_error()
+            return internal_error();
         }
+    };
+    let passkeys_enabled = match state.db.count_passkeys_for_user(&user.id).await {
+        Ok(n) => n > 0,
+        Err(e) => {
+            warn!(error = %e, "count_passkeys_for_user failed during login");
+            return internal_error();
+        }
+    };
+    if totp_enabled || passkeys_enabled {
+        let mut methods = Vec::new();
+        if totp_enabled {
+            methods.push("totp");
+        }
+        if passkeys_enabled {
+            methods.push("passkey");
+        }
+        issue_login_challenge_response(&state, &user.id, &methods).await
+    } else {
+        state.ip_login_limiter.invalidate(&ip_key).await;
+        issue_session_response(&state, &user.id, &user.email, &user.role).await
     }
 }
 
@@ -372,7 +387,11 @@ pub(super) async fn post_twofa_verify(
     issue_session_response(&state, &user.id, &user.email, &user.role).await
 }
 
-async fn issue_login_challenge_response(state: &Arc<AppState>, user_id: &str) -> Response {
+pub(super) async fn issue_login_challenge_response(
+    state: &Arc<AppState>,
+    user_id: &str,
+    methods: &[&str],
+) -> Response {
     let now = now_ms_i64();
     let s = session::mint();
     if let Err(e) = state
@@ -392,6 +411,7 @@ async fn issue_login_challenge_response(state: &Arc<AppState>, user_id: &str) ->
     json_ok(serde_json::json!({
         "twofa_required": true,
         "challenge_token": s.cookie_value,
+        "methods": methods,
     }))
 }
 
@@ -401,7 +421,7 @@ async fn issue_login_challenge_response(state: &Arc<AppState>, user_id: &str) ->
 /// or `::1`; in that case the right-most entry of `X-Forwarded-For` is the
 /// actual client IP that Caddy observed. For direct deployments we trust
 /// only the socket peer.
-fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) -> String {
+pub(super) fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) -> String {
     if !peer.ip().is_loopback() {
         return peer.ip().to_string();
     }
@@ -416,7 +436,7 @@ fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) -> String {
     peer.ip().to_string()
 }
 
-async fn record_login_failure(state: &Arc<AppState>, email_key: &str, ip_key: &str) {
+pub(super) async fn record_login_failure(state: &Arc<AppState>, email_key: &str, ip_key: &str) {
     let email_counter = state
         .login_limiter
         .get_with(email_key.to_string(), async {
@@ -464,11 +484,13 @@ pub(super) async fn get_me(State(state): State<Arc<AppState>>, principal: Princi
                 .ok()
                 .flatten()
                 .is_some_and(|r| r.confirmed_at_ms.is_some());
+            let passkeys_enabled = state.db.count_passkeys_for_user(&u.id).await.unwrap_or(0) > 0;
             json_ok(MeResponse {
                 id: u.id,
                 email: Some(u.email),
                 role: u.role,
                 twofa_enabled,
+                passkeys_enabled,
             })
         }
         Principal::OperatorKey => json_with_status(
@@ -478,12 +500,13 @@ pub(super) async fn get_me(State(state): State<Arc<AppState>>, principal: Princi
                 "email": null,
                 "role": "operator",
                 "twofa_enabled": true,
+                "passkeys_enabled": false,
             }),
         ),
     }
 }
 
-async fn issue_session_response(
+pub(super) async fn issue_session_response(
     state: &Arc<AppState>,
     user_id: &str,
     email: &str,

@@ -18,6 +18,7 @@ pub mod tenant_ownership;
 mod types;
 pub mod user_backup_codes;
 pub mod user_oauth_identities;
+pub mod user_passkeys;
 pub mod user_totp;
 pub mod users;
 

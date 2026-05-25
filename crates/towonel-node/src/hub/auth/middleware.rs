@@ -21,6 +21,10 @@ const TWOFA_ENROLLMENT_ALLOWED_PATHS: &[&str] = &[
     "/v1/auth/2fa/confirm",
     "/v1/auth/2fa/status",
     "/v1/auth/2fa/disable",
+    "/v1/auth/passkeys",
+    "/v1/auth/passkeys/register/begin",
+    "/v1/auth/passkeys/register/finish",
+    "/v1/auth/passkeys/{id}",
 ];
 
 #[derive(Debug, Clone)]
@@ -108,7 +112,7 @@ async fn enforce_operator_twofa(
     if matches!(matched, Some(p) if TWOFA_ENROLLMENT_ALLOWED_PATHS.contains(&p)) {
         return Ok(());
     }
-    let confirmed = state
+    let totp_confirmed = state
         .db
         .find_user_totp(&user.id)
         .await
@@ -117,7 +121,18 @@ async fn enforce_operator_twofa(
             internal_error()
         })?
         .is_some_and(|r| r.confirmed_at_ms.is_some());
-    if confirmed {
+    if totp_confirmed {
+        return Ok(());
+    }
+    let passkey_count = state
+        .db
+        .count_passkeys_for_user(&user.id)
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "count_passkeys_for_user failed");
+            internal_error()
+        })?;
+    if passkey_count > 0 {
         return Ok(());
     }
     Err(error_response(
