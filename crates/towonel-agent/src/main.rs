@@ -66,12 +66,7 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("failed to install ring CryptoProvider");
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let _telemetry = towonel_common::telemetry::init("towonel-agent", env!("CARGO_PKG_VERSION"));
 
     let cli = Cli::parse();
     run_agent(cli).await

@@ -210,3 +210,13 @@ tabled = "0.20"
 ipnet = "2"
 httparse = "1"
 http = "1"
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+  "trace",
+  "logs",
+  "http-proto",
+  "reqwest-client",
+] }
+opentelemetry-appender-tracing = { version = "0.32", default-features = false }
+tracing-opentelemetry = "0.33"

@@ -69,6 +69,8 @@ skip = [
   { crate = "thiserror" },
   { crate = "thiserror-impl" },
   { crate = "windows-sys" },
+  { crate = "r-efi" },
+  { crate = "rand" },
 ]
 skip-tree = []
 

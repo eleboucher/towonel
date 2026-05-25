@@ -16,6 +16,7 @@ pub mod random_name;
 pub mod routing;
 pub mod shutdown;
 pub mod sni;
+pub mod telemetry;
 pub mod time;
 pub mod tls_policy;
 pub mod tunnel;
