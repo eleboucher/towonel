@@ -119,11 +119,11 @@ jobs:
             *) echo "unsupported host arch: $HOST_ARCH" >&2; exit 1 ;;
           esac
           BASE="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
-          curl -fsSL -o cosign "${BASE}/${COSIGN_BIN}"
+          curl -fsSL -o "${COSIGN_BIN}" "${BASE}/${COSIGN_BIN}"
           curl -fsSL "${BASE}/cosign_checksums.txt" -o checksums.txt
           grep "[[:space:]]${COSIGN_BIN}\$" checksums.txt | sha256sum -c -
-          install -m 0755 cosign /usr/local/bin/cosign
-          rm -f cosign checksums.txt
+          install -m 0755 "${COSIGN_BIN}" /usr/local/bin/cosign
+          rm -f "${COSIGN_BIN}" checksums.txt
       - name: Install cross-arch strip
         if: matrix.arch_label == 'arm64'
         run: |
@@ -238,6 +238,11 @@ jobs:
           labels: ${{ steps.meta-node.outputs.labels }}
           cache-from: type=gha,scope=towonel-node
           cache-to: type=gha,scope=towonel-node,mode=max
+          build-args: |
+            ENABLE_SCCACHE=1
+          secrets: |
+            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
       - name: Compute agent image metadata
         id: meta-agent
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -261,6 +266,11 @@ jobs:
           labels: ${{ steps.meta-agent.outputs.labels }}
           cache-from: type=gha,scope=towonel-agent
           cache-to: type=gha,scope=towonel-agent,mode=max
+          build-args: |
+            ENABLE_SCCACHE=1
+          secrets: |
+            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
       - name: Compute hub-caddy image metadata
         id: meta-hub-caddy
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -284,3 +294,8 @@ jobs:
           labels: ${{ steps.meta-hub-caddy.outputs.labels }}
           cache-from: type=gha,scope=towonel-hub-caddy
           cache-to: type=gha,scope=towonel-hub-caddy,mode=max
+          build-args: |
+            ENABLE_SCCACHE=1
+          secrets: |
+            SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
+            SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
