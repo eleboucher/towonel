@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["forgejo>eleboucher/renovate-config"],
+  "extends": ["local>eleboucher/renovate-config"],
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["before 5am on monday"]
