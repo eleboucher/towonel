@@ -259,6 +259,7 @@ pub struct Hub {
     /// `Some` only when the hub is colocated with an edge; filled at boot.
     control_handler_cell: Option<crate::edge::hub_client::ControlHandlerCell>,
     liveness_cell: Option<crate::edge::hub_client::LivenessCell>,
+    route_rebuilder_cell: Option<crate::edge::hub_client::RouteRebuilderCell>,
 }
 
 fn spawn_background_loops(state: &Arc<api::AppState>) {
@@ -273,6 +274,7 @@ impl Hub {
             p: params,
             control_handler_cell: None,
             liveness_cell: None,
+            route_rebuilder_cell: None,
         }
     }
 
@@ -288,6 +290,15 @@ impl Hub {
     #[must_use]
     pub fn with_liveness_cell(mut self, cell: crate::edge::hub_client::LivenessCell) -> Self {
         self.liveness_cell = Some(cell);
+        self
+    }
+
+    #[must_use]
+    pub fn with_route_rebuilder_cell(
+        mut self,
+        cell: crate::edge::hub_client::RouteRebuilderCell,
+    ) -> Self {
+        self.route_rebuilder_cell = Some(cell);
         self
     }
 
@@ -442,6 +453,16 @@ impl Hub {
             tracing::warn!("hub liveness cell was already set; ignoring");
         }
 
+        let route_rebuilder: Arc<dyn crate::edge::hub_client::RouteRebuilder> =
+            Arc::new(StateRouteRebuilder {
+                state: Arc::clone(&state),
+            });
+        if let Some(cell) = self.route_rebuilder_cell.as_ref()
+            && cell.set(Arc::clone(&route_rebuilder)).is_err()
+        {
+            tracing::warn!("hub route rebuilder cell was already set; ignoring");
+        }
+
         let api_app = api::router(Arc::clone(&state))
             .into_make_service_with_connect_info::<std::net::SocketAddr>();
         let health_app = api::health_router(Arc::clone(&state));
@@ -580,6 +601,21 @@ async fn refresh_metrics_loop(state: Arc<api::AppState>) {
             .metrics
             .tenants_total
             .set(i64::try_from(tenants).unwrap_or(i64::MAX));
+    }
+}
+
+struct StateRouteRebuilder {
+    state: Arc<api::AppState>,
+}
+
+#[async_trait::async_trait]
+impl crate::edge::hub_client::RouteRebuilder for StateRouteRebuilder {
+    async fn rebuild_and_broadcast(&self) -> anyhow::Result<()> {
+        api::rebuild_and_broadcast_routes(&self.state).await
+    }
+
+    fn live_cutoff_ms(&self, now_ms: u64) -> u64 {
+        now_ms.saturating_sub(api::AGENT_LIVE_TTL_MS)
     }
 }
 

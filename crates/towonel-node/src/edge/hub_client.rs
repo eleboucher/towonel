@@ -38,6 +38,16 @@ pub trait ControlFrameHandler: Send + Sync {
 
 pub type ControlHandlerCell = Arc<OnceLock<Arc<dyn ControlFrameHandler>>>;
 
+/// Hub-side rebuild trigger fired when a session bump transitions an agent
+/// from not-live to live; without it the edge keeps its empty startup table.
+#[async_trait::async_trait]
+pub trait RouteRebuilder: Send + Sync {
+    async fn rebuild_and_broadcast(&self) -> anyhow::Result<()>;
+    fn live_cutoff_ms(&self, now_ms: u64) -> u64;
+}
+
+pub type RouteRebuilderCell = Arc<OnceLock<Arc<dyn RouteRebuilder>>>;
+
 #[async_trait::async_trait]
 pub trait HubClient: Send + Sync {
     fn subscribe_routes(&self) -> RouteStream;
@@ -57,6 +67,7 @@ pub struct InProcessHubClient {
     tx: broadcast::Sender<RouteTable>,
     control_handler: ControlHandlerCell,
     liveness: LivenessCell,
+    rebuilder: RouteRebuilderCell,
 }
 
 impl InProcessHubClient {
@@ -64,6 +75,7 @@ impl InProcessHubClient {
         tx: broadcast::Sender<RouteTable>,
         control_handler: ControlHandlerCell,
         liveness: LivenessCell,
+        rebuilder: RouteRebuilderCell,
     ) -> Self {
         let rx = tx.subscribe();
         Self {
@@ -71,6 +83,7 @@ impl InProcessHubClient {
             tx,
             control_handler,
             liveness,
+            rebuilder,
         }
     }
 }
@@ -103,14 +116,25 @@ impl HubClient for InProcessHubClient {
     }
 
     async fn record_session_added(&self, tenant_id: TenantId, agent_id: AgentId) {
-        let Some(liveness) = self.liveness.get() else {
+        // Both cells fill in the same boot step; if either is empty the
+        // hub isn't ready, so swallow the event rather than bump-and-lose.
+        let (Some(liveness), Some(rebuilder)) = (self.liveness.get(), self.rebuilder.get()) else {
             return;
         };
-        if let Err(e) = liveness
-            .bump(&tenant_id, &agent_id, towonel_common::time::now_ms())
-            .await
-        {
-            tracing::warn!(error = %e, "in-process liveness bump failed");
+        let now = towonel_common::time::now_ms();
+        let cutoff = rebuilder.live_cutoff_ms(now);
+        let became_live = match liveness.bump(&tenant_id, &agent_id, now, cutoff).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "in-process liveness bump failed");
+                return;
+            }
+        };
+        if !became_live {
+            return;
+        }
+        if let Err(e) = rebuilder.rebuild_and_broadcast().await {
+            tracing::warn!(error = %e, "route rebuild after session_added failed");
         }
     }
 
@@ -223,6 +247,7 @@ mod tests {
             tx.clone(),
             Arc::new(OnceLock::new()),
             Arc::new(OnceLock::new()),
+            Arc::new(OnceLock::new()),
         );
 
         tx.send(RouteTable::from_raw(std::collections::HashMap::new()))
@@ -238,8 +263,12 @@ mod tests {
     #[tokio::test]
     async fn handle_control_frame_returns_not_implemented_by_default() {
         let (tx, _) = broadcast::channel(8);
-        let client =
-            InProcessHubClient::new(tx, Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
+        let client = InProcessHubClient::new(
+            tx,
+            Arc::new(OnceLock::new()),
+            Arc::new(OnceLock::new()),
+            Arc::new(OnceLock::new()),
+        );
         let (status, body) = client
             .handle_control_frame(b"anything".to_vec())
             .await
@@ -338,6 +367,7 @@ mod tests {
         let (tx, _) = broadcast::channel(8);
         let client = InProcessHubClient::new(
             tx.clone(),
+            Arc::new(OnceLock::new()),
             Arc::new(OnceLock::new()),
             Arc::new(OnceLock::new()),
         );

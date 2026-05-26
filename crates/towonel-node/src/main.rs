@@ -463,10 +463,13 @@ async fn run_node() -> anyhow::Result<()> {
                 Arc::new(std::sync::OnceLock::new());
             let liveness_cell: edge::hub_client::LivenessCell =
                 Arc::new(std::sync::OnceLock::new());
+            let route_rebuilder_cell: edge::hub_client::RouteRebuilderCell =
+                Arc::new(std::sync::OnceLock::new());
             let hub_client = Arc::new(edge::hub_client::InProcessHubClient::new(
                 route_tx.clone(),
                 Arc::clone(&control_handler),
                 Arc::clone(&liveness_cell),
+                Arc::clone(&route_rebuilder_cell),
             ));
             let BuiltEdge {
                 edge,
@@ -499,7 +502,8 @@ async fn run_node() -> anyhow::Result<()> {
             };
             let hub = hub::Hub::new(build_hub_params(&config, identity, route_tx).await?)
                 .with_control_handler_cell(control_handler)
-                .with_liveness_cell(liveness_cell);
+                .with_liveness_cell(liveness_cell)
+                .with_route_rebuilder_cell(route_rebuilder_cell);
 
             tokio::select! {
                 res = hub.run() => {

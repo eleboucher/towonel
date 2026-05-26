@@ -838,9 +838,10 @@ async fn prune_stale_liveness_drops_agent_from_route_table() {
     }
 
     let now = towonel_common::time::now_ms();
+    let live_cutoff = now.saturating_sub(super::api::AGENT_LIVE_TTL_MS);
     hub.state
         .liveness
-        .bump(&tenant.id(), &agent.id(), now)
+        .bump(&tenant.id(), &agent.id(), now, live_cutoff)
         .await
         .unwrap();
     super::api::rebuild_and_broadcast_routes(&hub.state)
@@ -853,7 +854,7 @@ async fn prune_stale_liveness_drops_agent_from_route_table() {
     let ancient = now.saturating_sub(10 * 60 * 1_000);
     hub.state
         .liveness
-        .bump(&tenant.id(), &agent.id(), ancient)
+        .bump(&tenant.id(), &agent.id(), ancient, live_cutoff)
         .await
         .unwrap();
     let pruned = hub

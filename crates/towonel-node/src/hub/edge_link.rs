@@ -220,8 +220,18 @@ where
                         tracing::debug!(agent = %agent_id, "session removed");
                     }
                     Ok(EdgeToHub::SessionsSnapshot { sessions }) => {
+                        // Bump all, rebuild once — avoids N back-to-back rebuilds
+                        // on edge reconnect that converge to the same table.
+                        let mut any_transition = false;
                         for (agent_id, tenant_id) in sessions {
-                            bump_liveness(state, agent_id, tenant_id).await;
+                            if bump_liveness_only(state, agent_id, tenant_id).await {
+                                any_transition = true;
+                            }
+                        }
+                        if any_transition
+                            && let Err(e) = super::api::rebuild_and_broadcast_routes(state).await
+                        {
+                            warn!(error = %e, "route rebuild after SessionsSnapshot failed");
                         }
                     }
                     Ok(EdgeToHub::ControlRequest { request_id, frame }) => {
@@ -279,8 +289,28 @@ async fn bump_liveness(
     agent_id: AgentId,
     tenant_id: towonel_common::identity::TenantId,
 ) {
-    if let Err(e) = state.liveness.bump(&tenant_id, &agent_id, now_ms()).await {
-        warn!(error = %e, "edge_link session liveness bump failed");
+    if !bump_liveness_only(state, agent_id, tenant_id).await {
+        return;
+    }
+    if let Err(e) = super::api::rebuild_and_broadcast_routes(state).await {
+        warn!(error = %e, "route rebuild after session_added failed");
+    }
+}
+
+/// Bump only; returns the transition so the caller batches the rebuild.
+async fn bump_liveness_only(
+    state: &Arc<AppState>,
+    agent_id: AgentId,
+    tenant_id: towonel_common::identity::TenantId,
+) -> bool {
+    let now = now_ms();
+    let cutoff = now.saturating_sub(super::api::AGENT_LIVE_TTL_MS);
+    match state.liveness.bump(&tenant_id, &agent_id, now, cutoff).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(error = %e, "edge_link session liveness bump failed");
+            false
+        }
     }
 }
 
