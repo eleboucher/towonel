@@ -235,12 +235,67 @@ async fn do_present_edge_cred(
 }
 
 async fn resolve_addrs(addrs: &[String]) -> Vec<SocketAddr> {
-    let mut out = Vec::new();
+    let mut resolved = Vec::new();
     for s in addrs {
         match lookup_host(s).await {
-            Ok(iter) => out.extend(iter),
+            Ok(iter) => resolved.extend(iter),
             Err(e) => warn!(addr = %s, error = %e, "edge address DNS lookup failed"),
         }
     }
-    out
+    filter_with(resolved, is_routable)
+}
+
+// Fall back to the unfiltered list if nothing is routable: iroh may still
+// reach the node via the relay, and the v4/v6 mismatch the kernel sees now
+// isn't worth turning into a hard failure.
+fn filter_with(
+    resolved: Vec<SocketAddr>,
+    predicate: impl Fn(&SocketAddr) -> bool,
+) -> Vec<SocketAddr> {
+    let routable: Vec<SocketAddr> = resolved.iter().copied().filter(&predicate).collect();
+    if routable.is_empty() {
+        return resolved;
+    }
+    routable
+}
+
+// UDP connect performs a kernel route lookup without sending packets, so this
+// returns false fast for v6 destinations on v4-only hosts.
+fn is_routable(addr: &SocketAddr) -> bool {
+    let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let Ok(sock) = std::net::UdpSocket::bind(bind) else {
+        return false;
+    };
+    sock.connect(addr).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const V4: &str = "203.0.113.1:80";
+    const V6: &str = "[2001:db8::1]:80";
+
+    #[test]
+    fn loopback_is_routable() {
+        assert!(is_routable(&"127.0.0.1:1".parse().unwrap()));
+    }
+
+    #[test]
+    fn empty_input() {
+        assert!(filter_with(Vec::new(), |_| true).is_empty());
+    }
+
+    #[test]
+    fn drops_rejected() {
+        let v4: SocketAddr = V4.parse().unwrap();
+        let v6: SocketAddr = V6.parse().unwrap();
+        assert_eq!(filter_with(vec![v4, v6], SocketAddr::is_ipv4), vec![v4]);
+    }
+
+    #[test]
+    fn falls_back_when_all_rejected() {
+        let input: Vec<SocketAddr> = vec![V4.parse().unwrap(), V6.parse().unwrap()];
+        assert_eq!(filter_with(input.clone(), |_| false), input);
+    }
 }
