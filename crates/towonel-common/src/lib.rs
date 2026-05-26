@@ -13,6 +13,7 @@ pub mod ownership;
 pub mod process_metrics;
 pub mod protocol;
 pub mod random_name;
+pub mod relay;
 pub mod routing;
 pub mod shutdown;
 pub mod sni;

@@ -30,6 +30,13 @@ backon = { workspace = true }
 fastrand = { workspace = true }
 prometheus = { workspace = true }
 tokio-util = { workspace = true }
+kube = { version = "3.1", default-features = false, features = [
+  "client",
+  "rustls-tls",
+] }
+k8s-openapi = { version = "0.27", default-features = false, features = [
+  "latest",
+] }
 
 [lints]
 workspace = true

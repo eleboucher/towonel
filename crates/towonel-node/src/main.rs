@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
-use iroh::RelayMode;
 use iroh::endpoint::{Endpoint, presets::Minimal};
 use tokio::sync::broadcast;
 use tracing::{error, info};
@@ -714,7 +713,8 @@ struct BuiltEdge {
 /// construct the Edge.
 ///
 /// The endpoint registers `ALPN_TUNNEL` for inbound agent connections.
-/// It never dials, so Pkarr discovery and relays are disabled.
+/// Pkarr discovery is disabled; a relay can be opted into via
+/// `TOWONEL_EDGE_RELAY_URL`.
 async fn build_edge(
     secret_key: iroh::SecretKey,
     tenants: &[config::TenantEntry],
@@ -726,7 +726,9 @@ async fn build_edge(
     let ep = Endpoint::builder(Minimal)
         .secret_key(secret_key)
         .alpns(vec![towonel_common::protocol::ALPN_TUNNEL.to_vec()])
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(towonel_common::relay::relay_mode_from_env(
+            "TOWONEL_EDGE_RELAY_URL",
+        ))
         .clear_ip_transports()
         .bind_addr(format!("0.0.0.0:{port}"))
         .map_err(|e| anyhow::anyhow!("invalid IPv4 iroh bind addr: {e}"))?

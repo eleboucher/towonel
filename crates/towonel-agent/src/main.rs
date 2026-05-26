@@ -1,6 +1,7 @@
 mod config;
 mod edge_session;
 mod hub_client;
+mod k8s_autodiscover;
 mod metrics;
 mod publish_tls;
 mod stateless;
@@ -17,7 +18,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
-use iroh::{Endpoint, RelayMode, endpoint::presets::Minimal};
+use iroh::{Endpoint, endpoint::presets::Minimal};
 use prometheus::{Encoder, TextEncoder};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -106,9 +107,34 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         );
     }
 
-    let endpoint = Endpoint::builder(Minimal)
+    let mut endpoint_builder = Endpoint::builder(Minimal)
         .secret_key(ctx.iroh_secret_key())
-        .relay_mode(RelayMode::Disabled)
+        .relay_mode(towonel_common::relay::relay_mode_from_env(
+            "TOWONEL_AGENT_RELAY_URL",
+        ));
+    let iroh_port: u16 = match std::env::var("TOWONEL_AGENT_IROH_PORT") {
+        Ok(v) => v
+            .parse()
+            .with_context(|| format!("TOWONEL_AGENT_IROH_PORT must be a u16, got {v:?}"))?,
+        Err(_) => 0,
+    };
+    if iroh_port != 0 {
+        endpoint_builder = endpoint_builder
+            .clear_ip_transports()
+            .bind_addr(format!("0.0.0.0:{iroh_port}"))
+            .map_err(|e| anyhow::anyhow!("invalid IPv4 iroh bind addr: {e}"))?
+            .bind_addr(format!("[::]:{iroh_port}"))
+            .map_err(|e| anyhow::anyhow!("invalid IPv6 iroh bind addr: {e}"))?;
+    }
+    for addr in towonel_common::relay::parse_extra_local_addrs("TOWONEL_AGENT_EXTRA_LOCAL_ADDRS") {
+        info!(%addr, "advertising extra local address from env");
+        endpoint_builder = endpoint_builder.external_addr(addr);
+    }
+    for addr in k8s_autodiscover::discover().await {
+        info!(%addr, "advertising k8s-discovered address");
+        endpoint_builder = endpoint_builder.external_addr(addr);
+    }
+    let endpoint = endpoint_builder
         .bind()
         .await
         .context("failed to create iroh endpoint")?;

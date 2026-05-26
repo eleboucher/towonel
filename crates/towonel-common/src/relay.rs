@@ -1,0 +1,40 @@
+use std::net::SocketAddr;
+
+use iroh::{RelayMap, RelayMode};
+use tracing::warn;
+
+/// On parse error, warns and falls back to `Disabled` so the binary still starts.
+pub fn relay_mode_from_env(var_name: &str) -> RelayMode {
+    let Ok(raw) = std::env::var(var_name) else {
+        return RelayMode::Disabled;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return RelayMode::Disabled;
+    }
+    match RelayMap::try_from_iter([trimmed]) {
+        Ok(map) => RelayMode::Custom(map),
+        Err(e) => {
+            warn!(var = var_name, url = trimmed, error = %e, "invalid relay URL; running without relay");
+            RelayMode::Disabled
+        }
+    }
+}
+
+// Unparsable entries are warned and skipped rather than failing startup.
+pub fn parse_extra_local_addrs(var_name: &str) -> Vec<SocketAddr> {
+    let Ok(raw) = std::env::var(var_name) else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.parse::<SocketAddr>() {
+            Ok(addr) => Some(addr),
+            Err(e) => {
+                warn!(var = var_name, entry = s, error = %e, "skipping invalid socket address");
+                None
+            }
+        })
+        .collect()
+}
