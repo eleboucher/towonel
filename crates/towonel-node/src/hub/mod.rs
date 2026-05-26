@@ -249,6 +249,7 @@ pub struct HubParams {
     pub ports_require_reservation: bool,
     pub oidc: crate::config::OidcConfig,
     pub mailer: Option<mail::SharedMailer>,
+    pub webauthn_rp_id: Option<String>,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -335,11 +336,8 @@ impl Hub {
         let host = parsed
             .host_str()
             .ok_or_else(|| anyhow::anyhow!("public_url has no host for WebAuthn rp_id"))?;
-        let rp_id = host.to_string();
-        let origin_str = parsed.port().map_or_else(
-            || format!("{}://{host}", parsed.scheme()),
-            |p| format!("{}://{host}:{p}", parsed.scheme()),
-        );
+        let rp_id = self.p.webauthn_rp_id.as_deref().unwrap_or(host).to_string();
+        let origin_str = format!("{}://{rp_id}", parsed.scheme());
         let rp_origin = url::Url::parse(&origin_str)
             .map_err(|e| anyhow::anyhow!("constructed WebAuthn origin invalid: {e}"))?;
         let webauthn = Arc::new(

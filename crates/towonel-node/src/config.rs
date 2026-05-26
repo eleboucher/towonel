@@ -186,6 +186,7 @@ pub struct HubConfig {
     pub oidc: OidcConfig,
     pub console_url: Option<String>,
     pub mail: Option<MailConfig>,
+    pub webauthn_rp_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +334,7 @@ struct RawEnv {
     hub_operator_api_key: Option<String>,
     hub_operator_api_key_path: Option<PathBuf>,
     hub_public_url: Option<String>,
+    hub_webauthn_rp_id: Option<String>,
     hub_db_driver: Option<DbDriver>,
     hub_db_dsn: Option<String>,
     hub_db_max_open_conns: Option<u32>,
@@ -403,6 +405,7 @@ impl NodeConfig {
             hub_operator_api_key,
             hub_operator_api_key_path,
             hub_public_url,
+            hub_webauthn_rp_id,
             hub_db_driver,
             hub_db_dsn,
             hub_db_max_open_conns,
@@ -510,6 +513,7 @@ impl NodeConfig {
             oidc,
             console_url,
             mail,
+            webauthn_rp_id: hub_webauthn_rp_id,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -606,6 +610,7 @@ struct HubInputs<'a> {
     oidc: OidcConfig,
     console_url: Option<String>,
     mail: Option<MailConfig>,
+    webauthn_rp_id: Option<String>,
     data_dir: Option<&'a Path>,
 }
 
@@ -637,6 +642,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         oidc,
         console_url,
         mail,
+        webauthn_rp_id,
         data_dir,
     } = inputs;
 
@@ -730,6 +736,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         oidc,
         console_url,
         mail,
+        webauthn_rp_id,
     })
 }
 

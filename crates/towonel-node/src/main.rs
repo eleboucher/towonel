@@ -657,6 +657,7 @@ async fn build_hub_params(
         ports_require_reservation: config.hub.ports_require_reservation,
         oidc: config.hub.oidc.clone(),
         mailer,
+        webauthn_rp_id: config.hub.webauthn_rp_id.clone(),
     })
 }
 
