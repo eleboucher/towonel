@@ -580,31 +580,28 @@ impl crate::edge::hub_client::LiveAgentSink for LocalLiveAgentSink {
         &self,
         tenant_id: towonel_common::identity::TenantId,
         agent_id: towonel_common::identity::AgentId,
-    ) -> bool {
-        let changed =
-            self.state
-                .live_agents
-                .record_added(live_agents::SourceKey::Local, tenant_id, agent_id);
-        if changed {
+    ) {
+        if self
+            .state
+            .live_agents
+            .record_added(live_agents::SourceKey::Local, tenant_id, agent_id)
+        {
             api::trigger_route_rebuild(&self.state);
         }
-        changed
     }
 
     fn record_removed(
         &self,
         tenant_id: towonel_common::identity::TenantId,
         agent_id: towonel_common::identity::AgentId,
-    ) -> bool {
-        let changed = self.state.live_agents.record_removed(
-            live_agents::SourceKey::Local,
-            tenant_id,
-            agent_id,
-        );
-        if changed {
+    ) {
+        if self
+            .state
+            .live_agents
+            .record_removed(live_agents::SourceKey::Local, tenant_id, agent_id)
+        {
             api::trigger_route_rebuild(&self.state);
         }
-        changed
     }
 }
 

@@ -37,8 +37,8 @@ pub type ControlHandlerCell = Arc<OnceLock<Arc<dyn ControlFrameHandler>>>;
 /// Hub-side hook the in-process edge calls on every session event. The
 /// hub impl forwards to `LiveAgents` and wakes the rebuild coalescer.
 pub trait LiveAgentSink: Send + Sync {
-    fn record_added(&self, tenant_id: TenantId, agent_id: AgentId) -> bool;
-    fn record_removed(&self, tenant_id: TenantId, agent_id: AgentId) -> bool;
+    fn record_added(&self, tenant_id: TenantId, agent_id: AgentId);
+    fn record_removed(&self, tenant_id: TenantId, agent_id: AgentId);
 }
 
 pub type LiveAgentSinkCell = Arc<OnceLock<Arc<dyn LiveAgentSink>>>;
