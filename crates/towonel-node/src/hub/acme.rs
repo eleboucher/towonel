@@ -17,6 +17,36 @@ use tracing::{debug, info, warn};
 /// RFC 8737 `acmeIdentifier` extension OID.
 const ACME_IDENTIFIER_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 1, 31];
 
+pub const CAA_VALIDATION_METHOD: &str = "tls-alpn-01";
+
+#[derive(Debug, Clone)]
+pub struct AcmeAccountInfo {
+    pub ca: &'static str,
+    pub account_uri: String,
+    pub status: String,
+}
+
+pub async fn load_account_info(
+    cert_dir: &Path,
+    acme_email: &str,
+    staging: bool,
+) -> anyhow::Result<Option<AcmeAccountInfo>> {
+    let ca = if staging {
+        LETS_ENCRYPT_STAGING
+    } else {
+        LETS_ENCRYPT_PRODUCTION
+    };
+    let storage = FileStorage::new(cert_dir);
+    let account = certon::account::get_account(&storage, ca, acme_email)
+        .await
+        .with_context(|| format!("failed to read ACME account from {}", cert_dir.display()))?;
+    Ok(account.map(|a| AcmeAccountInfo {
+        ca,
+        account_uri: a.location,
+        status: a.status,
+    }))
+}
+
 const FAILURE_COOLDOWN: Duration = Duration::from_mins(15);
 
 pub struct AcmeManager {

@@ -416,6 +416,7 @@ impl Hub {
             webauthn,
             passkey_reg_states: api::new_passkey_reg_states(),
             passkey_auth_states: api::new_passkey_auth_states(),
+            tls: self.p.tls.clone(),
         });
 
         // Seed the port index from the DB before serving any upsert; the

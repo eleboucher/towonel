@@ -286,7 +286,7 @@ fn parse_cidr_list(raw: &str) -> anyhow::Result<Vec<IpNet>> {
         .collect()
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TlsConfig {
     pub cert_dir: PathBuf,
     pub acme_email: Option<String>,

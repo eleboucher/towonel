@@ -1,3 +1,4 @@
+mod acme_account;
 mod agent_refresh;
 mod app_settings;
 mod auth;
@@ -235,6 +236,7 @@ pub struct AppState {
     pub webauthn: Arc<webauthn_rs::Webauthn>,
     pub passkey_reg_states: PasskeyRegStates,
     pub passkey_auth_states: PasskeyAuthStates,
+    pub tls: Option<crate::config::TlsConfig>,
 }
 
 #[derive(Default)]
@@ -390,7 +392,8 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     // deployment) lives under the operator-auth router below.
     let unlimited_public = Router::new()
         .route("/v1/health", get(entries::health))
-        .route("/v1/readyz", get(entries::readyz));
+        .route("/v1/readyz", get(entries::readyz))
+        .route("/v1/acme/account", get(acme_account::get_acme_account));
 
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(|req: &axum::http::Request<_>| {

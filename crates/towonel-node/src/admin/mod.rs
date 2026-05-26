@@ -2,6 +2,7 @@
 //! `towonel` binary. Each submodule groups related commands; shared helpers
 //! (URL/key resolution, response checking) live here.
 
+pub mod acme;
 pub mod entry;
 pub mod invite;
 pub mod port;

@@ -76,6 +76,11 @@ enum Command {
         #[command(subcommand)]
         action: PortAction,
     },
+    /// Operator-only: inspect ACME state (account URI for CAA pinning).
+    Acme {
+        #[command(subcommand)]
+        action: AcmeAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -232,6 +237,11 @@ enum PortAction {
         #[arg(long)]
         tenant_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AcmeAction {
+    Account,
 }
 
 #[derive(Subcommand)]
@@ -417,6 +427,9 @@ async fn main() -> anyhow::Result<()> {
                 api_key,
                 tenant_id,
             } => admin::port::cmd_port_list(hub_url, api_key, tenant_id).await,
+        },
+        Some(Command::Acme { action }) => match action {
+            AcmeAction::Account => admin::acme::cmd_acme_account().await,
         },
     }
 }

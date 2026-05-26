@@ -165,6 +165,7 @@ impl TestHub {
             },
             passkey_reg_states: super::api::new_passkey_reg_states(),
             passkey_auth_states: super::api::new_passkey_auth_states(),
+            tls: None,
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));
