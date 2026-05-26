@@ -7,6 +7,13 @@
 /// Register the standard Prometheus `process_*` metrics on `registry`.
 ///
 /// No-op on non-Linux platforms.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        clippy::missing_const_for_fn,
+        reason = "linux body uses non-const registry.register(); cfg shape must match"
+    )
+)]
 pub fn register(
     #[cfg_attr(
         not(target_os = "linux"),

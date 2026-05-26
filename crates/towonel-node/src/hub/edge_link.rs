@@ -305,7 +305,11 @@ async fn bump_liveness_only(
 ) -> bool {
     let now = now_ms();
     let cutoff = now.saturating_sub(super::api::AGENT_LIVE_TTL_MS);
-    match state.liveness.bump(&tenant_id, &agent_id, now, cutoff).await {
+    match state
+        .liveness
+        .bump(&tenant_id, &agent_id, now, cutoff)
+        .await
+    {
         Ok(b) => b,
         Err(e) => {
             warn!(error = %e, "edge_link session liveness bump failed");
