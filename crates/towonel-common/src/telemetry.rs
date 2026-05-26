@@ -29,7 +29,8 @@ impl Drop for TelemetryGuard {
 /// duration of the process.
 #[must_use]
 pub fn init(service_name: &str, version: &str) -> Option<TelemetryGuard> {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,opentelemetry_sdk=off"));
 
     let providers = try_build_providers(service_name, version);
 
@@ -39,7 +40,8 @@ pub fn init(service_name: &str, version: &str) -> Option<TelemetryGuard> {
         let tracer = opentelemetry::global::tracer(service_name.to_owned());
         let otel_trace_layer = OpenTelemetryLayer::new(tracer);
         let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider).with_filter(
-            "info,hyper=error,opentelemetry=error,reqwest=error"
+            "info,opentelemetry=off,opentelemetry_sdk=off,opentelemetry_otlp=off,\
+             opentelemetry_appender_tracing=off,hyper=off,h2=off,reqwest=off,tonic=off"
                 .parse::<EnvFilter>()
                 .unwrap_or_else(|_| EnvFilter::new("info")),
         );
