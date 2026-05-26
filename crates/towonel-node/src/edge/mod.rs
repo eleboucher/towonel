@@ -197,8 +197,9 @@ impl Edge {
             let router = Arc::clone(&self.router);
             let metrics = self.metrics.clone();
             let hub_client = self.hub_client.clone();
+            let permits = Arc::clone(&ctx.connection_permits);
             tasks.push(tokio::spawn(iroh_accept_loop(
-                endpoint, sessions, router, metrics, hub_client,
+                endpoint, sessions, router, metrics, hub_client, permits,
             )));
         }
 
@@ -234,6 +235,7 @@ async fn iroh_accept_loop(
     router: Arc<Router>,
     metrics: EdgeMetrics,
     hub_client: Option<Arc<dyn HubClient>>,
+    connection_permits: Arc<tokio::sync::Semaphore>,
 ) {
     info!("edge iroh accept loop ready");
     loop {
@@ -241,11 +243,17 @@ async fn iroh_accept_loop(
             info!("edge iroh endpoint closed, stopping accept loop");
             return;
         };
+        let Ok(permit) = Arc::clone(&connection_permits).try_acquire_owned() else {
+            metrics.connections_rejected_overload.inc();
+            drop(incoming);
+            continue;
+        };
         let sessions = Arc::clone(&sessions);
         let router = Arc::clone(&router);
         let metrics = metrics.clone();
         let hub_client = hub_client.clone();
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) =
                 handle_inbound_agent(incoming, sessions, router, metrics, hub_client).await
             {
