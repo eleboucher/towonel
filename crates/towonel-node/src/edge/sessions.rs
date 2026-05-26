@@ -83,23 +83,23 @@ impl SessionRegistry {
     }
 
     /// Only remove if the registered entry's `stable_id` still matches; a
-    /// stale handler task must not evict a fresh reconnection.
-    pub fn remove_if_current(&self, session: &AgentSession) {
+    /// stale handler task must not evict a fresh reconnection. Returns
+    /// `true` iff this call removed the session.
+    pub fn remove_if_current(&self, session: &AgentSession) -> bool {
         let agent_id = session.agent_id;
         let stable_id = session.conn_stable_id();
         let map = self.by_id.pin();
         let result = map.remove_if(&agent_id, |_, current| {
             current.conn_stable_id() == stable_id
         });
-        match result {
-            Ok(Some(_)) => {
-                self.metrics.active_sessions.dec();
-                self.tenants.pin().remove(&agent_id);
-                info!(agent = %agent_id.fmt_short(), "agent session removed");
-            }
-            Ok(None) | Err(_) => {
-                debug!(agent = %agent_id.fmt_short(), "session already replaced; not removing");
-            }
+        if let Ok(Some(_)) = result {
+            self.metrics.active_sessions.dec();
+            self.tenants.pin().remove(&agent_id);
+            info!(agent = %agent_id.fmt_short(), "agent session removed");
+            true
+        } else {
+            debug!(agent = %agent_id.fmt_short(), "session already replaced; not removing");
+            false
         }
     }
 

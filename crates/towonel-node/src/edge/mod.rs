@@ -309,8 +309,11 @@ async fn handle_inbound_agent(
         _close = conn.closed() => {}
     }
     let tenant = sessions.tenant_for(&agent_id);
-    sessions.remove_if_current(&session);
-    if let Some(tenant_id) = tenant
+    // Gated on the removal: on supersede the new session is already live
+    // and notifying here would clear its liveness entry mid-flight.
+    let removed = sessions.remove_if_current(&session);
+    if removed
+        && let Some(tenant_id) = tenant
         && let Some(client) = hub_client.as_deref()
         && let Ok(aid) = towonel_common::identity::AgentId::from_bytes(agent_id.as_bytes())
     {
