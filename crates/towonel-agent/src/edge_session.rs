@@ -262,7 +262,11 @@ fn filter_with(
 // UDP connect performs a kernel route lookup without sending packets, so this
 // returns false fast for v6 destinations on v4-only hosts.
 fn is_routable(addr: &SocketAddr) -> bool {
-    let bind = if addr.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+    let bind = if addr.is_ipv6() {
+        "[::]:0"
+    } else {
+        "0.0.0.0:0"
+    };
     let Ok(sock) = std::net::UdpSocket::bind(bind) else {
         return false;
     };
