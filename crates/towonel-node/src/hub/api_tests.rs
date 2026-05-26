@@ -1521,8 +1521,6 @@ async fn refresh_rate_limits_per_agent() {
 
 #[tokio::test]
 async fn upsert_agent_is_idempotent() {
-    use std::sync::Arc;
-
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
     let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
@@ -1589,8 +1587,7 @@ async fn upsert_agent_is_idempotent() {
         .iter()
         .filter(|e| {
             e.verify(tenant.public_key())
-                .map(|p| matches!(p.op, ConfigOp::UpsertAgent { .. }))
-                .unwrap_or(false)
+                .is_ok_and(|p| matches!(p.op, ConfigOp::UpsertAgent { .. }))
         })
         .count();
 

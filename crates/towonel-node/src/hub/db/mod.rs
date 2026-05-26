@@ -109,7 +109,7 @@ impl Db {
     }
 
     /// Check if an agent is already registered for a tenant by replaying
-    /// UpsertAgent/RevokeAgent entries. Used for idempotent UpsertAgent handling.
+    /// UpsertAgent/RevokeAgent entries. Used for idempotent `UpsertAgent` handling.
     pub async fn is_agent_registered(
         &self,
         tenant_id: &TenantId,
@@ -129,15 +129,11 @@ impl Db {
         for entry in entries {
             if let Ok(payload) = model_to_entry(entry)?.verify(pq_pubkey) {
                 match payload.op {
-                    ConfigOp::UpsertAgent { agent_id: id } => {
-                        if id == *agent_id {
-                            registered = true;
-                        }
+                    ConfigOp::UpsertAgent { agent_id: id } if id == *agent_id => {
+                        registered = true;
                     }
-                    ConfigOp::RevokeAgent { agent_id: id } => {
-                        if id == *agent_id {
-                            registered = false;
-                        }
+                    ConfigOp::RevokeAgent { agent_id: id } if id == *agent_id => {
+                        registered = false;
                     }
                     _ => {}
                 }
@@ -454,7 +450,7 @@ mod tests {
         db.insert(&entry, 1).await.unwrap();
 
         let registered = db
-            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), &tenant_kp.public_key())
+            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), tenant_kp.public_key())
             .await
             .unwrap();
         assert!(registered, "agent should be registered after UpsertAgent");
@@ -468,7 +464,7 @@ mod tests {
         let agent_kp = AgentKeypair::generate();
 
         let registered = db
-            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), &tenant_kp.public_key())
+            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), tenant_kp.public_key())
             .await
             .unwrap();
         assert!(
@@ -509,7 +505,7 @@ mod tests {
         db.insert(&entry, 2).await.unwrap();
 
         let registered = db
-            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), &tenant_kp.public_key())
+            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), tenant_kp.public_key())
             .await
             .unwrap();
         assert!(
@@ -562,7 +558,7 @@ mod tests {
         db.insert(&entry, 3).await.unwrap();
 
         let registered = db
-            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), &tenant_kp.public_key())
+            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), tenant_kp.public_key())
             .await
             .unwrap();
         assert!(registered, "agent should be registered after re-upsert");

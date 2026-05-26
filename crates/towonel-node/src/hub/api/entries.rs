@@ -259,6 +259,10 @@ async fn validate_service_op(
 /// 5. payload version check
 /// 6. hostname ownership check (for hostname ops only)
 /// 7. sequence uniqueness (DB UNIQUE constraint)
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear validation pipeline for config entries"
+)]
 pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) -> Response {
     let entry: SignedConfigEntry = match ciborium::from_reader(body.as_ref()) {
         Ok(e) => e,
@@ -352,7 +356,7 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
     if let ConfigOp::UpsertAgent { agent_id } = &payload.op {
         match state
             .db
-            .is_agent_registered(&payload.tenant_id, agent_id, &pq_pubkey)
+            .is_agent_registered(&payload.tenant_id, agent_id, pq_pubkey)
             .await
         {
             Ok(true) => {

@@ -132,6 +132,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let mut endpoint_builder = Endpoint::builder(Minimal)
         .secret_key(ctx.iroh_secret_key())
         .relay_mode(relay_mode)
+        .ca_roots_config(iroh::tls::CaRootsConfig::insecure_skip_verify())
         .address_lookup(edge_lookup)
         .portmapper_config(PortmapperConfig::Disabled);
     let iroh_port: u16 = match std::env::var("TOWONEL_AGENT_IROH_PORT") {
