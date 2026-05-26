@@ -19,10 +19,6 @@ use super::hub_link::HubLinkHandle;
 
 const CONTROL_RELAY_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Late-binding handle the hub fills with its `LivenessStore` once
-/// `AppState` is built; empty before then.
-pub type LivenessCell = Arc<OnceLock<Arc<dyn crate::hub::liveness::LivenessStore>>>;
-
 pub type RouteStream = Pin<Box<dyn Stream<Item = RouteTable> + Send + 'static>>;
 
 /// `(status_byte, response_body)` written back on the same QUIC stream.
@@ -38,15 +34,14 @@ pub trait ControlFrameHandler: Send + Sync {
 
 pub type ControlHandlerCell = Arc<OnceLock<Arc<dyn ControlFrameHandler>>>;
 
-/// Hub-side rebuild trigger fired when a session bump transitions an agent
-/// from not-live to live; without it the edge keeps its empty startup table.
-#[async_trait::async_trait]
-pub trait RouteRebuilder: Send + Sync {
-    async fn rebuild_and_broadcast(&self) -> anyhow::Result<()>;
-    fn live_cutoff_ms(&self, now_ms: u64) -> u64;
+/// Hub-side hook the in-process edge calls on every session event. The
+/// hub impl forwards to `LiveAgents` and wakes the rebuild coalescer.
+pub trait LiveAgentSink: Send + Sync {
+    fn record_added(&self, tenant_id: TenantId, agent_id: AgentId) -> bool;
+    fn record_removed(&self, tenant_id: TenantId, agent_id: AgentId) -> bool;
 }
 
-pub type RouteRebuilderCell = Arc<OnceLock<Arc<dyn RouteRebuilder>>>;
+pub type LiveAgentSinkCell = Arc<OnceLock<Arc<dyn LiveAgentSink>>>;
 
 #[async_trait::async_trait]
 pub trait HubClient: Send + Sync {
@@ -55,10 +50,7 @@ pub trait HubClient: Send + Sync {
     /// Hub verifies the frame; the edge does not inspect it.
     async fn handle_control_frame(&self, frame: Vec<u8>) -> anyhow::Result<ControlResponse>;
 
-    /// Best-effort; the next route rebuild or a reconnect `SessionsSnapshot`
-    /// repairs any miss.
     async fn record_session_added(&self, tenant_id: TenantId, agent_id: AgentId);
-
     async fn record_session_removed(&self, tenant_id: TenantId, agent_id: AgentId);
 }
 
@@ -66,24 +58,21 @@ pub struct InProcessHubClient {
     rx: Mutex<Option<broadcast::Receiver<RouteTable>>>,
     tx: broadcast::Sender<RouteTable>,
     control_handler: ControlHandlerCell,
-    liveness: LivenessCell,
-    rebuilder: RouteRebuilderCell,
+    live_agents: LiveAgentSinkCell,
 }
 
 impl InProcessHubClient {
     pub fn new(
         tx: broadcast::Sender<RouteTable>,
         control_handler: ControlHandlerCell,
-        liveness: LivenessCell,
-        rebuilder: RouteRebuilderCell,
+        live_agents: LiveAgentSinkCell,
     ) -> Self {
         let rx = tx.subscribe();
         Self {
             rx: Mutex::new(Some(rx)),
             tx,
             control_handler,
-            liveness,
-            rebuilder,
+            live_agents,
         }
     }
 }
@@ -116,30 +105,15 @@ impl HubClient for InProcessHubClient {
     }
 
     async fn record_session_added(&self, tenant_id: TenantId, agent_id: AgentId) {
-        // Both cells fill in the same boot step; if either is empty the
-        // hub isn't ready, so swallow the event rather than bump-and-lose.
-        let (Some(liveness), Some(rebuilder)) = (self.liveness.get(), self.rebuilder.get()) else {
-            return;
-        };
-        let now = towonel_common::time::now_ms();
-        let cutoff = rebuilder.live_cutoff_ms(now);
-        let became_live = match liveness.bump(&tenant_id, &agent_id, now, cutoff).await {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!(error = %e, "in-process liveness bump failed");
-                return;
-            }
-        };
-        if !became_live {
-            return;
-        }
-        if let Err(e) = rebuilder.rebuild_and_broadcast().await {
-            tracing::warn!(error = %e, "route rebuild after session_added failed");
+        if let Some(sink) = self.live_agents.get() {
+            sink.record_added(tenant_id, agent_id);
         }
     }
 
-    async fn record_session_removed(&self, _tenant_id: TenantId, _agent_id: AgentId) {
-        // Single-hub volatile model: prune loop ages stale rows out.
+    async fn record_session_removed(&self, tenant_id: TenantId, agent_id: AgentId) {
+        if let Some(sink) = self.live_agents.get() {
+            sink.record_removed(tenant_id, agent_id);
+        }
     }
 }
 
@@ -247,7 +221,6 @@ mod tests {
             tx.clone(),
             Arc::new(OnceLock::new()),
             Arc::new(OnceLock::new()),
-            Arc::new(OnceLock::new()),
         );
 
         tx.send(RouteTable::from_raw(std::collections::HashMap::new()))
@@ -263,12 +236,8 @@ mod tests {
     #[tokio::test]
     async fn handle_control_frame_returns_not_implemented_by_default() {
         let (tx, _) = broadcast::channel(8);
-        let client = InProcessHubClient::new(
-            tx,
-            Arc::new(OnceLock::new()),
-            Arc::new(OnceLock::new()),
-            Arc::new(OnceLock::new()),
-        );
+        let client =
+            InProcessHubClient::new(tx, Arc::new(OnceLock::new()), Arc::new(OnceLock::new()));
         let (status, body) = client
             .handle_control_frame(b"anything".to_vec())
             .await
@@ -367,7 +336,6 @@ mod tests {
         let (tx, _) = broadcast::channel(8);
         let client = InProcessHubClient::new(
             tx.clone(),
-            Arc::new(OnceLock::new()),
             Arc::new(OnceLock::new()),
             Arc::new(OnceLock::new()),
         );

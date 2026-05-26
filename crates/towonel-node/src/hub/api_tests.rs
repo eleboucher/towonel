@@ -792,10 +792,12 @@ async fn bootstrap_rejects_missing_invite() {
 }
 
 #[tokio::test]
-async fn prune_stale_liveness_drops_agent_from_route_table() {
-    // Seed an agent as live, submit its UpsertAgent + UpsertHostname, verify
-    // the route table includes it, then age its liveness row past the cutoff
-    // and confirm a liveness-aware rebuild drops it.
+async fn session_removed_drops_agent_from_route_table() {
+    // Register an agent + hostname via signed entries, mark its session
+    // live, verify the route table includes it, then mark the session
+    // removed and confirm the next rebuild drops it.
+    use super::live_agents::SourceKey;
+
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
 
@@ -837,36 +839,36 @@ async fn prune_stale_liveness_drops_agent_from_route_table() {
         assert_eq!(resp.status(), 200);
     }
 
-    let now = towonel_common::time::now_ms();
-    let live_cutoff = now.saturating_sub(super::api::AGENT_LIVE_TTL_MS);
-    hub.state
-        .liveness
-        .bump(&tenant.id(), &agent.id(), now, live_cutoff)
-        .await
-        .unwrap();
+    let source = SourceKey::Remote([0xAB; 32]);
+    assert!(
+        hub.state
+            .live_agents
+            .record_added(source, tenant.id(), agent.id())
+    );
     super::api::rebuild_and_broadcast_routes(&hub.state)
         .await
         .unwrap();
+    assert!(
+        hub.state
+            .live_agents
+            .snapshot()
+            .contains(&(tenant.id(), agent.id()))
+    );
 
-    let live = hub.state.liveness.live_agents(0).await.unwrap();
-    assert!(live.contains(&(tenant.id(), agent.id())));
-
-    let ancient = now.saturating_sub(10 * 60 * 1_000);
-    hub.state
-        .liveness
-        .bump(&tenant.id(), &agent.id(), ancient, live_cutoff)
+    assert!(
+        hub.state
+            .live_agents
+            .record_removed(source, tenant.id(), agent.id())
+    );
+    super::api::rebuild_and_broadcast_routes(&hub.state)
         .await
         .unwrap();
-    let pruned = hub
-        .state
-        .liveness
-        .prune(now.saturating_sub(5 * 60 * 1_000))
-        .await
-        .unwrap();
-    assert_eq!(pruned, 1);
-
-    let live_after = hub.state.liveness.live_agents(0).await.unwrap();
-    assert!(!live_after.contains(&(tenant.id(), agent.id())));
+    assert!(
+        !hub.state
+            .live_agents
+            .snapshot()
+            .contains(&(tenant.id(), agent.id()))
+    );
 }
 
 #[tokio::test]

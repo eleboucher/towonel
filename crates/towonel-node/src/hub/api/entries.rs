@@ -14,8 +14,8 @@ use super::super::db::port_reservations::PortProtocol;
 use super::super::metrics::reject_reason;
 use super::{
     AppState, PROTOCOL_VERSION, cbor_response, error_response, hostname_not_owned, internal_error,
-    invalid_request, invalid_signature, json_ok, rebuild_and_broadcast_routes, sequence_conflict,
-    tenant_not_allowed, unsupported_op, unsupported_version,
+    invalid_request, invalid_signature, json_ok, refresh_port_index, sequence_conflict,
+    tenant_not_allowed, trigger_route_rebuild, unsupported_op, unsupported_version,
 };
 
 #[derive(Serialize)]
@@ -362,9 +362,10 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
 
     state.metrics.entries_accepted.inc();
 
-    if let Err(e) = rebuild_and_broadcast_routes(&state).await {
-        warn!(error = %e, "failed to rebuild routes after insert");
+    if let Err(e) = refresh_port_index(&state).await {
+        warn!(error = %e, "port index refresh after insert failed");
     }
+    trigger_route_rebuild(&state);
 
     cbor_response(&PostEntryResponse {
         status: "ok",
@@ -499,9 +500,10 @@ pub(super) async fn delete_tenant(
 
     state.policy_update(|p| p.remove(&tenant_id));
 
-    if let Err(e) = rebuild_and_broadcast_routes(&state).await {
-        warn!(error = %e, "failed to rebuild routes after tenant removal");
+    if let Err(e) = refresh_port_index(&state).await {
+        warn!(error = %e, "port index refresh after tenant removal failed");
     }
+    trigger_route_rebuild(&state);
 
     json_ok(serde_json::json!({
         "status": "removed",

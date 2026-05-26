@@ -130,6 +130,11 @@ impl Edge {
     }
 
     #[must_use]
+    pub fn sessions(&self) -> Arc<SessionRegistry> {
+        Arc::clone(&self.sessions)
+    }
+
+    #[must_use]
     pub(crate) fn with_proxy_protocol(mut self, cfg: ProxyProtocolConfig) -> Self {
         self.proxy_protocol = Arc::new(cfg);
         self

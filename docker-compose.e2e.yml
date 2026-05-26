@@ -73,7 +73,9 @@ services:
       E2E_ORIGIN_TLS_PORT: "9443"
       E2E_BROKER_LISTEN: 0.0.0.0:7777
       E2E_AGENT_CONTAINER: towonel-e2e-agent
-      E2E_LIVENESS_BUDGET_SECS: "150"
+      E2E_HUB_CONTAINER: towonel-e2e-hub
+      E2E_LIVENESS_BUDGET_SECS: "30"
+      E2E_RECOVERY_BUDGET_SECS: "60"
     volumes:
       - ./tests/e2e/fixtures:/fixtures:ro
       - hub-data:/hub-data:ro

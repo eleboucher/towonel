@@ -107,6 +107,18 @@ impl SessionRegistry {
     pub fn get(&self, agent_id: &EndpointId) -> Option<Arc<AgentSession>> {
         self.by_id.pin().get(agent_id).cloned()
     }
+
+    /// Pairs each registered agent with its verified tenant; agents whose
+    /// `EdgeCred` exchange hasn't completed are skipped.
+    #[must_use]
+    pub fn active_with_tenant(&self) -> Vec<(EndpointId, TenantId)> {
+        let tenants = self.tenants.pin();
+        self.by_id
+            .pin()
+            .iter()
+            .filter_map(|(agent_id, _)| tenants.get(agent_id).map(|t| (*agent_id, *t)))
+            .collect()
+    }
 }
 
 #[cfg(test)]

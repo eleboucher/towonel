@@ -12,14 +12,14 @@ use tracing::{Instrument, info, info_span, warn};
 use towonel_common::edge_link::{
     EdgeToHub, HubSigningKey, HubToEdge, PortReservationEntry, read_edge_to_hub, write_hub_to_edge,
 };
-use towonel_common::identity::AgentId;
 use towonel_common::routing::RouteTable;
 use towonel_common::time::now_ms;
 use towonel_common::tunnel::CONTROL_STATUS_INTERNAL_ERROR;
 
 use crate::edge::hub_client::ControlFrameHandler;
 
-use super::api::AppState;
+use super::api::{AppState, trigger_route_rebuild};
+use super::live_agents::SourceKey;
 use super::live_edges::EdgeId;
 
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -165,7 +165,16 @@ async fn handle_connection(
 
     let (writer_tx, writer_rx) = mpsc::channel::<HubToEdge>(64);
     let writer_task = tokio::spawn(run_writer(writer, writer_rx));
-    let pusher_task = tokio::spawn(push_routes(route_rx, writer_tx.clone(), state.clone()));
+    // Gates push_routes' first send on the edge's SessionsSnapshot. Without
+    // it the first table reflects an empty set for this edge and others
+    // miss-route its hostnames until the snapshot lands.
+    let snapshot_received = Arc::new(tokio::sync::Notify::new());
+    let pusher_task = tokio::spawn(push_routes(
+        route_rx,
+        writer_tx.clone(),
+        state.clone(),
+        Arc::clone(&snapshot_received),
+    ));
     let port_pusher_task = tokio::spawn(push_port_reservations(
         state.port_reservations_tx.subscribe(),
         writer_tx.clone(),
@@ -175,12 +184,15 @@ async fn handle_connection(
     let control_semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_CONTROL));
     let result = read_loop(
         reader,
-        &state,
-        edge_id,
-        &control_handler,
-        &control_semaphore,
-        writer_tx.clone(),
-        shutdown.clone(),
+        ReadLoopCtx {
+            state: &state,
+            edge_id,
+            control_handler: &control_handler,
+            control_semaphore: &control_semaphore,
+            writer_tx: writer_tx.clone(),
+            shutdown: shutdown.clone(),
+            snapshot_received,
+        },
     )
     .await;
 
@@ -189,22 +201,37 @@ async fn handle_connection(
     port_pusher_task.abort();
     writer_task.abort();
     state.live_edges.remove(&edge_id);
+    if state.live_agents.drop_source(SourceKey::Remote(edge_id)) {
+        trigger_route_rebuild(&state);
+    }
     info!(edge = %hex::encode(edge_id), "edge_link disconnected");
     result
 }
 
-async fn read_loop<R>(
-    mut reader: R,
-    state: &Arc<AppState>,
+struct ReadLoopCtx<'a> {
+    state: &'a Arc<AppState>,
     edge_id: EdgeId,
-    control_handler: &Arc<dyn ControlFrameHandler>,
-    control_semaphore: &Arc<Semaphore>,
+    control_handler: &'a Arc<dyn ControlFrameHandler>,
+    control_semaphore: &'a Arc<Semaphore>,
     writer_tx: mpsc::Sender<HubToEdge>,
     shutdown: CancellationToken,
-) -> anyhow::Result<()>
+    snapshot_received: Arc<tokio::sync::Notify>,
+}
+
+async fn read_loop<R>(mut reader: R, ctx: ReadLoopCtx<'_>) -> anyhow::Result<()>
 where
     R: AsyncRead + Unpin,
 {
+    let ReadLoopCtx {
+        state,
+        edge_id,
+        control_handler,
+        control_semaphore,
+        writer_tx,
+        shutdown,
+        snapshot_received,
+    } = ctx;
+    let source = SourceKey::Remote(edge_id);
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
@@ -214,25 +241,24 @@ where
                         warn!(edge = %hex::encode(edge_id), "duplicate Hello on established link; ignoring");
                     }
                     Ok(EdgeToHub::SessionAdded { agent_id, tenant_id }) => {
-                        bump_liveness(state, agent_id, tenant_id).await;
+                        if state.live_agents.record_added(source, tenant_id, agent_id) {
+                            trigger_route_rebuild(state);
+                        }
                     }
                     Ok(EdgeToHub::SessionRemoved { agent_id }) => {
-                        tracing::debug!(agent = %agent_id, "session removed");
+                        // tenant_of recovers the tenant from prior state.
+                        if let Some(tenant_id) = state.live_agents.tenant_of(source, &agent_id)
+                            && state.live_agents.record_removed(source, tenant_id, agent_id)
+                        {
+                            trigger_route_rebuild(state);
+                        }
                     }
                     Ok(EdgeToHub::SessionsSnapshot { sessions }) => {
-                        // Bump all, rebuild once — avoids N back-to-back rebuilds
-                        // on edge reconnect that converge to the same table.
-                        let mut any_transition = false;
-                        for (agent_id, tenant_id) in sessions {
-                            if bump_liveness_only(state, agent_id, tenant_id).await {
-                                any_transition = true;
-                            }
+                        let pairs: Vec<_> = sessions.into_iter().map(|(a, t)| (t, a)).collect();
+                        if state.live_agents.replace(source, pairs) {
+                            trigger_route_rebuild(state);
                         }
-                        if any_transition
-                            && let Err(e) = super::api::rebuild_and_broadcast_routes(state).await
-                        {
-                            warn!(error = %e, "route rebuild after SessionsSnapshot failed");
-                        }
+                        snapshot_received.notify_one();
                     }
                     Ok(EdgeToHub::ControlRequest { request_id, frame }) => {
                         if let Ok(permit) = Arc::clone(control_semaphore).try_acquire_owned() {
@@ -284,40 +310,6 @@ where
     }
 }
 
-async fn bump_liveness(
-    state: &Arc<AppState>,
-    agent_id: AgentId,
-    tenant_id: towonel_common::identity::TenantId,
-) {
-    if !bump_liveness_only(state, agent_id, tenant_id).await {
-        return;
-    }
-    if let Err(e) = super::api::rebuild_and_broadcast_routes(state).await {
-        warn!(error = %e, "route rebuild after session_added failed");
-    }
-}
-
-/// Bump only; returns the transition so the caller batches the rebuild.
-async fn bump_liveness_only(
-    state: &Arc<AppState>,
-    agent_id: AgentId,
-    tenant_id: towonel_common::identity::TenantId,
-) -> bool {
-    let now = now_ms();
-    let cutoff = now.saturating_sub(super::api::AGENT_LIVE_TTL_MS);
-    match state
-        .liveness
-        .bump(&tenant_id, &agent_id, now, cutoff)
-        .await
-    {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(error = %e, "edge_link session liveness bump failed");
-            false
-        }
-    }
-}
-
 async fn run_writer<W>(mut writer: W, mut rx: mpsc::Receiver<HubToEdge>) -> anyhow::Result<()>
 where
     W: AsyncWrite + Unpin,
@@ -332,7 +324,11 @@ async fn push_routes(
     mut route_rx: broadcast::Receiver<RouteTable>,
     writer_tx: mpsc::Sender<HubToEdge>,
     state: Arc<AppState>,
+    snapshot_received: Arc<tokio::sync::Notify>,
 ) -> anyhow::Result<()> {
+    // Wait for SessionsSnapshot before shipping the first table — see
+    // the snapshot_received comment in handle_link.
+    snapshot_received.notified().await;
     // Initial snapshot so a fresh edge converges before the next mutation.
     if let Ok(initial) = build_current_route_table(&state).await
         && writer_tx
@@ -366,11 +362,8 @@ async fn push_routes(
 }
 
 async fn build_current_route_table(state: &Arc<AppState>) -> anyhow::Result<RouteTable> {
-    let cutoff = now_ms().saturating_sub(super::api::AGENT_LIVE_TTL_MS);
-    let (entries, live) = tokio::try_join!(
-        state.db.get_all_entries(),
-        state.liveness.live_agents(cutoff)
-    )?;
+    let entries = state.db.get_all_entries().await?;
+    let live = state.live_agents.snapshot();
     let policy = state.policy.load();
     Ok(RouteTable::from_entries_with_liveness(
         &entries,

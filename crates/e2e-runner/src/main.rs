@@ -63,6 +63,15 @@ async fn main() -> Result<()> {
     )
     .await?;
 
+    cases::route_recovery_after_hub_restart::run(
+        &docker,
+        &ctx.hub_container,
+        &ctx.edge_host,
+        ctx.origin_tcp_port,
+        ctx.recovery_budget,
+    )
+    .await?;
+
     Ok(())
 }
 
@@ -75,7 +84,9 @@ struct Context_ {
     edge_tls_port: u16,
     origin_tcp_port: u16,
     agent_container: String,
+    hub_container: String,
     liveness_budget: Duration,
+    recovery_budget: Duration,
 }
 
 impl Context_ {
@@ -86,6 +97,12 @@ impl Context_ {
             .transpose()
             .context("E2E_LIVENESS_BUDGET_SECS")?
             .unwrap_or(150);
+        let recovery_budget_secs: u64 = std::env::var("E2E_RECOVERY_BUDGET_SECS")
+            .ok()
+            .map(|s| s.parse())
+            .transpose()
+            .context("E2E_RECOVERY_BUDGET_SECS")?
+            .unwrap_or(60);
         Ok(Self {
             hub_base: required("E2E_HUB_BASE")?,
             operator_key_file: required("E2E_OPERATOR_KEY_FILE")?.into(),
@@ -100,7 +117,9 @@ impl Context_ {
                 .parse()
                 .context("E2E_ORIGIN_TCP_PORT")?,
             agent_container: required("E2E_AGENT_CONTAINER")?,
+            hub_container: required("E2E_HUB_CONTAINER")?,
             liveness_budget: Duration::from_secs(liveness_budget_secs),
+            recovery_budget: Duration::from_secs(recovery_budget_secs),
         })
     }
 }

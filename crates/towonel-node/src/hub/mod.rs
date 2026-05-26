@@ -4,8 +4,8 @@ pub mod auth;
 pub mod control;
 pub mod db;
 pub mod edge_link;
+pub mod live_agents;
 pub mod live_edges;
-pub mod liveness;
 pub mod mail;
 pub mod metrics;
 pub mod signing;
@@ -258,13 +258,12 @@ pub struct Hub {
     p: HubParams,
     /// `Some` only when the hub is colocated with an edge; filled at boot.
     control_handler_cell: Option<crate::edge::hub_client::ControlHandlerCell>,
-    liveness_cell: Option<crate::edge::hub_client::LivenessCell>,
-    route_rebuilder_cell: Option<crate::edge::hub_client::RouteRebuilderCell>,
+    live_agents_sink_cell: Option<crate::edge::hub_client::LiveAgentSinkCell>,
 }
 
 fn spawn_background_loops(state: &Arc<api::AppState>) {
     tokio::spawn(refresh_metrics_loop(Arc::clone(state)));
-    tokio::spawn(agent_liveness_prune_loop(Arc::clone(state)));
+    tokio::spawn(route_rebuild_loop(Arc::clone(state)));
     tokio::spawn(session_prune_loop(Arc::clone(state)));
 }
 
@@ -273,8 +272,7 @@ impl Hub {
         Self {
             p: params,
             control_handler_cell: None,
-            liveness_cell: None,
-            route_rebuilder_cell: None,
+            live_agents_sink_cell: None,
         }
     }
 
@@ -288,17 +286,11 @@ impl Hub {
     }
 
     #[must_use]
-    pub fn with_liveness_cell(mut self, cell: crate::edge::hub_client::LivenessCell) -> Self {
-        self.liveness_cell = Some(cell);
-        self
-    }
-
-    #[must_use]
-    pub fn with_route_rebuilder_cell(
+    pub fn with_live_agents_sink_cell(
         mut self,
-        cell: crate::edge::hub_client::RouteRebuilderCell,
+        cell: crate::edge::hub_client::LiveAgentSinkCell,
     ) -> Self {
-        self.route_rebuilder_cell = Some(cell);
+        self.live_agents_sink_cell = Some(cell);
         self
     }
 
@@ -328,8 +320,8 @@ impl Hub {
         db.verify_or_seed_canary(&self.p.kek, &self.p.invite_hash_key)
             .await?;
 
-        let liveness: liveness::SharedLivenessStore =
-            Arc::new(liveness::InMemoryLivenessStore::new());
+        let live_agents = Arc::new(live_agents::LiveAgents::new());
+        let route_rebuild_notify = Arc::new(tokio::sync::Notify::new());
 
         let signer = Arc::new(signing::get_or_create_active_signing_key(&db, &self.p.kek).await?);
         info!(kid = signer.kid(), "active hub signing key loaded");
@@ -372,20 +364,6 @@ impl Hub {
             policy.register_tenant(&tenant.tenant_id, tenant.pq_public_key, tenant.hostnames);
         }
 
-        match db.get_all_entries().await {
-            Ok(entries) => {
-                let table = RouteTable::from_entries_with_liveness(
-                    &entries,
-                    &policy,
-                    Some(&std::collections::HashSet::new()),
-                );
-                if self.p.route_tx.send(table).is_err() {
-                    tracing::debug!("startup route broadcast: no subscribers yet");
-                }
-            }
-            Err(e) => tracing::warn!(error = %e, "initial route broadcast skipped"),
-        }
-
         let state = Arc::new(api::AppState {
             db,
             route_tx: self.p.route_tx.clone(),
@@ -415,7 +393,8 @@ impl Hub {
             login_sentinel_hash: api::compute_login_sentinel_hash().await?,
             twofa_attempt_limiter: api::new_twofa_attempt_limiter(),
             live_edges: Arc::new(live_edges::LiveEdges::new()),
-            liveness,
+            live_agents: Arc::clone(&live_agents),
+            route_rebuild_notify: Arc::clone(&route_rebuild_notify),
             web_enabled: self.p.web_enabled,
             mailer: self.p.mailer.clone(),
             port_reservations_tx: tokio::sync::broadcast::channel(64).0,
@@ -447,20 +426,14 @@ impl Hub {
             tracing::warn!("hub control handler cell was already set; ignoring");
         }
 
-        if let Some(cell) = self.liveness_cell.as_ref()
-            && cell.set(Arc::clone(&state.liveness)).is_err()
-        {
-            tracing::warn!("hub liveness cell was already set; ignoring");
-        }
-
-        let route_rebuilder: Arc<dyn crate::edge::hub_client::RouteRebuilder> =
-            Arc::new(StateRouteRebuilder {
+        let live_agents_sink: Arc<dyn crate::edge::hub_client::LiveAgentSink> =
+            Arc::new(LocalLiveAgentSink {
                 state: Arc::clone(&state),
             });
-        if let Some(cell) = self.route_rebuilder_cell.as_ref()
-            && cell.set(Arc::clone(&route_rebuilder)).is_err()
+        if let Some(cell) = self.live_agents_sink_cell.as_ref()
+            && cell.set(Arc::clone(&live_agents_sink)).is_err()
         {
-            tracing::warn!("hub route rebuilder cell was already set; ignoring");
+            tracing::warn!("hub live agents sink cell was already set; ignoring");
         }
 
         let api_app = api::router(Arc::clone(&state))
@@ -546,26 +519,18 @@ impl Hub {
     }
 }
 
-/// Catches sessions whose `SessionRemoved` never arrived (crashed pod, OOM-kill).
-async fn agent_liveness_prune_loop(state: Arc<api::AppState>) {
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    tick.tick().await; // skip immediate first tick
+/// Drains `route_rebuild_notify` and runs one rebuild per wake. Bursts
+/// of N notifications collapse to one rebuild (needed for many-agent
+/// reconnect storms).
+async fn route_rebuild_loop(state: Arc<api::AppState>) {
+    let notify = Arc::clone(&state.route_rebuild_notify);
+    if let Err(e) = api::rebuild_and_broadcast_routes(&state).await {
+        tracing::warn!(error = %e, "initial route rebuild failed");
+    }
     loop {
-        tick.tick().await;
-        let cutoff = towonel_common::time::now_ms().saturating_sub(api::AGENT_PRUNE_TTL_MS);
-        let pruned = match state.liveness.prune(cutoff).await {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(error = %e, "liveness prune failed");
-                continue;
-            }
-        };
-        if pruned > 0 {
-            tracing::debug!(pruned, "pruned stale liveness rows");
-            if let Err(e) = api::rebuild_and_broadcast_routes(&state).await {
-                tracing::warn!(error = %e, "route rebuild after liveness prune failed");
-            }
+        notify.notified().await;
+        if let Err(e) = api::rebuild_and_broadcast_routes(&state).await {
+            tracing::warn!(error = %e, "route rebuild failed");
         }
     }
 }
@@ -604,18 +569,42 @@ async fn refresh_metrics_loop(state: Arc<api::AppState>) {
     }
 }
 
-struct StateRouteRebuilder {
+/// Bridges the colocated in-process edge's session events into the hub's
+/// [`live_agents::LiveAgents`] under `SourceKey::Local`.
+struct LocalLiveAgentSink {
     state: Arc<api::AppState>,
 }
 
-#[async_trait::async_trait]
-impl crate::edge::hub_client::RouteRebuilder for StateRouteRebuilder {
-    async fn rebuild_and_broadcast(&self) -> anyhow::Result<()> {
-        api::rebuild_and_broadcast_routes(&self.state).await
+impl crate::edge::hub_client::LiveAgentSink for LocalLiveAgentSink {
+    fn record_added(
+        &self,
+        tenant_id: towonel_common::identity::TenantId,
+        agent_id: towonel_common::identity::AgentId,
+    ) -> bool {
+        let changed =
+            self.state
+                .live_agents
+                .record_added(live_agents::SourceKey::Local, tenant_id, agent_id);
+        if changed {
+            api::trigger_route_rebuild(&self.state);
+        }
+        changed
     }
 
-    fn live_cutoff_ms(&self, now_ms: u64) -> u64 {
-        now_ms.saturating_sub(api::AGENT_LIVE_TTL_MS)
+    fn record_removed(
+        &self,
+        tenant_id: towonel_common::identity::TenantId,
+        agent_id: towonel_common::identity::AgentId,
+    ) -> bool {
+        let changed = self.state.live_agents.record_removed(
+            live_agents::SourceKey::Local,
+            tenant_id,
+            agent_id,
+        );
+        if changed {
+            api::trigger_route_rebuild(&self.state);
+        }
+        changed
     }
 }
 

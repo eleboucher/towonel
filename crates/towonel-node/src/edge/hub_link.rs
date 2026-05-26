@@ -15,6 +15,7 @@ use towonel_common::edge_link::{
     EDGE_LINK_VERSION, EdgeToHub, HubSigningKey, HubToEdge, Kid, read_hub_to_edge,
     write_edge_to_hub,
 };
+use towonel_common::identity::AgentId;
 use towonel_common::routing::RouteTable;
 
 use super::port_reservations::PortReservations;
@@ -55,6 +56,9 @@ pub struct HubLinkHandle {
     pub port_reservations: Arc<PortReservations>,
     pub next_request_id: Arc<AtomicU64>,
     pub pending_control: PendingControl,
+    /// Source the supervisor reads to ship a `SessionsSnapshot` after each
+    /// (re)connect. `None` only in unit tests that bypass the supervisor.
+    pub sessions: Option<Arc<super::sessions::SessionRegistry>>,
 }
 
 impl HubLinkHandle {
@@ -72,7 +76,14 @@ impl HubLinkHandle {
             port_reservations: PortReservations::new(),
             next_request_id: Arc::new(AtomicU64::new(1)),
             pending_control: Arc::new(Mutex::new(HashMap::new())),
+            sessions: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: Arc<super::sessions::SessionRegistry>) -> Self {
+        self.sessions = Some(sessions);
+        self
     }
 }
 
@@ -155,6 +166,37 @@ async fn run_once(
         }
         other => anyhow::bail!("expected Welcome, got {other:?}"),
     }
+
+    // Hub gates its initial RouteSnapshot on this frame, so always send
+    // one — empty is fine. Sent inline before run_loop owns write_half.
+    let snapshot_sessions = handle
+        .sessions
+        .as_ref()
+        .map(|r| {
+            r.active_with_tenant()
+                .into_iter()
+                .filter_map(|(eid, t)| match AgentId::from_bytes(eid.as_bytes()) {
+                    Ok(a) => Some((a, t)),
+                    Err(e) => {
+                        warn!(
+                            agent = %eid.fmt_short(),
+                            error = %e,
+                            "EndpointId did not round-trip to AgentId; omitted from snapshot"
+                        );
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    write_edge_to_hub(
+        &mut write_half,
+        &EdgeToHub::SessionsSnapshot {
+            sessions: snapshot_sessions,
+        },
+    )
+    .await
+    .context("send SessionsSnapshot")?;
 
     // mpsc receivers are single-consumer: take for this link, restore on disconnect.
     let mut session_rx = take_rx(&handle.session_event_rx);

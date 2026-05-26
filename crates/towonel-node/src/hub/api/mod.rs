@@ -54,16 +54,8 @@ pub(super) use towonel_common::JSON_CONTENT_TYPE;
 /// Protocol version supported by this hub.
 pub const PROTOCOL_VERSION: u16 = 1;
 
-/// Maximum age of an agent heartbeat for the agent to still appear in route
-/// tables. Pods heartbeat every 20s; 90s tolerates two missed beats.
-pub const AGENT_LIVE_TTL_MS: u64 = 90_000;
-
 /// Upper bound on any request body accepted by the hub API.
 pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;
-
-/// Rows older than this are physically deleted by the prune loop. Five
-/// minutes is long enough to debug a dead pod without keeping rows forever.
-pub const AGENT_PRUNE_TTL_MS: u64 = 300_000;
 
 /// Freshness window for signed heartbeat/edge-subscribe requests. A request
 /// outside ±`MAX_CLOCK_SKEW_MS` is rejected outright.
@@ -220,7 +212,9 @@ pub struct AppState {
     pub login_sentinel_hash: String,
     pub twofa_attempt_limiter: TwoFaAttemptLimiter,
     pub live_edges: Arc<super::live_edges::LiveEdges>,
-    pub liveness: super::liveness::SharedLivenessStore,
+    pub live_agents: Arc<super::live_agents::LiveAgents>,
+    /// Fed via [`trigger_route_rebuild`]; drained by the coalescer task.
+    pub route_rebuild_notify: Arc<tokio::sync::Notify>,
     pub web_enabled: bool,
     pub mailer: Option<super::mail::SharedMailer>,
     pub port_reservations_tx: broadcast::Sender<PortReservationDelta>,
@@ -332,23 +326,30 @@ impl AppState {
     }
 }
 
-/// Build a route table from the hub's current state (policy + entries +
-/// agent liveness) and broadcast it to edges.
-///
-/// The liveness-aware rebuild is the single funnel every route update flows
-/// through; it guarantees stale agents vanish from the edge view as soon as
-/// their heartbeat lapses.
+/// Wake the rebuild coalescer. Bursts collapse into a single rebuild.
+pub fn trigger_route_rebuild(state: &AppState) {
+    state.route_rebuild_notify.notify_one();
+}
+
+/// Synchronous because the next `find_port_conflict` after an insert must
+/// see the new claim; the coalesced route rebuild can't satisfy that.
+pub async fn refresh_port_index(state: &Arc<AppState>) -> anyhow::Result<()> {
+    let policy_snapshot = state.policy.load_full();
+    let entries = state.db.get_all_entries().await?;
+    let idx = build_port_index(&entries, &policy_snapshot);
+    state.port_index.store(Arc::new(idx));
+    Ok(())
+}
+
+/// Build the table from policy + entries + live agents and broadcast.
+/// Driven by the coalescer in `hub::Hub::run`; everything else funnels
+/// through [`trigger_route_rebuild`].
 pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Result<()> {
     let policy_snapshot = state.policy.load_full();
-    let cutoff = towonel_common::time::now_ms().saturating_sub(AGENT_LIVE_TTL_MS);
-    let (entries, live) = tokio::try_join!(
-        state.db.get_all_entries(),
-        state.liveness.live_agents(cutoff)
-    )?;
-    // The port index intentionally ignores liveness AND ignores whether the
-    // tenant has any registered agents — an agent that crashed overnight
-    // (or hasn't yet been provisioned) still owns its declared `listen_port`,
-    // so another tenant can't race to claim it.
+    let entries = state.db.get_all_entries().await?;
+    let live = state.live_agents.snapshot();
+    // Port index ignores liveness and tenant-has-agents so a crashed pod
+    // doesn't free its port for another tenant to race-claim.
     let idx = build_port_index(&entries, &policy_snapshot);
     state.port_index.store(Arc::new(idx));
 

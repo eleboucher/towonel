@@ -1,9 +1,3 @@
-//! Prometheus standard `process_*` metrics (CPU, RSS, open FDs, start time).
-//!
-//! Thin wrapper over [`prometheus::process_collector::ProcessCollector`],
-//! which uses `procfs` under the hood and is Linux-only. On non-Linux
-//! platforms [`register`] is a no-op so calling it is safe from any OS.
-
 /// Register the standard Prometheus `process_*` metrics on `registry`.
 ///
 /// No-op on non-Linux platforms.
