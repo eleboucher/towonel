@@ -64,8 +64,14 @@ ppp = { workspace = true }
 ipnet = { workspace = true }
 webauthn-rs = { workspace = true }
 uuid = { workspace = true }
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
+
+[package.metadata.cargo-machete]
+# `openssl` is declared only to force the `vendored` feature on the
+# transitive dep pulled in by webauthn-rs; it's never imported here.
+ignored = ["openssl"]
 
 [lints]
 workspace = true
