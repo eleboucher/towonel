@@ -569,10 +569,12 @@ const PICK_AGENT_ATTEMPTS: u32 = 3;
 const PICK_AGENT_BACKOFF: Duration = Duration::from_millis(200);
 
 /// Shuffle `candidates` for fair spread, then try each agent's session.
-/// Returns the first stream that opens.
+/// `refresh` is called between attempts to pick up route-table updates that
+/// landed during the supersede window. Returns the first stream that opens.
 async fn pick_agent_and_open_stream(
     ctx: &ConnCtx,
     mut candidates: self::router::Candidates,
+    mut refresh: impl FnMut() -> Option<self::router::Candidates>,
 ) -> anyhow::Result<(
     EndpointAddr,
     iroh::endpoint::SendStream,
@@ -600,6 +602,10 @@ async fn pick_agent_and_open_stream(
         }
         if attempt + 1 < PICK_AGENT_ATTEMPTS {
             tokio::time::sleep(PICK_AGENT_BACKOFF.saturating_mul(1u32 << attempt)).await;
+            if let Some(mut next) = refresh() {
+                fastrand::shuffle(&mut next);
+                candidates = next;
+            }
         }
     }
     Err(last_err.unwrap_or_else(|| {
@@ -777,7 +783,10 @@ async fn prepare_connection(tcp_stream: &TcpStream, ctx: &ConnCtx) -> anyhow::Re
     );
 
     let (agent_addr, send_stream, recv_stream) =
-        pick_agent_and_open_stream(ctx, candidates).await?;
+        pick_agent_and_open_stream(ctx, candidates, || {
+            ctx.router.route(&hostname).map(|(c, _)| c)
+        })
+        .await?;
     debug!(agent = %agent_addr.id.fmt_short(), "agent selected, stream opened");
 
     Ok(Preparation {
@@ -1038,7 +1047,11 @@ async fn handle_tcp_connection(
         );
 
         let (agent_addr, send_stream, recv_stream) =
-            pick_agent_and_open_stream(ctx, candidates).await?;
+            pick_agent_and_open_stream(ctx, candidates, || {
+                ctx.router
+                    .route_tcp_service(&binding.tenant, &binding.service)
+            })
+            .await?;
         let agent_short = agent_addr.id.fmt_short();
         debug!(agent = %agent_short, "tcp agent selected, stream opened");
 
@@ -1319,7 +1332,12 @@ async fn udp_session_pump(
         };
 
         let (agent_addr, mut send_stream, mut recv_stream) =
-            match pick_agent_and_open_stream(&ctx, candidates).await {
+            match pick_agent_and_open_stream(&ctx, candidates, || {
+                ctx.router
+                    .route_udp_service(&binding.tenant, &binding.service)
+            })
+            .await
+            {
                 Ok(t) => t,
                 Err(e) => {
                     warn!(error = %e, "no agent could accept udp session");
