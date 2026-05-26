@@ -108,6 +108,44 @@ impl Db {
         rows.into_iter().map(model_to_entry).collect()
     }
 
+    /// Check if an agent is already registered for a tenant by replaying
+    /// UpsertAgent/RevokeAgent entries. Used for idempotent UpsertAgent handling.
+    pub async fn is_agent_registered(
+        &self,
+        tenant_id: &TenantId,
+        agent_id: &towonel_common::identity::AgentId,
+        pq_pubkey: &towonel_common::identity::PqPublicKey,
+    ) -> anyhow::Result<bool> {
+        use entities::entries::Column;
+        use towonel_common::config_entry::ConfigOp;
+
+        let entries = entities::entries::Entity::find()
+            .filter(Column::TenantId.eq(tenant_id.as_bytes().to_vec()))
+            .order_by_asc(Column::Sequence)
+            .all(&self.conn)
+            .await?;
+
+        let mut registered = false;
+        for entry in entries {
+            if let Ok(payload) = model_to_entry(entry)?.verify(pq_pubkey) {
+                match payload.op {
+                    ConfigOp::UpsertAgent { agent_id: id } => {
+                        if id == *agent_id {
+                            registered = true;
+                        }
+                    }
+                    ConfigOp::RevokeAgent { agent_id: id } => {
+                        if id == *agent_id {
+                            registered = false;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(registered)
+    }
+
     /// Boot-time canary check that the supplied KEK + invite-hash-key match
     /// the values used by the *first* hub to write to this DB. Without this,
     /// a multi-hub deployment that disagrees on either secret keeps working
@@ -394,5 +432,139 @@ mod tests {
         assert_eq!(entries2.len(), 1);
         assert_eq!(entries1[0].tenant_id, kp1.id());
         assert_eq!(entries2[0].tenant_id, kp2.id());
+    }
+
+    #[tokio::test]
+    async fn is_agent_registered_upsert_agent() {
+        use towonel_common::identity::AgentKeypair;
+        let db = temp_db().await;
+        let tenant_kp = TenantKeypair::generate();
+        let agent_kp = AgentKeypair::generate();
+
+        let payload = ConfigPayload {
+            version: 1,
+            tenant_id: tenant_kp.id(),
+            sequence: 1,
+            timestamp: 1_700_000_000,
+            op: ConfigOp::UpsertAgent {
+                agent_id: agent_kp.id(),
+            },
+        };
+        let entry = SignedConfigEntry::sign(&payload, &tenant_kp).unwrap();
+        db.insert(&entry, 1).await.unwrap();
+
+        let registered = db
+            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), &tenant_kp.public_key())
+            .await
+            .unwrap();
+        assert!(registered, "agent should be registered after UpsertAgent");
+    }
+
+    #[tokio::test]
+    async fn is_agent_registered_false_before_upsert() {
+        use towonel_common::identity::AgentKeypair;
+        let db = temp_db().await;
+        let tenant_kp = TenantKeypair::generate();
+        let agent_kp = AgentKeypair::generate();
+
+        let registered = db
+            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), &tenant_kp.public_key())
+            .await
+            .unwrap();
+        assert!(
+            !registered,
+            "agent should not be registered before any entries"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_agent_registered_false_after_revoke() {
+        use towonel_common::identity::AgentKeypair;
+        let db = temp_db().await;
+        let tenant_kp = TenantKeypair::generate();
+        let agent_kp = AgentKeypair::generate();
+
+        let upsert = ConfigPayload {
+            version: 1,
+            tenant_id: tenant_kp.id(),
+            sequence: 1,
+            timestamp: 1_700_000_000,
+            op: ConfigOp::UpsertAgent {
+                agent_id: agent_kp.id(),
+            },
+        };
+        let entry = SignedConfigEntry::sign(&upsert, &tenant_kp).unwrap();
+        db.insert(&entry, 1).await.unwrap();
+
+        let revoke = ConfigPayload {
+            version: 1,
+            tenant_id: tenant_kp.id(),
+            sequence: 2,
+            timestamp: 1_700_000_001,
+            op: ConfigOp::RevokeAgent {
+                agent_id: agent_kp.id(),
+            },
+        };
+        let entry = SignedConfigEntry::sign(&revoke, &tenant_kp).unwrap();
+        db.insert(&entry, 2).await.unwrap();
+
+        let registered = db
+            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), &tenant_kp.public_key())
+            .await
+            .unwrap();
+        assert!(
+            !registered,
+            "agent should not be registered after RevokeAgent"
+        );
+    }
+
+    #[tokio::test]
+    async fn is_agent_registered_true_after_reregister() {
+        use towonel_common::identity::AgentKeypair;
+        let db = temp_db().await;
+        let tenant_kp = TenantKeypair::generate();
+        let agent_kp = AgentKeypair::generate();
+
+        let upsert = ConfigPayload {
+            version: 1,
+            tenant_id: tenant_kp.id(),
+            sequence: 1,
+            timestamp: 1_700_000_000,
+            op: ConfigOp::UpsertAgent {
+                agent_id: agent_kp.id(),
+            },
+        };
+        let entry = SignedConfigEntry::sign(&upsert, &tenant_kp).unwrap();
+        db.insert(&entry, 1).await.unwrap();
+
+        let revoke = ConfigPayload {
+            version: 1,
+            tenant_id: tenant_kp.id(),
+            sequence: 2,
+            timestamp: 1_700_000_001,
+            op: ConfigOp::RevokeAgent {
+                agent_id: agent_kp.id(),
+            },
+        };
+        let entry = SignedConfigEntry::sign(&revoke, &tenant_kp).unwrap();
+        db.insert(&entry, 2).await.unwrap();
+
+        let upsert2 = ConfigPayload {
+            version: 1,
+            tenant_id: tenant_kp.id(),
+            sequence: 3,
+            timestamp: 1_700_000_002,
+            op: ConfigOp::UpsertAgent {
+                agent_id: agent_kp.id(),
+            },
+        };
+        let entry = SignedConfigEntry::sign(&upsert2, &tenant_kp).unwrap();
+        db.insert(&entry, 3).await.unwrap();
+
+        let registered = db
+            .is_agent_registered(&tenant_kp.id(), &agent_kp.id(), &tenant_kp.public_key())
+            .await
+            .unwrap();
+        assert!(registered, "agent should be registered after re-upsert");
     }
 }

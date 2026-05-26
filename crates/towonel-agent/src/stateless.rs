@@ -208,7 +208,7 @@ pub async fn register(ctx: &BootstrapContext) -> anyhow::Result<()> {
     .retry(retry_policy())
     .when(|e| is_sequence_conflict(e) || is_rate_limited(e))
     .notify(|e, dur| {
-        warn!(error = %e, backoff_ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX), "retrying UpsertAgent");
+        info!(error = %e, backoff_ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX), "retrying UpsertAgent after sequence conflict");
     })
     .await
 }

@@ -346,6 +346,31 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         return resp;
     }
 
+    // Idempotency check for UpsertAgent: if this agent is already registered,
+    // return success without inserting a duplicate entry. This eliminates
+    // sequence conflicts when multiple agent replicas boot simultaneously.
+    if let ConfigOp::UpsertAgent { agent_id } = &payload.op {
+        match state
+            .db
+            .is_agent_registered(&payload.tenant_id, agent_id, &pq_pubkey)
+            .await
+        {
+            Ok(true) => {
+                state.metrics.entries_accepted.inc();
+                return cbor_response(&PostEntryResponse {
+                    status: "ok",
+                    sequence: payload.sequence,
+                });
+            }
+            Ok(false) => {}
+            Err(e) => {
+                state.metrics.record_reject(reject_reason::INTERNAL);
+                warn!(error = %e, "failed to check agent registration status");
+                return internal_error();
+            }
+        }
+    }
+
     let sequence = payload.sequence;
 
     if let Err(e) = state.db.insert(&entry, sequence).await {

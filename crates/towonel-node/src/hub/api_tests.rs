@@ -1519,6 +1519,87 @@ async fn refresh_rate_limits_per_agent() {
     assert_eq!(body["error"]["code"], "rate_limited");
 }
 
+#[tokio::test]
+async fn upsert_agent_is_idempotent() {
+    use std::sync::Arc;
+
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let agent = AgentKeypair::generate();
+
+    // First registration with sequence 1
+    let payload = ConfigPayload {
+        version: 1,
+        tenant_id: tenant.id(),
+        sequence: 1,
+        timestamp: 1_700_000_000_000,
+        op: ConfigOp::UpsertAgent {
+            agent_id: agent.id(),
+        },
+    };
+    let entry = SignedConfigEntry::sign(&payload, &tenant).unwrap();
+    let mut body = Vec::new();
+    ciborium::into_writer(&entry, &mut body).unwrap();
+
+    let resp = client
+        .post(hub.url("/v1/entries"))
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "first UpsertAgent should succeed");
+
+    // Second registration with SAME agent_id but different sequence (simulating retry)
+    let payload2 = ConfigPayload {
+        version: 1,
+        tenant_id: tenant.id(),
+        sequence: 2,
+        timestamp: 1_700_000_000_001,
+        op: ConfigOp::UpsertAgent {
+            agent_id: agent.id(),
+        },
+    };
+    let entry2 = SignedConfigEntry::sign(&payload2, &tenant).unwrap();
+    let mut body2 = Vec::new();
+    ciborium::into_writer(&entry2, &mut body2).unwrap();
+
+    let resp2 = client
+        .post(hub.url("/v1/entries"))
+        .header(reqwest::header::CONTENT_TYPE, "application/cbor")
+        .body(body2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp2.status(),
+        200,
+        "second UpsertAgent with same agent_id should succeed (idempotent)"
+    );
+
+    // Verify only one UpsertAgent entry was inserted
+    let entries_url = format!("{}/v1/tenants/{}/entries", hub.base_url, tenant.id());
+    let resp = client.get(&entries_url).send().await.unwrap();
+    let entries: Vec<SignedConfigEntry> =
+        ciborium::from_reader(resp.bytes().await.unwrap().as_ref()).unwrap();
+
+    let upsert_agent_count = entries
+        .iter()
+        .filter(|e| {
+            e.verify(tenant.public_key())
+                .map(|p| matches!(p.op, ConfigOp::UpsertAgent { .. }))
+                .unwrap_or(false)
+        })
+        .count();
+
+    assert_eq!(
+        upsert_agent_count, 1,
+        "only one UpsertAgent entry should be in the database"
+    );
+}
+
 // --- email verification + password reset + signup-invite mailing ---
 
 /// Mint a signup invite via the hub's operator API and return its code.
