@@ -18,7 +18,11 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
-use iroh::{Endpoint, RelayMode, endpoint::presets::Minimal};
+use iroh::{
+    Endpoint, EndpointAddr, RelayMode,
+    address_lookup::MemoryLookup,
+    endpoint::{PortmapperConfig, presets::Minimal},
+};
 use prometheus::{Encoder, TextEncoder};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -118,9 +122,18 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
             },
             |url| towonel_common::relay::relay_mode_from_url(&url, "TOWONEL_AGENT_RELAY_URL"),
         );
+    // Seed an empty lookup with the known edge ids so iroh's RemoteStateActor
+    // doesn't warn "No address lookup configured" — addrs come from connect().
+    let edge_lookup = MemoryLookup::new();
+    for contact in &ctx.edge_contacts {
+        edge_lookup.add_endpoint_info(EndpointAddr::new(contact.id));
+    }
+
     let mut endpoint_builder = Endpoint::builder(Minimal)
         .secret_key(ctx.iroh_secret_key())
-        .relay_mode(relay_mode);
+        .relay_mode(relay_mode)
+        .address_lookup(edge_lookup)
+        .portmapper_config(PortmapperConfig::Disabled);
     let iroh_port: u16 = match std::env::var("TOWONEL_AGENT_IROH_PORT") {
         Ok(v) => v
             .parse()
