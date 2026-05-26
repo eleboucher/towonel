@@ -49,6 +49,10 @@ pub(super) struct BootstrapResponse {
     edge_addresses: Vec<String>,
     iroh_endpoints: Vec<IrohEndpoint>,
 
+    /// Operator-configured iroh relay so agents don't need it in their env.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay_url: Option<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     kid: Option<Kid>,
     /// base64url-no-pad of the detached ML-DSA-65 signature.
@@ -166,6 +170,7 @@ pub(super) async fn post_bootstrap(
         edge_node_id,
         edge_addresses: state.identity.edge_addresses.clone(),
         iroh_endpoints,
+        relay_url: state.identity.relay_url.clone(),
         kid,
         edge_cred_b64,
         edge_cred_sig_b64,

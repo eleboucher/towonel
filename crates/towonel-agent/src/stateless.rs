@@ -80,6 +80,8 @@ pub struct BootstrapContext {
     pub edge_contacts: Vec<EdgeContact>,
     pub client: reqwest::Client,
     pub hostnames: Vec<String>,
+    /// Relay URL advertised by the hub.
+    pub relay_url: Option<String>,
     /// Empty against a legacy hub that doesn't mint `EdgeCred`s. Shared
     /// between the refresh task and edge supervisors via `Arc`.
     pub edge_cred: Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
@@ -176,6 +178,7 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         edge_contacts,
         client,
         hostnames: resp.hostnames,
+        relay_url: resp.relay_url,
         edge_cred,
     })
 }
@@ -668,6 +671,8 @@ struct BootstrapResponse {
     edge_node_id: Option<EndpointId>,
     #[serde(default)]
     iroh_endpoints: Vec<IrohEndpoint>,
+    #[serde(default)]
+    relay_url: Option<String>,
     #[serde(flatten, default)]
     edge_cred: Option<EdgeCredWire>,
 }

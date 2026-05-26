@@ -124,6 +124,7 @@ impl TestHub {
                 edge_addresses: vec!["127.0.0.1:4443".to_string()],
                 edge_iroh_addresses: vec!["127.0.0.1:51820".to_string()],
                 edge_node_id: Some(fake_endpoint_id()),
+                relay_url: None,
                 software_version: "0.0.0-test",
             },
             operator_api_key: zeroize::Zeroizing::new(OPERATOR_KEY.to_string()),

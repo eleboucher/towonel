@@ -4,24 +4,34 @@ use iroh::{RelayMap, RelayMode};
 use tracing::warn;
 
 /// On parse error, warns and falls back to `Disabled` so the binary still starts.
+#[must_use]
 pub fn relay_mode_from_env(var_name: &str) -> RelayMode {
-    let Ok(raw) = std::env::var(var_name) else {
-        return RelayMode::Disabled;
-    };
-    let trimmed = raw.trim();
+    std::env::var(var_name)
+        .ok()
+        .as_deref()
+        .map_or(RelayMode::Disabled, |url| {
+            relay_mode_from_url(url, var_name)
+        })
+}
+
+/// `source` is a label used in the warning log on parse failure.
+#[must_use]
+pub fn relay_mode_from_url(url: &str, source: &str) -> RelayMode {
+    let trimmed = url.trim();
     if trimmed.is_empty() {
         return RelayMode::Disabled;
     }
     match RelayMap::try_from_iter([trimmed]) {
         Ok(map) => RelayMode::Custom(map),
         Err(e) => {
-            warn!(var = var_name, url = trimmed, error = %e, "invalid relay URL; running without relay");
+            warn!(source = source, url = trimmed, error = %e, "invalid relay URL; running without relay");
             RelayMode::Disabled
         }
     }
 }
 
 // Unparsable entries are warned and skipped rather than failing startup.
+#[must_use]
 pub fn parse_extra_local_addrs(var_name: &str) -> Vec<SocketAddr> {
     let Ok(raw) = std::env::var(var_name) else {
         return Vec::new();

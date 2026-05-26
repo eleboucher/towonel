@@ -18,7 +18,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use clap::Parser;
-use iroh::{Endpoint, endpoint::presets::Minimal};
+use iroh::{Endpoint, RelayMode, endpoint::presets::Minimal};
 use prometheus::{Encoder, TextEncoder};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -107,11 +107,20 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         );
     }
 
+    let relay_mode = std::env::var("TOWONEL_AGENT_RELAY_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map_or_else(
+            || {
+                ctx.relay_url.as_deref().map_or(RelayMode::Disabled, |url| {
+                    towonel_common::relay::relay_mode_from_url(url, "hub bootstrap")
+                })
+            },
+            |url| towonel_common::relay::relay_mode_from_url(&url, "TOWONEL_AGENT_RELAY_URL"),
+        );
     let mut endpoint_builder = Endpoint::builder(Minimal)
         .secret_key(ctx.iroh_secret_key())
-        .relay_mode(towonel_common::relay::relay_mode_from_env(
-            "TOWONEL_AGENT_RELAY_URL",
-        ));
+        .relay_mode(relay_mode);
     let iroh_port: u16 = match std::env::var("TOWONEL_AGENT_IROH_PORT") {
         Ok(v) => v
             .parse()

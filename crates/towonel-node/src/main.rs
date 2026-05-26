@@ -479,6 +479,9 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_node_id: Some(edge_node_id),
                 edge_addresses: public_addresses,
                 edge_iroh_addresses,
+                relay_url: std::env::var("TOWONEL_HUB_RELAY_URL")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
                 software_version: SOFTWARE_VERSION,
             };
             let hub = hub::Hub::new(build_hub_params(&config, identity, route_tx).await?)
@@ -503,6 +506,9 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_node_id: None,
                 edge_addresses: Vec::new(),
                 edge_iroh_addresses: Vec::new(),
+                relay_url: std::env::var("TOWONEL_HUB_RELAY_URL")
+                    .ok()
+                    .filter(|v| !v.is_empty()),
                 software_version: SOFTWARE_VERSION,
             };
             drop(secret_key);
