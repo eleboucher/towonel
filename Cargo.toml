@@ -98,7 +98,7 @@ members = [
 [profile.release]
 strip = true
 lto = "thin"
-codegen-units = 16
+codegen-units = 1
 panic = "abort"
 
 [dev-dependencies]
