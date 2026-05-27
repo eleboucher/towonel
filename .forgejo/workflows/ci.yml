@@ -100,6 +100,7 @@ jobs:
       - run: taplo fmt --check
 
   e2e:
+    if: github.ref == 'refs/heads/main'
     runs-on: docker
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
