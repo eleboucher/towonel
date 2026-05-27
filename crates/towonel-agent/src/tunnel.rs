@@ -131,7 +131,7 @@ fn host_of(address: &str) -> &str {
     if let Some(rest) = address.strip_prefix('[')
         && let Some(end) = rest.find(']')
     {
-        return rest.get(..end).unwrap_or(address);
+        return rest.get(..end).unwrap_or(rest);
     }
     address.rsplit_once(':').map_or(address, |(host, _)| host)
 }
