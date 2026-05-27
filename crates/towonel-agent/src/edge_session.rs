@@ -8,7 +8,7 @@ use iroh::{Endpoint, EndpointAddr};
 use tokio::net::lookup_host;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, info, info_span, warn};
+use tracing::{Instrument, debug, error, info, info_span, warn};
 
 use towonel_common::edge_cred::AuthFrame;
 use towonel_common::protocol::ALPN_TUNNEL;
@@ -25,10 +25,21 @@ const MIN_HEALTHY_SESSION: Duration = Duration::from_mins(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
+const MAX_BACKOFF_SECS: u64 = 60;
+const MAX_FAILURE_DURATION: Duration = Duration::from_mins(5);
+
 fn redial_backoff() -> ExponentialBuilder {
     ExponentialBuilder::default()
         .with_min_delay(Duration::from_millis(500))
         .with_max_delay(Duration::from_secs(30))
+        .with_jitter()
+        .without_max_times()
+}
+
+fn extended_backoff() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(Duration::from_secs(5))
+        .with_max_delay(Duration::from_secs(MAX_BACKOFF_SECS))
         .with_jitter()
         .without_max_times()
 }
@@ -82,6 +93,7 @@ async fn supervise(
     let span = info_span!("edge_supervisor", edge = %edge_label);
     async move {
         let mut backoff = redial_backoff().build();
+        let mut failure_start: Option<Instant> = None;
         loop {
             if shutdown.is_cancelled() {
                 info!("supervisor shutting down");
@@ -105,24 +117,46 @@ async fn supervise(
                             "healthy session ended; resetting backoff"
                         );
                         backoff = redial_backoff().build();
+                        failure_start = None;
                         continue;
                     }
                     debug!(
                         session_secs = session_duration.as_secs(),
                         "short-lived session; keeping backoff progression"
                     );
+                    failure_start.get_or_insert_with(Instant::now);
                 }
                 Err(e) => {
+                    let failure_start = failure_start.get_or_insert_with(Instant::now);
+                    let failure_duration = failure_start.elapsed();
+
+                    if failure_duration >= MAX_FAILURE_DURATION {
+                        error!(
+                            edge = %edge_label,
+                            failure_secs = failure_duration.as_secs(),
+                            error = %e,
+                            "edge connection failed for {MAX_FAILURE_DURATION:?}; giving up"
+                        );
+                        return;
+                    }
+
+                    let use_extended = failure_duration >= Duration::from_secs(30);
+                    if use_extended {
+                        backoff = extended_backoff().build();
+                    }
+
                     warn!(
                         dial_secs = dial_started.elapsed().as_secs(),
+                        failure_secs = failure_duration.as_secs(),
                         error = %e,
                         "edge dial failed"
                     );
                 }
             }
 
-            // without_max_times() makes None unreachable; saturate as a guardrail.
-            let delay = backoff.next().unwrap_or(Duration::from_secs(30));
+            let delay = backoff
+                .next()
+                .unwrap_or(Duration::from_secs(MAX_BACKOFF_SECS));
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "backoff is bounded well under u64::MAX millis"
