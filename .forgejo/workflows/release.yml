@@ -79,7 +79,7 @@ jobs:
     needs: [release]
     permissions:
       contents: write
-    runs-on: docker
+    runs-on: multiarch
     strategy:
       fail-fast: false
       matrix:
