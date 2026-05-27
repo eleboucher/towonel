@@ -108,20 +108,9 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: https://github.com/taiki-e/install-action@v2
         with:
-          tool: sccache
+          tool: sccache,cargo-edit
       - name: Set version from git tag
-        run: |
-          set -euo pipefail
-          TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
-          cargo install cargo-edit --locked
-          cargo set-version "$VERSION"
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: https://github.com/taiki-e/install-action@v2
-        with:
-          tool: sccache
+        run: cargo set-version "${GITHUB_REF#refs/tags/v}"
       - name: Install zig + cargo-zigbuild
         run: |
           set -euo pipefail
@@ -159,8 +148,7 @@ jobs:
       - name: Build release binaries
         run: |
           set -euo pipefail
-          cargo zigbuild --release --target "${{ matrix.target }}" -p towonel-node
-          cargo zigbuild --release --target "${{ matrix.target }}" -p towonel-agent
+          cargo zigbuild --release --target "${{ matrix.target }}" -p towonel-node -p towonel-agent
       - name: sccache stats
         if: always()
         run: sccache --show-stats || true
@@ -232,20 +220,12 @@ jobs:
         with:
           platforms: arm64
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
       - uses: https://github.com/taiki-e/install-action@v2
         with:
-          tool: cargo
+          tool: cargo-edit
       - name: Set version from git tag
-        run: |
-          set -euo pipefail
-          TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
-          cargo install cargo-edit --locked
-          cargo set-version "$VERSION"
-      - uses: https://data.forgejo.org/docker/setup-qemu-action@v4
-        with:
-          platforms: arm64
-      - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
+        run: cargo set-version "${GITHUB_REF#refs/tags/v}"
       - name: Login to codeberg.org
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
