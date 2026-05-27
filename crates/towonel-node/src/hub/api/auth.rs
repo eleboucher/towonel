@@ -582,6 +582,10 @@ fn new_id(byte_len: usize) -> String {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
     let mut buf = vec![0u8; byte_len];
+    #[expect(
+        clippy::expect_used,
+        reason = "OS RNG failure at runtime is unrecoverable"
+    )]
     getrandom::fill(&mut buf).expect("OS RNG");
     B64.encode(buf)
 }
