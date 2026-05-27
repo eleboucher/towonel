@@ -223,6 +223,8 @@ pub struct EdgeConfig {
     pub hub_link_addr: Option<String>,
     pub hub_link_psk: Option<std::sync::Arc<[u8; 32]>>,
     pub public_addresses: Vec<String>,
+    /// Raw public IPs (no port) used for port reservation matching.
+    pub public_ips: Vec<String>,
     /// Pinned UDP port for the iroh QUIC socket. Operators forward this
     /// port through their firewall so agents can reach the edge.
     pub iroh_port: u16,
@@ -367,6 +369,8 @@ struct RawEnv {
     edge_advertised_addresses: Vec<String>,
     /// Deprecated alias for `edge_advertised_addresses`.
     edge_public_addresses: Vec<String>,
+    /// Raw public IPs (no port) for port reservation matching — e.g. `1.2.3.4,5.6.7.8`.
+    edge_public_ips: Vec<String>,
     edge_iroh_port: Option<u16>,
     edge_listen_workers: Option<usize>,
     edge_proxy_protocol: Option<bool>,
@@ -435,6 +439,7 @@ impl NodeConfig {
             edge_hub_link_psk,
             edge_advertised_addresses,
             edge_public_addresses,
+            edge_public_ips,
             edge_iroh_port,
             edge_listen_workers,
             edge_proxy_protocol,
@@ -559,6 +564,7 @@ impl NodeConfig {
             hub_link_addr: edge_hub_link_addr,
             hub_link_psk: edge_hub_link_psk,
             public_addresses,
+            public_ips: resolve_public_ips(edge_public_ips),
             iroh_port: edge_iroh_port.unwrap_or(DEFAULT_IROH_PORT),
             listen_workers: edge_listen_workers.unwrap_or(1),
             proxy_protocol,
@@ -966,6 +972,26 @@ fn trim_entries(v: Vec<String>) -> Vec<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Parse `TOWONEL_EDGE_PUBLIC_IPS` — a CSV of raw IPs (no port).
+/// Strips brackets from IPv6 literals and trims whitespace.
+fn resolve_public_ips(raw: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in raw {
+        for part in entry.split(',') {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let ip = trimmed
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(trimmed);
+            out.push(ip.to_string());
+        }
+    }
+    out
 }
 
 fn parse_json_opt<T: serde::de::DeserializeOwned>(

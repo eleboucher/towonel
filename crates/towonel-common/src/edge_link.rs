@@ -4,7 +4,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::identity::{AgentId, PQ_PUB_KEY_LEN, TenantId};
 use crate::routing::RouteTable;
 
-pub const EDGE_LINK_VERSION: u16 = 3;
+pub const EDGE_LINK_VERSION: u16 = 4;
 
 pub const EDGE_LINK_MAX_FRAME: usize = 16 * 1024 * 1024;
 
@@ -52,6 +52,8 @@ pub enum EdgeToHub {
         software_version: String,
         psk: [u8; 32],
         capabilities: EdgeCapabilities,
+        #[serde(default)]
+        public_ips: Vec<String>,
     },
     SessionAdded {
         agent_id: AgentId,
@@ -235,6 +237,7 @@ mod tests {
             software_version: "0.1.2".into(),
             psk: [5u8; 32],
             capabilities: EdgeCapabilities::default(),
+            public_ips: vec!["1.2.3.4".into(), "2001:db8::1".into()],
         };
         let mut buf = Vec::new();
         write_edge_to_hub(&mut buf, &msg).await.unwrap();

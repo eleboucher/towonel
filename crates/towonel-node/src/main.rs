@@ -487,12 +487,18 @@ async fn run_node() -> anyhow::Result<()> {
             };
             let edge_iroh_addresses =
                 derive_edge_iroh_addresses(&public_addresses, iroh_port, &bound_socket_strings);
+            let edge_public_ips = if config.edge.public_ips.is_empty() {
+                extract_hosts_from_addresses(&public_addresses)
+            } else {
+                config.edge.public_ips.clone()
+            };
 
             let identity = HubIdentity {
                 node_id,
                 edge_node_id: Some(edge_node_id),
-                edge_addresses: public_addresses,
+                edge_addresses: public_addresses.clone(),
                 edge_iroh_addresses,
+                edge_public_ips,
                 relay_url: std::env::var("TOWONEL_HUB_RELAY_URL")
                     .ok()
                     .filter(|v| !v.is_empty()),
@@ -520,6 +526,7 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_node_id: None,
                 edge_addresses: Vec::new(),
                 edge_iroh_addresses: Vec::new(),
+                edge_public_ips: Vec::new(),
                 relay_url: std::env::var("TOWONEL_HUB_RELAY_URL")
                     .ok()
                     .filter(|v| !v.is_empty()),
@@ -561,6 +568,11 @@ async fn run_node() -> anyhow::Result<()> {
             };
             let iroh_endpoints =
                 derive_edge_iroh_addresses(&public_addresses, iroh_port, &bound_socket_strings);
+            let public_ips = if config.edge.public_ips.is_empty() {
+                extract_hosts_from_addresses(&public_addresses)
+            } else {
+                config.edge.public_ips.clone()
+            };
             let cfg = edge::hub_link::HubLinkConfig {
                 addr: link_addr,
                 psk: link_psk,
@@ -571,6 +583,7 @@ async fn run_node() -> anyhow::Result<()> {
                     tcp_services: config.edge.tcp_services,
                     udp_services: config.edge.udp_services,
                 },
+                public_ips,
             };
             let hub_client: Arc<dyn edge::hub_client::HubClient> =
                 Arc::new(edge::hub_client::RemoteHubClient::new(handle.clone()));
@@ -822,6 +835,22 @@ fn derive_edge_iroh_addresses(
         .filter_map(|s| {
             let addr: std::net::SocketAddr = s.parse().ok()?;
             (!addr.ip().is_unspecified() && !addr.ip().is_loopback()).then(|| addr.to_string())
+        })
+        .collect()
+}
+
+/// Extract host/IP portions from a list of `host:port` addresses.
+/// Strips the port and any bracket-wrapping around IPv6 literals.
+fn extract_hosts_from_addresses(addresses: &[String]) -> Vec<String> {
+    addresses
+        .iter()
+        .filter_map(|entry| {
+            let host = entry.rsplit_once(':').map_or(entry.as_str(), |(h, _)| h);
+            let host = host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(host);
+            (!host.is_empty()).then(|| host.to_string())
         })
         .collect()
 }

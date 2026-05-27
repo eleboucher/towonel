@@ -128,16 +128,23 @@ async fn handle_connection(
         Err(_) => anyhow::bail!("hello timed out"),
     };
 
-    let (edge_id, iroh_endpoints, software_version, capabilities) = match hello {
+    let (edge_id, iroh_endpoints, software_version, capabilities, public_ips) = match hello {
         EdgeToHub::Hello {
             edge_id,
             iroh_endpoints,
             software_version,
             psk,
             capabilities,
+            public_ips,
         } => {
             if expected_psk.ct_eq(&psk).into() {
-                (edge_id, iroh_endpoints, software_version, capabilities)
+                (
+                    edge_id,
+                    iroh_endpoints,
+                    software_version,
+                    capabilities,
+                    public_ips,
+                )
             } else {
                 anyhow::bail!("Hello PSK mismatch");
             }
@@ -150,6 +157,7 @@ async fn handle_connection(
         edge = %hex::encode(edge_id),
         version = %software_version,
         endpoints = iroh_endpoints.len(),
+        public_ips = public_ips.len(),
         "edge_link authenticated"
     );
 
@@ -164,7 +172,7 @@ async fn handle_connection(
     write_hub_to_edge(&mut writer, &welcome).await?;
     state
         .live_edges
-        .upsert(edge_id, iroh_endpoints, capabilities, now_ms());
+        .upsert(edge_id, iroh_endpoints, capabilities, public_ips, now_ms());
 
     let (writer_tx, writer_rx) = mpsc::channel::<HubToEdge>(64);
     let writer_task = tokio::spawn(run_writer(writer, writer_rx));

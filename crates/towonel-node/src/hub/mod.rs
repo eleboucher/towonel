@@ -225,6 +225,8 @@ pub struct HubIdentity {
     pub edge_addresses: Vec<String>,
     /// Derived from `edge_addresses`' hostnames + the pinned iroh UDP port.
     pub edge_iroh_addresses: Vec<String>,
+    /// Host/IP portions extracted from `edge_addresses` (e.g. "1.2.3.4" from "1.2.3.4:4443").
+    pub edge_public_ips: Vec<String>,
     /// Relay URL the hub advertises to agents at bootstrap so they don't have to configure it.
     pub relay_url: Option<String>,
     pub software_version: &'static str,
@@ -373,6 +375,7 @@ impl Hub {
                 edge_node_id: self.p.identity.edge_node_id,
                 edge_addresses: self.p.identity.edge_addresses.clone(),
                 edge_iroh_addresses: self.p.identity.edge_iroh_addresses.clone(),
+                edge_public_ips: self.p.identity.edge_public_ips.clone(),
                 relay_url: self.p.identity.relay_url.clone(),
                 software_version: self.p.identity.software_version,
             },

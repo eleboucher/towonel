@@ -130,7 +130,7 @@ impl Db {
         Ok(row.try_get::<i64>("", "n")?)
     }
 
-    pub async fn tenant_owns_shared_port(
+    pub async fn tenant_owns_port(
         &self,
         tenant_id: &TenantId,
         port: u16,
@@ -140,10 +140,24 @@ impl Db {
             .filter(port_reservations::Column::TenantId.eq(tenant_id_bytes(tenant_id)))
             .filter(port_reservations::Column::Port.eq(i32::from(port)))
             .filter(port_reservations::Column::Protocol.eq(protocol.as_str()))
-            .filter(port_reservations::Column::IpAddress.is_null())
             .one(&self.conn)
             .await?;
         Ok(hit.is_some())
+    }
+
+    pub async fn find_port_reservations(
+        &self,
+        tenant_id: &TenantId,
+        port: u16,
+        protocol: PortProtocol,
+    ) -> anyhow::Result<Vec<PortReservationRow>> {
+        let rows = port_reservations::Entity::find()
+            .filter(port_reservations::Column::TenantId.eq(tenant_id_bytes(tenant_id)))
+            .filter(port_reservations::Column::Port.eq(i32::from(port)))
+            .filter(port_reservations::Column::Protocol.eq(protocol.as_str()))
+            .all(&self.conn)
+            .await?;
+        rows.into_iter().map(model_to_row).collect()
     }
 }
 

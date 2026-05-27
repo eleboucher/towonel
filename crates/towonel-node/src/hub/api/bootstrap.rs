@@ -160,7 +160,7 @@ pub(super) async fn post_bootstrap(
         }
     };
 
-    for (edge_id, addresses, capabilities) in state.live_edges.snapshot() {
+    for (edge_id, addresses, capabilities, _public_ips) in state.live_edges.snapshot() {
         if needs_tcp && !capabilities.tcp_services {
             continue;
         }

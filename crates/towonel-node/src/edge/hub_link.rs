@@ -44,6 +44,7 @@ pub struct HubLinkConfig {
     pub iroh_endpoints: Vec<String>,
     pub software_version: String,
     pub capabilities: EdgeCapabilities,
+    pub public_ips: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -287,6 +288,7 @@ where
         software_version: cfg.software_version.clone(),
         psk: *cfg.psk,
         capabilities: cfg.capabilities.clone(),
+        public_ips: cfg.public_ips.clone(),
     };
     write_edge_to_hub(writer, &hello)
         .await
