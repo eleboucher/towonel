@@ -19,11 +19,12 @@ services:
       TOWONEL_EDGE_IROH_PORT: "51820"
       TOWONEL_EDGE_ADVERTISED_ADDRESSES: hub-node:4443
       TOWONEL_EDGE_PROXY_PROTOCOL: "true"
-      TOWONEL_HUB_PUBLIC_URL: http://hub-node:8443
+      TOWONEL_HUB_PUBLIC_URL: https://hub-node:8443
+      TOWONEL_HUB_TLS_CERT_DIR: /certs
     volumes:
       - hub-data:/data
     healthcheck:
-      test: ["CMD", "curl", "--max-time", "2", "-fsS", "http://127.0.0.1:8443/v1/health"]
+      test: ["CMD", "curl", "--max-time", "2", "-fsSk", "https://127.0.0.1:8443/v1/health"]
       interval: 2s
       timeout: 3s
       start_period: 5s

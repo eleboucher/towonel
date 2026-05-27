@@ -17,3 +17,14 @@ openssl req \
   -out origin-tls.pem \
   -subj "/CN=app.e2e.local" \
   -addext "subjectAltName=DNS:app.e2e.local,DNS:*.e2e.local"
+
+openssl req \
+  -x509 \
+  -newkey rsa:2048 \
+  -sha256 \
+  -days 3650 \
+  -nodes \
+  -keyout hub-tls.key \
+  -out hub-tls.pem \
+  -subj "/CN=hub-node" \
+  -addext "subjectAltName=DNS:hub-node,IP:127.0.0.1"

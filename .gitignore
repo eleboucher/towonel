@@ -2,9 +2,13 @@
 
 # Key material — never commit
 *.key
+/hub.key
 /agent.key
 /tenant.key
 /node.key
+
+# E2E test fixture keys (self-signed certs for containers)
+/tests/e2e/fixtures/hub-tls.key
 
 # Local runtime state
 /hub.db
