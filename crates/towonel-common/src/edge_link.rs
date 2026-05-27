@@ -4,11 +4,26 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::identity::{AgentId, PQ_PUB_KEY_LEN, TenantId};
 use crate::routing::RouteTable;
 
-pub const EDGE_LINK_VERSION: u16 = 2;
+pub const EDGE_LINK_VERSION: u16 = 3;
 
 pub const EDGE_LINK_MAX_FRAME: usize = 16 * 1024 * 1024;
 
 pub type Kid = crate::edge_cred::Kid;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EdgeCapabilities {
+    pub tcp_services: bool,
+    pub udp_services: bool,
+}
+
+impl Default for EdgeCapabilities {
+    fn default() -> Self {
+        Self {
+            tcp_services: true,
+            udp_services: true,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubSigningKey {
@@ -31,13 +46,12 @@ impl HubSigningKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EdgeToHub {
-    /// Must be the first frame; the hub closes the link on PSK mismatch.
     Hello {
         edge_id: [u8; 32],
         iroh_endpoints: Vec<String>,
         software_version: String,
-        #[serde(with = "serde_bytes")]
         psk: [u8; 32],
+        capabilities: EdgeCapabilities,
     },
     SessionAdded {
         agent_id: AgentId,
@@ -220,6 +234,7 @@ mod tests {
             iroh_endpoints: vec!["edge.example:51820".into(), "[::1]:51820".into()],
             software_version: "0.1.2".into(),
             psk: [5u8; 32],
+            capabilities: EdgeCapabilities::default(),
         };
         let mut buf = Vec::new();
         write_edge_to_hub(&mut buf, &msg).await.unwrap();

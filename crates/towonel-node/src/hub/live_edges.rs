@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
+use towonel_common::edge_link::EdgeCapabilities;
 
 pub type EdgeId = [u8; 32];
 
 #[derive(Clone, Debug)]
 pub struct LiveEdge {
     pub iroh_endpoints: Vec<String>,
+    pub capabilities: EdgeCapabilities,
     #[expect(dead_code, reason = "janitor sweep lands with the durable store")]
     pub last_seen_ms: u64,
 }
@@ -21,7 +23,13 @@ impl LiveEdges {
         Self::default()
     }
 
-    pub fn upsert(&self, id: EdgeId, iroh_endpoints: Vec<String>, now_ms: u64) {
+    pub fn upsert(
+        &self,
+        id: EdgeId,
+        iroh_endpoints: Vec<String>,
+        capabilities: EdgeCapabilities,
+        now_ms: u64,
+    ) {
         let mut guard = self
             .inner
             .write()
@@ -30,6 +38,7 @@ impl LiveEdges {
             id,
             LiveEdge {
                 iroh_endpoints,
+                capabilities,
                 last_seen_ms: now_ms,
             },
         );
@@ -43,14 +52,14 @@ impl LiveEdges {
         guard.remove(id);
     }
 
-    pub fn snapshot(&self) -> Vec<(EdgeId, Vec<String>)> {
+    pub fn snapshot(&self) -> Vec<(EdgeId, Vec<String>, EdgeCapabilities)> {
         let guard = self
             .inner
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
             .iter()
-            .map(|(id, edge)| (*id, edge.iroh_endpoints.clone()))
+            .map(|(id, edge)| (*id, edge.iroh_endpoints.clone(), edge.capabilities.clone()))
             .collect()
     }
 
@@ -71,10 +80,20 @@ mod tests {
     #[test]
     fn upsert_then_snapshot() {
         let live = LiveEdges::new();
-        live.upsert([1u8; 32], vec!["1.2.3.4:51820".into()], 100);
-        live.upsert([2u8; 32], vec!["5.6.7.8:51820".into()], 200);
+        live.upsert(
+            [1u8; 32],
+            vec!["1.2.3.4:51820".into()],
+            EdgeCapabilities::default(),
+            100,
+        );
+        live.upsert(
+            [2u8; 32],
+            vec!["5.6.7.8:51820".into()],
+            EdgeCapabilities::default(),
+            200,
+        );
         let mut snap = live.snapshot();
-        snap.sort_by_key(|(id, _)| *id);
+        snap.sort_by_key(|(id, _, _)| *id);
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0].0, [1u8; 32]);
         assert_eq!(snap[1].0, [2u8; 32]);
@@ -83,7 +102,12 @@ mod tests {
     #[test]
     fn remove_takes_edge_offline() {
         let live = LiveEdges::new();
-        live.upsert([3u8; 32], vec!["x:1".into()], 1);
+        live.upsert(
+            [3u8; 32],
+            vec!["x:1".into()],
+            EdgeCapabilities::default(),
+            1,
+        );
         assert!(!live.is_empty());
         live.remove(&[3u8; 32]);
         assert!(live.is_empty());

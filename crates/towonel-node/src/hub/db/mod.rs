@@ -142,6 +142,48 @@ impl Db {
         Ok(registered)
     }
 
+    /// Check if a tenant has any active TCP or UDP service bindings by replaying
+    /// their config entries. Returns `(has_tcp, has_udp)`.
+    pub async fn tenant_has_service_bindings(
+        &self,
+        tenant_id: &TenantId,
+        pq_pubkey: &towonel_common::identity::PqPublicKey,
+    ) -> anyhow::Result<(bool, bool)> {
+        use entities::entries::Column;
+        use towonel_common::config_entry::ConfigOp;
+
+        let entries = entities::entries::Entity::find()
+            .filter(Column::TenantId.eq(tenant_id.as_bytes().to_vec()))
+            .order_by_asc(Column::Sequence)
+            .all(&self.conn)
+            .await?;
+
+        let mut tcp_services = std::collections::HashSet::new();
+        let mut udp_services = std::collections::HashSet::new();
+
+        for entry in entries {
+            if let Ok(payload) = model_to_entry(entry)?.verify(pq_pubkey) {
+                match payload.op {
+                    ConfigOp::UpsertTcpService { service, .. } => {
+                        tcp_services.insert(service);
+                    }
+                    ConfigOp::DeleteTcpService { service } => {
+                        tcp_services.remove(&service);
+                    }
+                    ConfigOp::UpsertUdpService { service, .. } => {
+                        udp_services.insert(service);
+                    }
+                    ConfigOp::DeleteUdpService { service } => {
+                        udp_services.remove(&service);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok((!tcp_services.is_empty(), !udp_services.is_empty()))
+    }
+
     /// Boot-time canary check that the supplied KEK + invite-hash-key match
     /// the values used by the *first* hub to write to this DB. Without this,
     /// a multi-hub deployment that disagrees on either secret keeps working

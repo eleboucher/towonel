@@ -478,7 +478,7 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
     if let Some(self_edge) = state.identity.edge_node_id {
         node_ids.push(self_edge);
     }
-    for (edge_id, _) in state.live_edges.snapshot() {
+    for (edge_id, _, _) in state.live_edges.snapshot() {
         if let Ok(node_id) = iroh::EndpointId::from_bytes(&edge_id)
             && !node_ids.contains(&node_id)
         {

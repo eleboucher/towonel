@@ -232,6 +232,8 @@ pub struct EdgeConfig {
     /// PROXY protocol v2 ingress. Configured via `TOWONEL_EDGE_PROXY_PROTOCOL`
     /// (bool) and `TOWONEL_EDGE_PROXY_PROTOCOL_TRUSTED` (CSV CIDRs).
     pub proxy_protocol: ProxyProtocolConfig,
+    pub tcp_services: bool,
+    pub udp_services: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -369,6 +371,8 @@ struct RawEnv {
     edge_listen_workers: Option<usize>,
     edge_proxy_protocol: Option<bool>,
     edge_proxy_protocol_trusted: Option<String>,
+    edge_tcp_services: Option<bool>,
+    edge_udp_services: Option<bool>,
 
     hub_tls_cert_dir: Option<PathBuf>,
     hub_tls_acme_email: Option<String>,
@@ -435,6 +439,8 @@ impl NodeConfig {
             edge_listen_workers,
             edge_proxy_protocol,
             edge_proxy_protocol_trusted,
+            edge_tcp_services,
+            edge_udp_services,
             tenants,
             ..
         } = r;
@@ -556,6 +562,8 @@ impl NodeConfig {
             iroh_port: edge_iroh_port.unwrap_or(DEFAULT_IROH_PORT),
             listen_workers: edge_listen_workers.unwrap_or(1),
             proxy_protocol,
+            tcp_services: edge_tcp_services.unwrap_or(true),
+            udp_services: edge_udp_services.unwrap_or(true),
         };
 
         let tenants = parse_json_opt("TOWONEL_TENANTS", tenants.as_deref())?.unwrap_or_default();

@@ -12,6 +12,7 @@ use iroh::endpoint::{Endpoint, presets::Minimal};
 use tokio::sync::broadcast;
 use tracing::{error, info};
 
+use towonel_common::edge_link::EdgeCapabilities;
 use towonel_common::identity::TenantId;
 use towonel_common::ownership::OwnershipPolicy;
 use towonel_common::routing::RouteTable;
@@ -566,6 +567,10 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_id: *edge_node_id.as_bytes(),
                 iroh_endpoints,
                 software_version: SOFTWARE_VERSION.to_string(),
+                capabilities: EdgeCapabilities {
+                    tcp_services: config.edge.tcp_services,
+                    udp_services: config.edge.udp_services,
+                },
             };
             let hub_client: Arc<dyn edge::hub_client::HubClient> =
                 Arc::new(edge::hub_client::RemoteHubClient::new(handle.clone()));
@@ -780,7 +785,9 @@ async fn build_edge(
         edge_config.health_listen_addr.clone(),
     )
     .with_listen_workers(edge_config.listen_workers)
-    .with_proxy_protocol(edge_config.proxy_protocol.clone());
+    .with_proxy_protocol(edge_config.proxy_protocol.clone())
+    .with_tcp_services(edge_config.tcp_services)
+    .with_udp_services(edge_config.udp_services);
 
     Ok(BuiltEdge {
         edge,

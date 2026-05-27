@@ -99,6 +99,8 @@ pub struct Edge {
     proxy_protocol: Arc<ProxyProtocolConfig>,
     metrics: EdgeMetrics,
     hub_client: Option<Arc<dyn HubClient>>,
+    tcp_services: bool,
+    udp_services: bool,
 }
 
 impl Edge {
@@ -120,6 +122,8 @@ impl Edge {
             proxy_protocol: Arc::default(),
             metrics,
             hub_client: None,
+            tcp_services: true,
+            udp_services: true,
         }
     }
 
@@ -143,6 +147,18 @@ impl Edge {
     #[must_use]
     pub fn with_listen_workers(mut self, n: usize) -> Self {
         self.listen_workers = n.max(1);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_tcp_services(mut self, enabled: bool) -> Self {
+        self.tcp_services = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_udp_services(mut self, enabled: bool) -> Self {
+        self.udp_services = enabled;
         self
     }
 
@@ -179,12 +195,12 @@ impl Edge {
             tasks.push(tokio::spawn(accept_loop(listener, ctx)));
         }
 
-        {
+        if self.tcp_services {
             let ctx = Arc::clone(&ctx);
             tasks.push(tokio::spawn(tcp_listener_reconciler(ctx)));
         }
 
-        {
+        if self.udp_services {
             let ctx = Arc::clone(&ctx);
             tasks.push(tokio::spawn(udp_listener_reconciler(ctx)));
         }

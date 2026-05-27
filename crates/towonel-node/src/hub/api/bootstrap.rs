@@ -63,6 +63,10 @@ pub(super) struct BootstrapResponse {
     edge_cred_b64: Option<String>,
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear bootstrap pipeline — splitting fragments the auth flow"
+)]
 pub(super) async fn post_bootstrap(
     State(state): State<Arc<AppState>>,
     axum::Json(req): axum::Json<BootstrapRequest>,
@@ -135,7 +139,34 @@ pub(super) async fn post_bootstrap(
         _ => Vec::new(),
     };
 
-    for (edge_id, addresses) in state.live_edges.snapshot() {
+    let policy = state.policy.load_full();
+    let Some(pq_pubkey) = policy.pq_public_key(&invite.tenant_id) else {
+        warn!(
+            tenant = %invite.tenant_id,
+            "bootstrap: tenant not found in ownership policy"
+        );
+        return internal_error();
+    };
+
+    let (needs_tcp, needs_udp) = match state
+        .db
+        .tenant_has_service_bindings(&invite.tenant_id, pq_pubkey)
+        .await
+    {
+        Ok((tcp, udp)) => (tcp, udp),
+        Err(e) => {
+            warn!(error = %e, "failed to fetch tenant service bindings for bootstrap");
+            return internal_error();
+        }
+    };
+
+    for (edge_id, addresses, capabilities) in state.live_edges.snapshot() {
+        if needs_tcp && !capabilities.tcp_services {
+            continue;
+        }
+        if needs_udp && !capabilities.udp_services {
+            continue;
+        }
         let Some(node_id) = iroh::EndpointId::from_bytes(&edge_id).ok() else {
             continue;
         };

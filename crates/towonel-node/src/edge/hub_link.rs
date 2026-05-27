@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use towonel_common::edge_link::{
-    EDGE_LINK_VERSION, EdgeToHub, HubSigningKey, HubToEdge, Kid, read_hub_to_edge,
-    write_edge_to_hub,
+    EDGE_LINK_VERSION, EdgeCapabilities, EdgeToHub, HubSigningKey, HubToEdge, Kid,
+    read_hub_to_edge, write_edge_to_hub,
 };
 use towonel_common::identity::AgentId;
 use towonel_common::routing::RouteTable;
@@ -43,6 +43,7 @@ pub struct HubLinkConfig {
     pub edge_id: [u8; 32],
     pub iroh_endpoints: Vec<String>,
     pub software_version: String,
+    pub capabilities: EdgeCapabilities,
 }
 
 #[derive(Clone)]
@@ -285,6 +286,7 @@ where
         iroh_endpoints: cfg.iroh_endpoints.clone(),
         software_version: cfg.software_version.clone(),
         psk: *cfg.psk,
+        capabilities: cfg.capabilities.clone(),
     };
     write_edge_to_hub(writer, &hello)
         .await
