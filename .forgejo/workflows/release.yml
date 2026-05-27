@@ -103,6 +103,13 @@ jobs:
       CARGO_BUILD_JOBS: "1"
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Set version from git tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          cargo install cargo-edit --locked
+          cargo set-version "$VERSION"
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -215,6 +222,13 @@ jobs:
     runs-on: multiarch
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
+      - name: Set version from git tag
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          cargo install cargo-edit --locked
+          cargo set-version "$VERSION"
       - uses: https://data.forgejo.org/docker/setup-qemu-action@v4
         with:
           platforms: arm64
