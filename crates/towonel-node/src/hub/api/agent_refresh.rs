@@ -10,7 +10,6 @@ use tracing::warn;
 
 use towonel_common::edge_cred::Kid;
 use towonel_common::identity::{AgentId, TenantId};
-use towonel_common::routing::RouteTable;
 
 use super::bootstrap::mint_edge_cred;
 use super::{
@@ -111,10 +110,14 @@ async fn agent_is_signed(
     tenant_id: &TenantId,
     agent_id: &AgentId,
 ) -> anyhow::Result<bool> {
-    let entries = state.db.get_entries(tenant_id).await?;
-    let policy = state.policy.load_full();
-    let table = RouteTable::from_entries_with_liveness(&entries, &policy, None);
-    Ok(table.signed_agents().contains(agent_id))
+    let policy = state.policy.load();
+    let Some(pq_pubkey) = policy.pq_public_key(tenant_id) else {
+        return Ok(false);
+    };
+    state
+        .db
+        .is_agent_registered(tenant_id, agent_id, pq_pubkey)
+        .await
 }
 
 async fn check_rate_limit(limiter: &super::RefreshLimiter, agent_id: [u8; 32]) -> bool {
