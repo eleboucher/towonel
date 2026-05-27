@@ -22,6 +22,9 @@ const PRESENT_CRED_TIMEOUT: Duration = Duration::from_secs(5);
 
 const MIN_HEALTHY_SESSION: Duration = Duration::from_mins(1);
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const DNS_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn redial_backoff() -> ExponentialBuilder {
     ExponentialBuilder::default()
         .with_min_delay(Duration::from_millis(500))
@@ -152,9 +155,9 @@ async fn dial_and_serve(
     for sock in resolved {
         addr = addr.with_ip_addr(sock);
     }
-    let conn = endpoint
-        .connect(addr, ALPN_TUNNEL)
+    let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, ALPN_TUNNEL))
         .await
+        .with_context(|| format!("connect to edge {} timed out", contact.id.fmt_short()))?
         .with_context(|| format!("connect to edge {} failed", contact.id.fmt_short()))?;
 
     let edge_label = contact.id.fmt_short().to_string();
@@ -237,9 +240,10 @@ async fn do_present_edge_cred(
 async fn resolve_addrs(addrs: &[String]) -> Vec<SocketAddr> {
     let mut resolved = Vec::new();
     for s in addrs {
-        match lookup_host(s).await {
-            Ok(iter) => resolved.extend(iter),
-            Err(e) => warn!(addr = %s, error = %e, "edge address DNS lookup failed"),
+        match tokio::time::timeout(DNS_TIMEOUT, lookup_host(s)).await {
+            Ok(Ok(iter)) => resolved.extend(iter),
+            Ok(Err(e)) => warn!(addr = %s, error = %e, "edge address DNS lookup failed"),
+            Err(_) => warn!(addr = %s, "edge address DNS lookup timed out"),
         }
     }
     filter_with(resolved, is_routable)
