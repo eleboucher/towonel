@@ -259,10 +259,10 @@ fn build_port_index(
         std::collections::HashMap<String, u16>,
     > = std::collections::HashMap::new();
     for entry in entries {
-        if policy.pq_public_key(&entry.tenant_id).is_none() {
+        let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
             continue;
-        }
-        let Ok(payload) = entry.payload_unverified() else {
+        };
+        let Ok(payload) = entry.verify(pq_pubkey) else {
             continue;
         };
         match payload.op {
