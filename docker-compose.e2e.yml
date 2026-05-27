@@ -21,6 +21,7 @@ services:
       TOWONEL_EDGE_PROXY_PROTOCOL: "true"
       TOWONEL_HUB_PUBLIC_URL: https://hub-node:8443
       TOWONEL_HUB_TLS_CERT_DIR: /certs
+      TOWONEL_HUB_TLS_ACME_EMAIL: ${E2E_HUB_TLS_ACME_EMAIL}
     volumes:
       - hub-data:/data
     healthcheck:
