@@ -329,9 +329,9 @@ impl Hub {
         // Before OIDC so build_oidc_runtimes can seed JWKS metrics.
         let metrics = metrics::HubMetrics::new();
 
-        let oidc = api::build_oidc_runtimes(&self.p.oidc, &metrics).await?;
+        let oidc = api::build_oidc_runtimes(&self.p.oidc, &metrics);
         if oidc.codeberg.is_some() {
-            info!("OIDC provider 'codeberg' configured");
+            info!("OIDC provider 'codeberg' configured — discovery running in background");
         }
 
         let parsed = url::Url::parse(&self.p.public_url)

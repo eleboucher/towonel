@@ -43,7 +43,7 @@ type ConfiguredCoreClient = CoreClient<
 pub struct OidcProviderRuntime {
     pub display_name: &'static str,
     /// Swapped by the JWKS refresher on `IdP` key rotation.
-    pub client: Arc<arc_swap::ArcSwap<ConfiguredCoreClient>>,
+    pub client: Arc<arc_swap::ArcSwap<Option<ConfiguredCoreClient>>>,
     pub http: Arc<OidcHttpClient>,
     pub scopes: Vec<String>,
     pub pending: moka::future::Cache<String, PendingOidcFlow>,
@@ -85,75 +85,161 @@ impl OidcRuntimes {
     }
 }
 
-pub async fn build_runtimes(
+pub fn build_runtimes(
     cfg: &crate::config::OidcConfig,
     metrics: &super::super::metrics::HubMetrics,
-) -> anyhow::Result<OidcRuntimes> {
-    Ok(OidcRuntimes {
-        codeberg: match cfg.codeberg.as_ref() {
-            Some(c) => Some(build_provider("codeberg", "Codeberg", c, metrics).await?),
-            None => None,
-        },
-    })
+) -> OidcRuntimes {
+    OidcRuntimes {
+        codeberg: cfg
+            .codeberg
+            .as_ref()
+            .map(|c| build_provider_lazy("codeberg", "Codeberg", c, metrics)),
+    }
 }
 
 const JWKS_REFRESH_INTERVAL: Duration = Duration::from_hours(12);
+const OIDC_INIT_RETRY_INITIAL: Duration = Duration::from_secs(2);
+const OIDC_INIT_RETRY_MAX: Duration = Duration::from_mins(1);
+const OIDC_INIT_RETRY_MULTIPLIER: f32 = 2.0;
+const OIDC_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 
-async fn build_provider(
+/// Build the runtime without blocking startup. The provider metadata
+/// discovery runs in the background with retries until success.
+fn build_provider_lazy(
     provider_id: &'static str,
     display_name: &'static str,
     cfg: &OidcProviderConfig,
     metrics: &super::super::metrics::HubMetrics,
-) -> anyhow::Result<OidcProviderRuntime> {
+) -> OidcProviderRuntime {
     let http = Arc::new(
         openidconnect::reqwest::ClientBuilder::new()
             .redirect(openidconnect::reqwest::redirect::Policy::none())
             .build()
-            .map_err(|e| anyhow::anyhow!("oidc http client build failed: {e}"))?,
+            .expect("oidc http client build failed"),
     );
-    let issuer = IssuerUrl::new(cfg.issuer.clone())
-        .map_err(|e| anyhow::anyhow!("invalid OIDC issuer {}: {e}", cfg.issuer))?;
-    let redirect_uri = RedirectUrl::new(cfg.redirect_uri.clone())
-        .map_err(|e| anyhow::anyhow!("invalid redirect_uri {}: {e}", cfg.redirect_uri))?;
-    let metadata = CoreProviderMetadata::discover_async(issuer.clone(), &*http)
-        .await
-        .map_err(|e| anyhow::anyhow!("OIDC discovery for {display_name} failed: {e}"))?;
+    let issuer = IssuerUrl::new(cfg.issuer.clone()).expect("invalid OIDC issuer");
+    let redirect_uri = RedirectUrl::new(cfg.redirect_uri.clone()).expect("invalid redirect_uri");
     let parts = ClientParts {
         client_id: cfg.client_id.clone(),
         client_secret: cfg.client_secret.clone(),
         redirect_uri,
     };
-    let client = build_client(metadata, &parts);
-    let client_swap = Arc::new(arc_swap::ArcSwap::from_pointee(client));
-
-    // Seed the freshness gauge from startup so alerts don't false-fire
-    // for the first refresh interval after a restart.
-    metrics
-        .oidc_jwks_last_refresh_success_timestamp_seconds
-        .with_label_values(&[provider_id])
-        .set(i64::try_from(towonel_common::time::now_ms() / 1000).unwrap_or(i64::MAX));
-
-    spawn_jwks_refresher(
-        provider_id,
-        display_name,
-        issuer,
-        Arc::clone(&http),
-        parts,
-        Arc::clone(&client_swap),
-        metrics.clone(),
-    );
 
     let pending = moka::future::Cache::builder()
         .max_capacity(1_000_000)
         .time_to_live(FLOW_TTL)
         .build();
-    Ok(OidcProviderRuntime {
+
+    let runtime = OidcProviderRuntime {
         display_name,
-        client: client_swap,
-        http,
+        client: Arc::new(arc_swap::ArcSwap::from_pointee(None)),
+        http: Arc::clone(&http),
         scopes: vec!["openid".into(), "email".into(), "profile".into()],
         pending,
-    })
+    };
+
+    spawn_oidc_initializer(
+        provider_id,
+        display_name,
+        issuer,
+        http,
+        parts,
+        Arc::clone(&runtime.client),
+        metrics.clone(),
+    );
+
+    runtime
+}
+
+fn spawn_oidc_initializer(
+    provider_id: &'static str,
+    display_name: &'static str,
+    issuer: IssuerUrl,
+    http: Arc<OidcHttpClient>,
+    parts: ClientParts,
+    client_swap: Arc<arc_swap::ArcSwap<Option<ConfiguredCoreClient>>>,
+    metrics: super::super::metrics::HubMetrics,
+) {
+    tokio::spawn(async move {
+        let mut delay = OIDC_INIT_RETRY_INITIAL;
+        let mut attempts = 0u32;
+
+        loop {
+            attempts += 1;
+            let discovery = tokio::time::timeout(
+                OIDC_DISCOVERY_TIMEOUT,
+                CoreProviderMetadata::discover_async(issuer.clone(), &*http),
+            );
+
+            match discovery.await {
+                Ok(Ok(meta)) => {
+                    let client = build_client(meta, &parts);
+                    client_swap.store(Arc::new(Some(client)));
+                    metrics
+                        .oidc_jwks_last_refresh_success_timestamp_seconds
+                        .with_label_values(&[provider_id])
+                        .set(
+                            i64::try_from(towonel_common::time::now_ms() / 1000)
+                                .unwrap_or(i64::MAX),
+                        );
+                    tracing::info!(
+                        provider = %display_name,
+                        attempts,
+                        "OIDC provider metadata discovered"
+                    );
+                    break;
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        provider = %display_name,
+                        error = %e,
+                        attempts,
+                        next_retry_secs = delay.as_secs(),
+                        "OIDC provider metadata discovery failed (retrying)"
+                    );
+                    metrics
+                        .oidc_jwks_refresh_total
+                        .with_label_values(&[provider_id, "failure"])
+                        .inc();
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        provider = %display_name,
+                        attempts,
+                        timeout_secs = OIDC_DISCOVERY_TIMEOUT.as_secs(),
+                        next_retry_secs = delay.as_secs(),
+                        "OIDC provider metadata discovery timed out (retrying)"
+                    );
+                    metrics
+                        .oidc_jwks_refresh_total
+                        .with_label_values(&[provider_id, "failure"])
+                        .inc();
+                }
+            }
+
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                () = towonel_common::shutdown::shutdown_signal() => {
+                    tracing::info!(provider = %display_name, "OIDC initializer cancelled by shutdown");
+                    return;
+                }
+            }
+            delay = std::cmp::min(
+                OIDC_INIT_RETRY_MAX,
+                Duration::from_secs_f32(delay.as_secs_f32() * OIDC_INIT_RETRY_MULTIPLIER),
+            );
+        }
+
+        spawn_jwks_refresher_after_init(
+            provider_id,
+            display_name,
+            issuer,
+            http,
+            parts,
+            client_swap,
+            metrics,
+        );
+    });
 }
 
 #[derive(Clone)]
@@ -172,58 +258,26 @@ fn build_client(metadata: CoreProviderMetadata, parts: &ClientParts) -> Configur
     .set_redirect_uri(parts.redirect_uri.clone())
 }
 
-async fn refresh_provider_metadata(
-    provider_id: &'static str,
-    display_name: &'static str,
-    issuer: &IssuerUrl,
-    http: &OidcHttpClient,
-    parts: &ClientParts,
-    client_swap: &arc_swap::ArcSwap<ConfiguredCoreClient>,
-    metrics: &super::super::metrics::HubMetrics,
-) {
-    match CoreProviderMetadata::discover_async(issuer.clone(), http).await {
-        Ok(meta) => {
-            let client = build_client(meta, parts);
-            client_swap.store(Arc::new(client));
-            metrics
-                .oidc_jwks_refresh_total
-                .with_label_values(&[provider_id, "success"])
-                .inc();
-            metrics
-                .oidc_jwks_last_refresh_success_timestamp_seconds
-                .with_label_values(&[provider_id])
-                .set(i64::try_from(towonel_common::time::now_ms() / 1000).unwrap_or(i64::MAX));
-            tracing::info!(provider = %display_name, "OIDC provider metadata refreshed");
-        }
-        Err(e) => {
-            metrics
-                .oidc_jwks_refresh_total
-                .with_label_values(&[provider_id, "failure"])
-                .inc();
-            tracing::warn!(
-                provider = %display_name,
-                error = %e,
-                "OIDC provider metadata refresh failed; keeping previous client",
-            );
-        }
-    }
-}
-
-fn spawn_jwks_refresher(
+fn spawn_jwks_refresher_after_init(
     provider_id: &'static str,
     display_name: &'static str,
     issuer: IssuerUrl,
     http: Arc<OidcHttpClient>,
     parts: ClientParts,
-    client_swap: Arc<arc_swap::ArcSwap<ConfiguredCoreClient>>,
+    client_swap: Arc<arc_swap::ArcSwap<Option<ConfiguredCoreClient>>>,
     metrics: super::super::metrics::HubMetrics,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(JWKS_REFRESH_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = interval.tick() => {}
+                () = towonel_common::shutdown::shutdown_signal() => {
+                    tracing::info!(provider = %display_name, "JWKS refresher cancelled by shutdown");
+                    return;
+                }
+            }
             refresh_provider_metadata(
                 provider_id,
                 display_name,
@@ -236,6 +290,59 @@ fn spawn_jwks_refresher(
             .await;
         }
     });
+}
+
+async fn refresh_provider_metadata(
+    provider_id: &'static str,
+    display_name: &'static str,
+    issuer: &IssuerUrl,
+    http: &OidcHttpClient,
+    parts: &ClientParts,
+    client_swap: &arc_swap::ArcSwap<Option<ConfiguredCoreClient>>,
+    metrics: &super::super::metrics::HubMetrics,
+) {
+    let discovery = tokio::time::timeout(
+        OIDC_DISCOVERY_TIMEOUT,
+        CoreProviderMetadata::discover_async(issuer.clone(), http),
+    );
+
+    match discovery.await {
+        Ok(Ok(meta)) => {
+            let client = build_client(meta, parts);
+            client_swap.store(Arc::new(Some(client)));
+            metrics
+                .oidc_jwks_refresh_total
+                .with_label_values(&[provider_id, "success"])
+                .inc();
+            metrics
+                .oidc_jwks_last_refresh_success_timestamp_seconds
+                .with_label_values(&[provider_id])
+                .set(i64::try_from(towonel_common::time::now_ms() / 1000).unwrap_or(i64::MAX));
+            tracing::info!(provider = %display_name, "OIDC provider metadata refreshed");
+        }
+        Ok(Err(e)) => {
+            metrics
+                .oidc_jwks_refresh_total
+                .with_label_values(&[provider_id, "failure"])
+                .inc();
+            tracing::warn!(
+                provider = %display_name,
+                error = %e,
+                "OIDC provider metadata refresh failed; keeping previous client",
+            );
+        }
+        Err(_) => {
+            metrics
+                .oidc_jwks_refresh_total
+                .with_label_values(&[provider_id, "failure"])
+                .inc();
+            tracing::warn!(
+                provider = %display_name,
+                timeout_secs = OIDC_DISCOVERY_TIMEOUT.as_secs(),
+                "OIDC provider metadata refresh timed out; keeping previous client",
+            );
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,7 +407,11 @@ async fn begin_flow(
         return error_redirect(provider, "provider_disabled");
     };
 
-    let client = runtime.client.load_full();
+    let client_opt = runtime.client.load_full();
+    let Some(client) = client_opt.as_ref() else {
+        return error_redirect(provider, "provider_initializing");
+    };
+
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
     let mut req = client
         .authorize_url(
@@ -363,7 +474,10 @@ pub(super) async fn callback(
     // takes plain String); secret lingers until request_async below.
     let pkce_verifier = PkceCodeVerifier::new(flow.pkce_verifier_secret.to_string());
 
-    let client = runtime.client.load_full();
+    let client_opt = runtime.client.load_full();
+    let Some(client) = client_opt.as_ref() else {
+        return error_redirect(&provider, "provider_initializing");
+    };
     let token_response = match client.exchange_code(AuthorizationCode::new(code)) {
         Ok(req) => match req
             .set_pkce_verifier(pkce_verifier)
