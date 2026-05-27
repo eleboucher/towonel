@@ -25,8 +25,8 @@ pub mod users;
 pub use types::*;
 
 use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectOptions, Database, DatabaseConnection,
-    DbErr, EntityTrait, QueryFilter, QueryOrder,
+    ActiveModelTrait, ActiveValue, ColumnTrait, ConnectOptions, ConnectionTrait, Database,
+    DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
 };
 use sea_orm_migration::MigratorTrait;
 use towonel_common::config_entry::SignedConfigEntry;
@@ -79,6 +79,15 @@ impl Db {
             .min_connections(max_idle)
             .sqlx_logging_level(tracing::log::LevelFilter::Debug);
         let conn = Database::connect(opts).await?;
+
+        if url.starts_with("sqlite:") {
+            conn.execute(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "PRAGMA foreign_keys = ON".to_string(),
+            ))
+            .await?;
+        }
+
         Migrator::up(&conn, None).await?;
         Ok(Self { conn })
     }
@@ -343,6 +352,12 @@ pub(super) async fn temp_db() -> Db {
         .min_connections(1)
         .sqlx_logging_level(tracing::log::LevelFilter::Debug);
     let conn = Database::connect(opts).await.unwrap();
+    conn.execute(sea_orm::Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        "PRAGMA foreign_keys = ON".to_string(),
+    ))
+    .await
+    .unwrap();
     Migrator::up(&conn, None).await.unwrap();
     Db { conn }
 }

@@ -126,6 +126,13 @@ impl Db {
         tenant_id: &TenantId,
         removed_at_ms: u64,
     ) -> anyhow::Result<()> {
+        use sea_orm::EntityTrait;
+
+        invites::Entity::delete_many()
+            .filter(invites::Column::TenantId.eq(tenant_id_bytes(tenant_id)))
+            .exec(&self.conn)
+            .await?;
+
         let model = tenant_removals::ActiveModel {
             tenant_id: ActiveValue::Set(tenant_id_bytes(tenant_id)),
             removed_at_ms: ActiveValue::Set(removed_at_ms.cast_signed()),

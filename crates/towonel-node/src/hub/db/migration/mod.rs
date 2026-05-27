@@ -11,6 +11,7 @@ mod m20260523_000000_user_accounts;
 mod m20260523_000001_admin_actions_widen_actor_kind;
 mod m20260524_000000_drop_edge_invites;
 mod m20260524_000001_port_reservations;
+mod m20260527_000000_tenants_table_with_fk;
 mod m20260601_000000_hub_init_canary;
 mod m20260612_000000_user_oauth_identities;
 mod m20260613_000000_drop_agent_liveness;
@@ -53,6 +54,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260617_000000_app_settings::Migration),
             Box::new(m20260618_000000_user_2fa::Migration),
             Box::new(m20260619_000000_user_passkeys::Migration),
+            Box::new(m20260527_000000_tenants_table_with_fk::Migration),
         ]
     }
 }

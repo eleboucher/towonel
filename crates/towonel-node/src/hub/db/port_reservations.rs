@@ -381,4 +381,71 @@ mod tests {
         assert!(removed);
         assert_eq!(db.list_port_reservations(None).await.unwrap().len(), 0);
     }
+
+    #[tokio::test]
+    async fn remove_tenant_cascades_to_port_reservations() {
+        use super::super::tenant_ownership::NewTenantOwnership;
+        use super::super::types::PendingInvite;
+        use super::super::users::NewUser;
+        use towonel_common::invite::INVITE_ID_LEN;
+
+        let db = temp_db().await;
+        let tenant_kp = TenantKeypair::generate();
+        let now_ms_i = 1_700_000_000_000i64;
+        let now_ms_u = now_ms_i.cast_unsigned();
+
+        db.insert_user(NewUser {
+            id: "testuser",
+            email: "test@example.com",
+            password_hash: "x",
+            role: "user",
+            email_verified_at_ms: Some(now_ms_i),
+            now_ms: now_ms_i,
+        })
+        .await
+        .unwrap();
+
+        let invite = PendingInvite {
+            invite_id: [42u8; INVITE_ID_LEN],
+            name: "test",
+            secret_hash: [1u8; 32],
+            expires_at_ms: None,
+            tenant_id: tenant_kp.id(),
+            pq_public_key: tenant_kp.public_key(),
+            created_at_ms: now_ms_u,
+            hostnames: &[],
+        };
+        db.insert_invite(&invite).await.unwrap();
+
+        db.insert_tenant_ownership(NewTenantOwnership {
+            user_id: "testuser",
+            tenant_id: tenant_kp.id().as_bytes(),
+            invite_id: &[42u8; INVITE_ID_LEN],
+            display_name: "test",
+            now_ms: now_ms_i,
+        })
+        .await
+        .unwrap();
+
+        db.insert_port_reservation(&NewPortReservation {
+            tenant_id: tenant_kp.id(),
+            ip_address: None,
+            port: 22000,
+            protocol: PortProtocol::Tcp,
+            label: Some("ssh"),
+            claimed_at_ms: now_ms_u,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(db.list_port_reservations(None).await.unwrap().len(), 1);
+
+        db.remove_tenant(&tenant_kp.id(), now_ms_u).await.unwrap();
+
+        assert_eq!(
+            db.list_port_reservations(None).await.unwrap().len(),
+            0,
+            "port reservations should cascade-delete when tenant is removed"
+        );
+    }
 }

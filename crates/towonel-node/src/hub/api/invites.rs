@@ -310,9 +310,6 @@ pub(super) async fn delete_invite(
                 return internal_error();
             }
             state.policy_update(|p| p.remove(&tid));
-            if let Err(e) = state.db.delete_tenant_ownership_by_invite(&invite_id).await {
-                warn!(error = %e, "delete_tenant_ownership_by_invite failed");
-            }
             json_ok(serde_json::json!({"status": "revoked"}))
         }
         Ok(false) => not_found("invite is already revoked or does not exist"),
