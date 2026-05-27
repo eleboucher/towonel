@@ -35,6 +35,24 @@ impl MigrationTrait for Migration {
                 db.execute(Statement::from_string(
                     backend,
                     r"
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.table_constraints
+                            WHERE constraint_name = 'uq_invites_tenant_id'
+                              AND table_name = 'invites'
+                        ) THEN
+                            ALTER TABLE invites
+                                ADD CONSTRAINT uq_invites_tenant_id UNIQUE (tenant_id);
+                        END IF;
+                    END $$
+                    ",
+                ))
+                .await?;
+
+                db.execute(Statement::from_string(
+                    backend,
+                    r"
                     ALTER TABLE port_reservations
                     ADD CONSTRAINT fk_port_reservations_invite
                     FOREIGN KEY (tenant_id)
@@ -103,6 +121,11 @@ impl MigrationTrait for Migration {
                 db.execute(Statement::from_string(
                     backend,
                     "ALTER TABLE tenant_ownership DROP CONSTRAINT fk_tenant_ownership_invite",
+                ))
+                .await?;
+                db.execute(Statement::from_string(
+                    backend,
+                    "ALTER TABLE invites DROP CONSTRAINT uq_invites_tenant_id",
                 ))
                 .await?;
             }
