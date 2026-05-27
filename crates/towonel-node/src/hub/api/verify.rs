@@ -79,11 +79,6 @@ pub(super) async fn post_resend(
 ) -> Response {
     let email = body.email.trim();
     let email_key = email.to_lowercase();
-    if let Some(counter) = state.login_limiter.get(&email_key).await
-        && counter.load(std::sync::atomic::Ordering::Relaxed) >= super::LOGIN_MAX_FAILURES
-    {
-        return generic_ok();
-    }
 
     if let Ok(Some(user)) = state.db.find_user_by_email(email).await
         && user.disabled_at_ms.is_none()

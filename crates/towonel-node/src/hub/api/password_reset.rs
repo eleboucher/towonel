@@ -36,11 +36,6 @@ pub(super) async fn post_request(
 ) -> Response {
     let email = body.email.trim();
     let email_key = email.to_lowercase();
-    if let Some(counter) = state.login_limiter.get(&email_key).await
-        && counter.load(std::sync::atomic::Ordering::Relaxed) >= super::LOGIN_MAX_FAILURES
-    {
-        return generic_ok();
-    }
 
     // OIDC-only users (empty hash) have no password to reset.
     if let Ok(Some(user)) = state.db.find_user_by_email(email).await
