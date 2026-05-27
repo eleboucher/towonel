@@ -1,23 +1,19 @@
 use sea_orm::sea_query::OnConflict;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, JoinType, QueryFilter, QueryOrder,
-    QuerySelect, RelationTrait, TransactionTrait,
-};
+use sea_orm::{ActiveModelTrait, ActiveValue, ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use towonel_common::identity::{PqPublicKey, TenantId};
 use towonel_common::invite::INVITE_ID_LEN;
 
-use super::entities::{invite_hostnames, invites, tenant_removals};
+use super::entities::{invites, tenant_removals};
 use super::{
     Db, InviteRow, InviteStatus, PendingInvite, RedeemedTenant, bytes_to_array, tenant_id_bytes,
 };
 
 impl Db {
-    /// Persist a freshly created tenant invite. v2 invites bind the tenant
-    /// identity at creation time, so `tenant_id` and `pq_public_key` are
-    /// populated on insert (no redemption dance). Hostnames land in the
-    /// normalized `invite_hostnames` child table.
+    /// Persist a freshly created tenant invite. The tenant identity is bound
+    /// at creation time, so `tenant_id` and `pq_public_key` are always known.
+    /// Hostnames are stored as a JSON column for cross-database compatibility.
     pub async fn insert_invite(&self, invite: &PendingInvite<'_>) -> anyhow::Result<()> {
-        let txn = self.conn.begin().await?;
+        use serde_json::Value;
 
         invites::ActiveModel {
             invite_id: ActiveValue::Set(invite.invite_id.to_vec()),
@@ -28,13 +24,17 @@ impl Db {
             tenant_id: ActiveValue::Set(Some(tenant_id_bytes(&invite.tenant_id))),
             tenant_pq_public_key: ActiveValue::Set(Some(invite.pq_public_key.as_bytes().to_vec())),
             created_at_ms: ActiveValue::Set(invite.created_at_ms.cast_signed()),
+            hostnames: ActiveValue::Set(Value::Array(
+                invite
+                    .hostnames
+                    .iter()
+                    .map(|h| Value::String(h.clone()))
+                    .collect(),
+            )),
         }
-        .insert(&txn)
+        .insert(&self.conn)
         .await?;
 
-        insert_hostnames(&txn, &invite.invite_id, invite.hostnames).await?;
-
-        txn.commit().await?;
         Ok(())
     }
 
@@ -48,22 +48,15 @@ impl Db {
         else {
             return Ok(None);
         };
-        let hostnames = load_invite_hostnames(&self.conn, invite_id).await?;
-        Ok(Some(model_to_invite_row(model, hostnames)?))
+        Ok(Some(model_to_invite_row(model)?))
     }
 
     pub async fn list_invites(&self) -> anyhow::Result<Vec<InviteRow>> {
         let rows = invites::Entity::find()
-            .find_with_related(invite_hostnames::Entity)
             .order_by_desc(invites::Column::CreatedAtMs)
             .all(&self.conn)
             .await?;
-        rows.into_iter()
-            .map(|(invite, hns)| {
-                let hostnames = hns.into_iter().map(|h| h.hostname).collect();
-                model_to_invite_row(invite, hostnames)
-            })
-            .collect()
+        rows.into_iter().map(model_to_invite_row).collect()
     }
 
     /// Pending → Claimed. No-op (returns false) on already-claimed or revoked rows.
@@ -107,16 +100,99 @@ impl Db {
         if candidates_lower.is_empty() {
             return Ok(None);
         }
-        let hit = invite_hostnames::Entity::find()
-            .join(
-                JoinType::InnerJoin,
-                invite_hostnames::Relation::Invite.def(),
-            )
+
+        let rows = invites::Entity::find()
             .filter(invites::Column::Status.ne(InviteStatus::Revoked.as_str()))
-            .filter(invite_hostnames::Column::HostnameLower.is_in(candidates_lower.to_vec()))
-            .one(&self.conn)
+            .all(&self.conn)
             .await?;
-        Ok(hit.map(|h| h.hostname_lower))
+
+        let candidates_set: std::collections::HashSet<&str> =
+            candidates_lower.iter().map(String::as_str).collect();
+
+        for row in rows {
+            let hostnames = row.hostnames_vec();
+            for hostname in hostnames {
+                if candidates_set.contains(hostname.to_lowercase().as_str()) {
+                    return Ok(Some(hostname.to_lowercase()));
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub async fn add_invite_hostnames(
+        &self,
+        invite_id: &[u8; INVITE_ID_LEN],
+        hostnames: &[String],
+    ) -> anyhow::Result<bool> {
+        let Some(row) = self.get_invite(invite_id).await? else {
+            return Ok(false);
+        };
+
+        let mut new_hostnames = row.hostnames;
+        let mut existing_lower: std::collections::HashSet<String> =
+            new_hostnames.iter().map(|h| h.to_lowercase()).collect();
+
+        let mut added = false;
+        for hostname in hostnames {
+            let hostname_lower = hostname.to_lowercase();
+            if existing_lower.insert(hostname_lower) {
+                new_hostnames.push(hostname.clone());
+                added = true;
+            }
+        }
+
+        if !added {
+            return Ok(false);
+        }
+
+        invites::Entity::update(invites::ActiveModel {
+            invite_id: ActiveValue::Set(invite_id.to_vec()),
+            hostnames: ActiveValue::Set(serde_json::Value::Array(
+                new_hostnames
+                    .iter()
+                    .map(|h| serde_json::Value::String(h.clone()))
+                    .collect(),
+            )),
+            ..Default::default()
+        })
+        .exec(&self.conn)
+        .await?;
+
+        Ok(true)
+    }
+    pub async fn remove_invite_hostname(
+        &self,
+        invite_id: &[u8; INVITE_ID_LEN],
+        hostname: &str,
+    ) -> anyhow::Result<bool> {
+        let Some(mut row) = self.get_invite(invite_id).await? else {
+            return Ok(false);
+        };
+
+        let hostname_lower = hostname.to_lowercase();
+        let original_len = row.hostnames.len();
+        row.hostnames.retain(|h| h.to_lowercase() != hostname_lower);
+
+        if row.hostnames.len() == original_len {
+            return Ok(false);
+        }
+
+        invites::Entity::update(invites::ActiveModel {
+            invite_id: ActiveValue::Set(invite_id.to_vec()),
+            hostnames: ActiveValue::Set(serde_json::Value::Array(
+                row.hostnames
+                    .iter()
+                    .map(|h| serde_json::Value::String(h.clone()))
+                    .collect(),
+            )),
+            ..Default::default()
+        })
+        .exec(&self.conn)
+        .await?;
+
+        Ok(true)
     }
 
     /// Record an operator decision to remove a tenant from service.
@@ -126,8 +202,6 @@ impl Db {
         tenant_id: &TenantId,
         removed_at_ms: u64,
     ) -> anyhow::Result<()> {
-        use sea_orm::EntityTrait;
-
         invites::Entity::delete_many()
             .filter(invites::Column::TenantId.eq(tenant_id_bytes(tenant_id)))
             .exec(&self.conn)
@@ -168,24 +242,26 @@ impl Db {
             .filter(invites::Column::Status.ne(InviteStatus::Revoked.as_str()))
             .filter(invites::Column::TenantId.is_not_null())
             .filter(invites::Column::TenantPqPublicKey.is_not_null())
-            .find_with_related(invite_hostnames::Entity)
             .all(&self.conn)
             .await?;
 
         rows.into_iter()
-            .map(|(invite, hns)| {
+            .map(|invite| {
                 let tenant_bytes = invite
                     .tenant_id
+                    .clone()
                     .ok_or_else(|| anyhow::anyhow!("active invite missing tenant_id"))?;
                 let pq_bytes = invite
                     .tenant_pq_public_key
+                    .clone()
                     .ok_or_else(|| anyhow::anyhow!("active invite missing tenant_pq_public_key"))?;
                 let tenant_arr = bytes_to_array::<32>(tenant_bytes, "active tenant_id")?;
                 let pq_public_key = PqPublicKey::from_slice(&pq_bytes)
                     .map_err(|e| anyhow::anyhow!("invalid active pq_public_key: {e}"))?;
+                let hostnames = invite.hostnames_vec();
                 Ok(RedeemedTenant {
                     tenant_id: TenantId::from_bytes(&tenant_arr),
-                    hostnames: hns.into_iter().map(|h| h.hostname).collect(),
+                    hostnames,
                     pq_public_key,
                 })
             })
@@ -193,44 +269,12 @@ impl Db {
     }
 }
 
-async fn insert_hostnames(
-    conn: &impl sea_orm::ConnectionTrait,
-    invite_id: &[u8; INVITE_ID_LEN],
-    hostnames: &[String],
-) -> anyhow::Result<()> {
-    if hostnames.is_empty() {
-        return Ok(());
-    }
-    let rows: Vec<invite_hostnames::ActiveModel> = hostnames
-        .iter()
-        .map(|h| invite_hostnames::ActiveModel {
-            invite_id: ActiveValue::Set(invite_id.to_vec()),
-            hostname_lower: ActiveValue::Set(h.to_lowercase()),
-            hostname: ActiveValue::Set(h.clone()),
-        })
-        .collect();
-    invite_hostnames::Entity::insert_many(rows)
-        .exec(conn)
-        .await?;
-    Ok(())
-}
-
-async fn load_invite_hostnames(
-    conn: &sea_orm::DatabaseConnection,
-    invite_id: &[u8; INVITE_ID_LEN],
-) -> anyhow::Result<Vec<String>> {
-    let rows = invite_hostnames::Entity::find()
-        .filter(invite_hostnames::Column::InviteId.eq(invite_id.to_vec()))
-        .all(conn)
-        .await?;
-    Ok(rows.into_iter().map(|r| r.hostname).collect())
-}
-
-fn model_to_invite_row(model: invites::Model, hostnames: Vec<String>) -> anyhow::Result<InviteRow> {
-    let tenant_bytes = model.tenant_id.ok_or_else(|| {
+fn model_to_invite_row(model: invites::Model) -> anyhow::Result<InviteRow> {
+    let tenant_bytes = model.tenant_id.clone().ok_or_else(|| {
         anyhow::anyhow!("invite row missing tenant_id (v1 data? rerun migration)")
     })?;
     let tenant_arr = bytes_to_array::<32>(tenant_bytes, "tenant_id")?;
+    let hostnames = model.hostnames_vec();
     Ok(InviteRow {
         invite_id: bytes_to_array(model.invite_id, "invite_id")?,
         name: model.name,
@@ -358,10 +402,8 @@ mod tests {
         let row = db.get_invite(&id).await.unwrap().unwrap();
         assert_eq!(row.status, InviteStatus::Claimed);
 
-        // Idempotent on already-claimed rows.
         assert!(!db.mark_invite_claimed(&id).await.unwrap());
 
-        // Cannot un-revoke via claim.
         let j = input(31, "t", &["claim2.example.eu"]);
         let jid = insert(&db, &j).await;
         db.revoke_invite(&jid).await.unwrap();
@@ -474,5 +516,72 @@ mod tests {
         assert!(ids.contains(&a.tenant.id()));
         assert!(ids.contains(&b.tenant.id()));
         assert!(!ids.contains(&c.tenant.id()));
+    }
+
+    #[tokio::test]
+    async fn add_invite_hostnames_works() {
+        let db = temp_db().await;
+        let i = input(50, "test", &["app.example.eu"]);
+        let id = insert(&db, &i).await;
+
+        let added = db
+            .add_invite_hostnames(&id, &["api.example.eu".to_string()])
+            .await
+            .unwrap();
+        assert!(added);
+
+        let row = db.get_invite(&id).await.unwrap().unwrap();
+        assert_eq!(row.hostnames.len(), 2);
+        assert!(row.hostnames.contains(&"app.example.eu".to_string()));
+        assert!(row.hostnames.contains(&"api.example.eu".to_string()));
+    }
+
+    #[tokio::test]
+    async fn add_invite_hostnames_skips_existing() {
+        let db = temp_db().await;
+        let i = input(51, "test", &["app.example.eu"]);
+        let id = insert(&db, &i).await;
+
+        let added = db
+            .add_invite_hostnames(&id, &["app.example.eu".to_string()])
+            .await
+            .unwrap();
+        assert!(!added);
+
+        let row = db.get_invite(&id).await.unwrap().unwrap();
+        assert_eq!(row.hostnames.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_invite_hostname_works() {
+        let db = temp_db().await;
+        let i = input(52, "test", &["app.example.eu", "api.example.eu"]);
+        let id = insert(&db, &i).await;
+
+        let removed = db
+            .remove_invite_hostname(&id, "app.example.eu")
+            .await
+            .unwrap();
+        assert!(removed);
+
+        let row = db.get_invite(&id).await.unwrap().unwrap();
+        assert_eq!(row.hostnames.len(), 1);
+        assert_eq!(row.hostnames[0], "api.example.eu");
+    }
+
+    #[tokio::test]
+    async fn remove_invite_hostname_not_found() {
+        let db = temp_db().await;
+        let i = input(53, "test", &["app.example.eu"]);
+        let id = insert(&db, &i).await;
+
+        let removed = db
+            .remove_invite_hostname(&id, "other.example.eu")
+            .await
+            .unwrap();
+        assert!(!removed);
+
+        let row = db.get_invite(&id).await.unwrap().unwrap();
+        assert_eq!(row.hostnames.len(), 1);
     }
 }

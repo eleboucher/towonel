@@ -12,18 +12,36 @@ pub struct Model {
     pub tenant_id: Option<Vec<u8>>,
     pub tenant_pq_public_key: Option<Vec<u8>>,
     pub created_at_ms: i64,
+    #[sea_orm(column_type = "Json")]
+    pub hostnames: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
-pub enum Relation {
-    #[sea_orm(has_many = "super::invite_hostnames::Entity")]
-    Hostnames,
-}
-
-impl Related<super::invite_hostnames::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::Hostnames.def()
-    }
-}
+pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
+
+impl Model {
+    pub fn hostnames_vec(&self) -> Vec<String> {
+        if let sea_orm::JsonValue::Array(arr) = &self.hostnames {
+            arr.iter()
+                .filter_map(|v| {
+                    v.as_str().map(String::from).or_else(|| {
+                        tracing::warn!(
+                            "non-string hostname element in invite {:?}",
+                            self.invite_id
+                        );
+                        None
+                    })
+                })
+                .collect()
+        } else {
+            tracing::warn!(
+                "invite {} has non-array hostnames: {:?}",
+                hex::encode(&self.invite_id),
+                self.hostnames
+            );
+            Vec::new()
+        }
+    }
+}

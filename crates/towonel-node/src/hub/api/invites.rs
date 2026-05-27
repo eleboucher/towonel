@@ -261,6 +261,200 @@ pub(super) async fn list_invites(
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct AddHostnamesRequest {
+    hostnames: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct AddHostnamesResponse {
+    status: &'static str,
+    hostnames: Vec<String>,
+}
+
+pub(super) async fn post_invite_hostnames(
+    State(state): State<Arc<AppState>>,
+    principal: Principal,
+    Path(id): Path<String>,
+    axum::Json(req): axum::Json<AddHostnamesRequest>,
+) -> Response {
+    let Some(invite_id) = parse_invite_id(&id) else {
+        return invalid_request("invite_id is not valid base64url");
+    };
+
+    if req.hostnames.is_empty() {
+        return invalid_request("at least one hostname is required");
+    }
+
+    for h in &req.hostnames {
+        if let Err(e) = towonel_common::hostname::validate_hostname(h) {
+            return invalid_request(format!("invalid hostname `{h}`: {e}"));
+        }
+    }
+
+    let row = match state.db.get_invite(&invite_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found("invite does not exist"),
+        Err(e) => {
+            warn!(error = %e, "failed to look up invite");
+            return internal_error();
+        }
+    };
+
+    if let Principal::User(u) = &principal
+        && u.role != "operator"
+    {
+        let owned = match state
+            .db
+            .find_tenant_ownership_by_invite(&u.id, &invite_id)
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(error = %e, "find_tenant_ownership_by_invite failed");
+                return internal_error();
+            }
+        };
+        if owned.is_none() {
+            return not_found("invite does not exist");
+        }
+    }
+
+    let _guard = state.invite_lock.lock().await;
+
+    let candidates_lower: Vec<String> = req.hostnames.iter().map(|h| h.to_lowercase()).collect();
+    {
+        let policy = state.policy.load();
+        for (h_lower, h_orig) in candidates_lower.iter().zip(req.hostnames.iter()) {
+            for (tenant, patterns) in policy.iter_patterns() {
+                if patterns.contains(h_lower) && tenant != &row.tenant_id {
+                    return conflict(
+                        "hostname_conflict",
+                        format!("hostname `{h_orig}` is already owned by tenant {tenant}"),
+                    );
+                }
+            }
+        }
+    }
+
+    match state.db.any_active_invite_claims(&candidates_lower).await {
+        Ok(Some(h)) => {
+            return conflict(
+                "hostname_conflict",
+                format!("hostname `{h}` is already reserved by an active invite"),
+            );
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!(error = %e, "failed to check active invites");
+            return internal_error();
+        }
+    }
+
+    match state
+        .db
+        .add_invite_hostnames(&invite_id, &req.hostnames)
+        .await
+    {
+        Ok(true) => {
+            state.policy_update(|policy| {
+                for hostname in &req.hostnames {
+                    policy.add_hostname(&row.tenant_id, hostname);
+                }
+            });
+            json_ok(AddHostnamesResponse {
+                status: "ok",
+                hostnames: req.hostnames,
+            })
+        }
+        Ok(false) => conflict(
+            "hostname_conflict",
+            "all hostnames already exist on this invite",
+        ),
+        Err(e) => {
+            warn!(error = %e, "add_invite_hostnames failed");
+            internal_error()
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct RemoveHostnameResponse {
+    status: &'static str,
+    hostname: String,
+    remaining_hostnames: Vec<String>,
+}
+
+pub(super) async fn delete_invite_hostname(
+    State(state): State<Arc<AppState>>,
+    principal: Principal,
+    Path((invite_id_str, hostname)): Path<(String, String)>,
+) -> Response {
+    let Some(invite_id) = parse_invite_id(&invite_id_str) else {
+        return invalid_request("invite_id is not valid base64url");
+    };
+
+    if let Err(e) = towonel_common::hostname::validate_hostname(&hostname) {
+        return invalid_request(format!("invalid hostname `{hostname}`: {e}"));
+    }
+
+    let row = match state.db.get_invite(&invite_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found("invite does not exist"),
+        Err(e) => {
+            warn!(error = %e, "failed to look up invite");
+            return internal_error();
+        }
+    };
+
+    if row.status == InviteStatus::Revoked {
+        return not_found("invite does not exist");
+    }
+
+    if let Principal::User(u) = &principal
+        && u.role != "operator"
+    {
+        let owned = match state
+            .db
+            .find_tenant_ownership_by_invite(&u.id, &invite_id)
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(error = %e, "find_tenant_ownership_by_invite failed");
+                return internal_error();
+            }
+        };
+        if owned.is_none() {
+            return not_found("invite does not exist");
+        }
+    }
+
+    let _guard = state.invite_lock.lock().await;
+
+    match state.db.remove_invite_hostname(&invite_id, &hostname).await {
+        Ok(true) => {
+            state.policy_update(|policy| {
+                policy.remove_hostname(&row.tenant_id, &hostname);
+            });
+            let Some(updated_row) = state.db.get_invite(&invite_id).await.ok().flatten() else {
+                warn!("failed to fetch updated invite after removing hostname");
+                return internal_error();
+            };
+            json_ok(RemoveHostnameResponse {
+                status: "ok",
+                hostname,
+                remaining_hostnames: updated_row.hostnames,
+            })
+        }
+        Ok(false) => not_found("hostname not found on invite"),
+        Err(e) => {
+            warn!(error = %e, "remove_invite_hostname failed");
+            internal_error()
+        }
+    }
+}
+
 pub(super) async fn delete_invite(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -274,10 +468,14 @@ pub(super) async fn delete_invite(
         Ok(Some(r)) => r,
         Ok(None) => return not_found("invite does not exist"),
         Err(e) => {
-            warn!(error = %e, "failed to look up invite for revoke");
+            warn!(error = %e, "failed to look up invite");
             return internal_error();
         }
     };
+
+    if row.status == InviteStatus::Revoked {
+        return not_found("invite does not exist");
+    }
 
     if let Principal::User(u) = &principal
         && u.role != "operator"

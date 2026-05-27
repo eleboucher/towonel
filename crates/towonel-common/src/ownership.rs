@@ -80,6 +80,30 @@ impl OwnershipPolicy {
         }
         false
     }
+
+    /// Add a hostname pattern to a tenant. Returns true if the pattern was newly added.
+    pub fn add_hostname(&mut self, tenant_id: &TenantId, hostname: &str) -> bool {
+        let lower = hostname.to_lowercase();
+        let patterns = self.allowed.entry(*tenant_id).or_default();
+        if patterns.contains(&lower) {
+            return false;
+        }
+        patterns.insert(lower);
+        true
+    }
+
+    /// Remove a hostname pattern from a tenant. Returns true if the pattern was removed.
+    pub fn remove_hostname(&mut self, tenant_id: &TenantId, hostname: &str) -> bool {
+        let lower = hostname.to_lowercase();
+        let Some(patterns) = self.allowed.get_mut(tenant_id) else {
+            return false;
+        };
+        if !patterns.contains(&lower) {
+            return false;
+        }
+        patterns.remove(&lower);
+        true
+    }
 }
 
 #[cfg(test)]

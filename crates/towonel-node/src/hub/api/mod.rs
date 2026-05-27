@@ -470,6 +470,14 @@ fn invites_routes() -> Router<Arc<AppState>> {
             post(invites::post_invite).get(invites::list_invites),
         )
         .route("/v1/invites/{id}", delete(invites::delete_invite))
+        .route(
+            "/v1/invites/{id}/hostnames",
+            post(invites::post_invite_hostnames),
+        )
+        .route(
+            "/v1/invites/{id}/hostnames/{hostname}",
+            delete(invites::delete_invite_hostname),
+        )
 }
 
 fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
