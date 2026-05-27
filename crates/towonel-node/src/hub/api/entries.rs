@@ -465,39 +465,32 @@ pub(super) async fn readyz(State(state): State<Arc<AppState>>) -> Response {
 
 pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
     #[derive(Serialize)]
-    struct EdgeEntry<'a> {
+    struct EdgeEntry {
         node_id: iroh::EndpointId,
-        addresses: &'a [String],
+        addresses: Vec<String>,
     }
     #[derive(Serialize)]
-    struct ListEdgesResponse<'a> {
-        edges: Vec<EdgeEntry<'a>>,
+    struct ListEdgesResponse {
+        edges: Vec<EdgeEntry>,
     }
 
-    let mut node_ids: Vec<iroh::EndpointId> = Vec::new();
+    let mut edges: Vec<EdgeEntry> = Vec::new();
     if let Some(self_edge) = state.identity.edge_node_id {
-        node_ids.push(self_edge);
+        edges.push(EdgeEntry {
+            node_id: self_edge,
+            addresses: state.identity.edge_addresses.clone(),
+        });
     }
-    for (edge_id, _, _) in state.live_edges.snapshot() {
+    for (edge_id, iroh_endpoints, _) in state.live_edges.snapshot() {
         if let Ok(node_id) = iroh::EndpointId::from_bytes(&edge_id)
-            && !node_ids.contains(&node_id)
+            && !edges.iter().any(|e| e.node_id == node_id)
         {
-            node_ids.push(node_id);
+            edges.push(EdgeEntry {
+                node_id,
+                addresses: iroh_endpoints,
+            });
         }
     }
-
-    let empty: &[String] = &[];
-    let edges = node_ids
-        .into_iter()
-        .map(|node_id| {
-            let addresses = if state.identity.edge_node_id == Some(node_id) {
-                state.identity.edge_addresses.as_slice()
-            } else {
-                empty
-            };
-            EdgeEntry { node_id, addresses }
-        })
-        .collect();
 
     json_ok(ListEdgesResponse { edges })
 }
