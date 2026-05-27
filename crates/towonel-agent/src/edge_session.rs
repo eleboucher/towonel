@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use backon::{BackoffBuilder, ExponentialBuilder};
 use iroh::{Endpoint, EndpointAddr};
 use tokio::net::lookup_host;
 use tokio::task::JoinSet;
@@ -25,24 +24,8 @@ const MIN_HEALTHY_SESSION: Duration = Duration::from_mins(1);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
-const MAX_BACKOFF_SECS: u64 = 60;
 const MAX_FAILURE_DURATION: Duration = Duration::from_mins(5);
-
-fn redial_backoff() -> ExponentialBuilder {
-    ExponentialBuilder::default()
-        .with_min_delay(Duration::from_millis(500))
-        .with_max_delay(Duration::from_secs(30))
-        .with_jitter()
-        .without_max_times()
-}
-
-fn extended_backoff() -> ExponentialBuilder {
-    ExponentialBuilder::default()
-        .with_min_delay(Duration::from_secs(5))
-        .with_max_delay(Duration::from_secs(MAX_BACKOFF_SECS))
-        .with_jitter()
-        .without_max_times()
-}
+const REDIAL_DELAY: Duration = Duration::from_secs(5);
 
 #[must_use]
 pub fn spawn(
@@ -92,7 +75,6 @@ async fn supervise(
     let edge_label = contact.id.fmt_short().to_string();
     let span = info_span!("edge_supervisor", edge = %edge_label);
     async move {
-        let mut backoff = redial_backoff().build();
         let mut failure_start: Option<Instant> = None;
         loop {
             if shutdown.is_cancelled() {
@@ -114,15 +96,14 @@ async fn supervise(
                     if session_duration >= MIN_HEALTHY_SESSION {
                         debug!(
                             session_secs = session_duration.as_secs(),
-                            "healthy session ended; resetting backoff"
+                            "healthy session ended; resetting failure tracker"
                         );
-                        backoff = redial_backoff().build();
                         failure_start = None;
                         continue;
                     }
                     debug!(
                         session_secs = session_duration.as_secs(),
-                        "short-lived session; keeping backoff progression"
+                        "short-lived session"
                     );
                     failure_start.get_or_insert_with(Instant::now);
                 }
@@ -140,11 +121,6 @@ async fn supervise(
                         return;
                     }
 
-                    let use_extended = failure_duration >= Duration::from_secs(30);
-                    if use_extended {
-                        backoff = extended_backoff().build();
-                    }
-
                     warn!(
                         dial_secs = dial_started.elapsed().as_secs(),
                         failure_secs = failure_duration.as_secs(),
@@ -154,18 +130,13 @@ async fn supervise(
                 }
             }
 
-            let delay = backoff
-                .next()
-                .unwrap_or(Duration::from_secs(MAX_BACKOFF_SECS));
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "backoff is bounded well under u64::MAX millis"
-            )]
-            let backoff_ms = delay.as_millis() as u64;
-            debug!(backoff_ms, "sleeping before redial");
+            debug!(
+                delay_secs = REDIAL_DELAY.as_secs(),
+                "sleeping before redial"
+            );
             tokio::select! {
                 () = shutdown.cancelled() => return,
-                () = tokio::time::sleep(delay) => {}
+                () = tokio::time::sleep(REDIAL_DELAY) => {}
             }
         }
     }
