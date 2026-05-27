@@ -60,15 +60,27 @@ skip = [
   { crate = "ed25519-dalek" },
   { crate = "fiat-crypto" },
   { crate = "getrandom" },
+  { crate = "hashbrown" },
   { crate = "netlink-packet-route" },
   { crate = "rand_core" },
   # iroh's ed25519-dalek 3.0.0-pre pulls sha2 0.11 alongside our 0.10. Drops
   # when iroh ships a stable release.
   { crate = "sha2" },
   { crate = "signature" },
+  { crate = "syn" },
   { crate = "thiserror" },
   { crate = "thiserror-impl" },
   { crate = "windows-sys" },
+  { crate = "windows-targets" },
+  { crate = "windows_aarch64_gnullvm" },
+  { crate = "windows_aarch64_msvc" },
+  { crate = "windows_i686_gnu" },
+  { crate = "windows_i686_msvc" },
+  { crate = "windows_x86_64_gnu" },
+  { crate = "windows_x86_64_gnullvm" },
+  { crate = "windows_x86_64_msvc" },
+  # wasip2/wasip3 pull different wit-bindgen versions via getrandom.
+  { crate = "wit-bindgen" },
   { crate = "r-efi" },
   { crate = "rand" },
 ]
