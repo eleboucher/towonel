@@ -9,7 +9,7 @@ use tokio::net::lookup_host;
 use tokio::task::JoinSet;
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, debug, error, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::edge_cred::AuthFrame;
 use towonel_common::protocol::ALPN_TUNNEL;
@@ -21,60 +21,123 @@ use crate::tunnel::{self, ServiceMap};
 
 const PRESENT_CRED_TIMEOUT: Duration = Duration::from_secs(5);
 
-const MIN_HEALTHY_SESSION: Duration = Duration::from_mins(1);
-
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
-const MAX_FAILURE_DURATION: Duration = Duration::from_mins(5);
 const REDIAL_DELAY: Duration = Duration::from_secs(5);
 
-#[must_use]
-pub fn spawn(
-    endpoint: &Endpoint,
-    contacts: &[EdgeContact],
-    service_map: &Arc<ServiceMap>,
-    metrics: &Arc<AgentMetrics>,
-    shutdown: &CancellationToken,
-    edge_cred: &Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
-    relay_url: Option<&RelayUrl>,
-) -> JoinSet<()> {
-    let mut set = JoinSet::new();
-    let mut spawned = 0usize;
-    for contact in contacts {
-        if contact.addrs.is_empty() && relay_url.is_none() {
-            warn!(
-                edge = %contact.id.fmt_short(),
-                "skipping edge with no advertised socket addresses and no relay configured"
-            );
-            continue;
+struct ActiveSupervisor {
+    token: CancellationToken,
+    /// Addresses this supervisor was spawned with; a change for the same edge
+    /// triggers a respawn.
+    addrs: Vec<String>,
+}
+
+/// Per-edge supervisors reconciled against the hub's trusted-edge set. Each owns
+/// a child of the process shutdown token, so an edge leaving the set is stopped
+/// on its own without disturbing the others.
+pub struct SupervisorPool {
+    endpoint: Endpoint,
+    service_map: Arc<ServiceMap>,
+    metrics: Arc<AgentMetrics>,
+    edge_cred: Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
+    relay_url: Option<RelayUrl>,
+    shutdown: CancellationToken,
+    active: std::collections::HashMap<iroh::EndpointId, ActiveSupervisor>,
+    tasks: JoinSet<()>,
+}
+
+impl SupervisorPool {
+    pub fn new(
+        endpoint: &Endpoint,
+        service_map: &Arc<ServiceMap>,
+        metrics: &Arc<AgentMetrics>,
+        edge_cred: &Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
+        relay_url: Option<&RelayUrl>,
+        shutdown: &CancellationToken,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.clone(),
+            service_map: Arc::clone(service_map),
+            metrics: Arc::clone(metrics),
+            edge_cred: Arc::clone(edge_cred),
+            relay_url: relay_url.cloned(),
+            shutdown: shutdown.clone(),
+            active: std::collections::HashMap::new(),
+            tasks: JoinSet::new(),
         }
-        let endpoint = endpoint.clone();
-        let contact = contact.clone();
-        let service_map = Arc::clone(service_map);
-        let metrics = Arc::clone(metrics);
-        let shutdown = shutdown.clone();
-        let edge_cred = Arc::clone(edge_cred);
-        let relay_url = relay_url.cloned();
-        set.spawn(async move {
-            supervise(
-                endpoint,
-                contact,
-                service_map,
-                metrics,
-                shutdown,
-                edge_cred,
-                relay_url,
-            )
-            .await;
-        });
-        spawned += 1;
     }
-    info!(
-        supervisors = spawned,
-        "edge reverse-dial supervisors spawned"
-    );
-    set
+
+    /// Match running supervisors to `contacts`: stop supervisors whose edge is
+    /// no longer in the set, and start one for each newly-present dialable edge.
+    /// Edges already supervised are left running.
+    pub fn reconcile(&mut self, contacts: &[EdgeContact]) {
+        // Drain supervisors that have exited (only happens on cancellation),
+        // so the `tasks` set doesn't accumulate finished handles.
+        while self.tasks.try_join_next().is_some() {}
+
+        let desired: std::collections::HashMap<iroh::EndpointId, &[String]> = contacts
+            .iter()
+            .map(|c| (c.id, c.addrs.as_slice()))
+            .collect();
+
+        // Stop supervisors whose edge left the set, or whose advertised
+        // addresses changed — the spawn loop below then redials the new ones.
+        let stale: Vec<iroh::EndpointId> = self
+            .active
+            .iter()
+            .filter_map(|(id, sup)| {
+                let keep = matches!(desired.get(id), Some(addrs) if *addrs == sup.addrs.as_slice());
+                (!keep).then_some(*id)
+            })
+            .collect();
+        for id in stale {
+            if let Some(sup) = self.active.remove(&id) {
+                info!(edge = %id.fmt_short(), "edge left the set or changed address; stopping supervisor");
+                sup.token.cancel();
+            }
+        }
+
+        for contact in contacts {
+            if self.active.contains_key(&contact.id) {
+                continue;
+            }
+            if contact.addrs.is_empty() && self.relay_url.is_none() {
+                warn!(
+                    edge = %contact.id.fmt_short(),
+                    "skipping edge with no advertised socket addresses and no relay configured"
+                );
+                continue;
+            }
+            let token = self.shutdown.child_token();
+            let id = contact.id;
+            info!(edge = %id.fmt_short(), "starting edge supervisor");
+            self.tasks.spawn(supervise(
+                self.endpoint.clone(),
+                contact.clone(),
+                Arc::clone(&self.service_map),
+                Arc::clone(&self.metrics),
+                token.clone(),
+                Arc::clone(&self.edge_cred),
+                self.relay_url.clone(),
+            ));
+            self.active.insert(
+                id,
+                ActiveSupervisor {
+                    token,
+                    addrs: contact.addrs.clone(),
+                },
+            );
+        }
+    }
+
+    /// Cancel every supervisor and wait for them to finish.
+    pub async fn shutdown(mut self) {
+        for (_, sup) in self.active.drain() {
+            sup.token.cancel();
+        }
+        self.tasks.shutdown().await;
+    }
 }
 
 async fn supervise(
@@ -89,7 +152,8 @@ async fn supervise(
     let edge_label = contact.id.fmt_short().to_string();
     let span = info_span!("edge_supervisor", edge = %edge_label);
     async move {
-        let mut failure_start: Option<Instant> = None;
+        // Retry forever: a permanently-gone edge is cancelled by reconcile, so a
+        // transiently-down one is just re-dialed until it returns.
         loop {
             if shutdown.is_cancelled() {
                 info!("supervisor shutting down");
@@ -107,60 +171,20 @@ async fn supervise(
 
             match outcome {
                 Ok(session_duration) => {
-                    if session_duration >= MIN_HEALTHY_SESSION {
-                        debug!(
-                            session_secs = session_duration.as_secs(),
-                            "healthy session ended; resetting failure tracker"
-                        );
-                        failure_start = None;
-                        continue;
-                    }
-                    // A session too short to be healthy is a failure too; accrue
-                    // it and give up after the same window as a hard dial error,
-                    // otherwise repeatedly short Ok sessions loop forever.
-                    let failure_start = failure_start.get_or_insert_with(Instant::now);
-                    let failure_duration = failure_start.elapsed();
-                    if failure_duration >= MAX_FAILURE_DURATION {
-                        error!(
-                            edge = %edge_label,
-                            failure_secs = failure_duration.as_secs(),
-                            "edge sessions too short for {MAX_FAILURE_DURATION:?}; giving up"
-                        );
-                        return;
-                    }
                     debug!(
                         session_secs = session_duration.as_secs(),
-                        failure_secs = failure_duration.as_secs(),
-                        "short-lived session"
+                        "session ended; redialing"
                     );
                 }
                 Err(e) => {
-                    let failure_start = failure_start.get_or_insert_with(Instant::now);
-                    let failure_duration = failure_start.elapsed();
-
-                    if failure_duration >= MAX_FAILURE_DURATION {
-                        error!(
-                            edge = %edge_label,
-                            failure_secs = failure_duration.as_secs(),
-                            error = %e,
-                            "edge connection failed for {MAX_FAILURE_DURATION:?}; giving up"
-                        );
-                        return;
-                    }
-
                     warn!(
                         dial_secs = dial_started.elapsed().as_secs(),
-                        failure_secs = failure_duration.as_secs(),
                         error = %e,
                         "edge dial failed"
                     );
                 }
             }
 
-            debug!(
-                delay_secs = REDIAL_DELAY.as_secs(),
-                "sleeping before redial"
-            );
             tokio::select! {
                 () = shutdown.cancelled() => return,
                 () = tokio::time::sleep(REDIAL_DELAY) => {}

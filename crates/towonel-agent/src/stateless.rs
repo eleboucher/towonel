@@ -126,42 +126,7 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         );
     }
 
-    // Operator pinned a set: honor it exactly. An empty pin (every entry
-    // invalid) must fail closed, not silently trust hub-advertised edges.
-    let trusted_edges = if let Some(pinned) = parse_trusted_edges_env() {
-        if pinned.is_empty() {
-            bail!(
-                "{TRUSTED_EDGES_ENV} is set but yielded no valid edge endpoint ids; \
-                 refusing to fall back to hub-advertised edges"
-            );
-        }
-        pinned
-    } else {
-        // No override: trust the edges the hub advertises.
-        let mut edges = HashSet::new();
-        if resp.trusted_edges.is_empty() {
-            edges.extend(resp.edge_node_id);
-        } else {
-            edges.extend(resp.trusted_edges.iter().copied());
-        }
-        edges
-    };
-
-    // Match each trusted edge against the hub's advertised iroh endpoints
-    // by id — addresses only belong to the edge that owns them. Edges
-    // without an advertised endpoint get empty addrs (supervisor skips).
-    let edge_contacts: Vec<EdgeContact> = trusted_edges
-        .iter()
-        .map(|id| EdgeContact {
-            id: *id,
-            addrs: resp
-                .iroh_endpoints
-                .iter()
-                .find(|e| e.node_id == *id)
-                .map(|e| e.addresses.clone())
-                .unwrap_or_default(),
-        })
-        .collect();
+    let (trusted_edges, edge_contacts) = resolve_edge_contacts(&resp)?;
 
     info!(
         %tenant_id,
@@ -722,6 +687,60 @@ impl BootstrapResponse {
             not_after_ms: decoded.not_after_ms,
         }))
     }
+}
+
+/// Resolve the trusted-edge set — an operator pin (`TRUSTED_EDGES_ENV`) or the
+/// hub's advertised set — and pair each edge with its advertised iroh addresses.
+/// An empty operator pin fails closed rather than silently trusting the hub.
+fn resolve_edge_contacts(
+    resp: &BootstrapResponse,
+) -> anyhow::Result<(HashSet<EndpointId>, Vec<EdgeContact>)> {
+    let trusted_edges = if let Some(pinned) = parse_trusted_edges_env() {
+        if pinned.is_empty() {
+            bail!(
+                "{TRUSTED_EDGES_ENV} is set but yielded no valid edge endpoint ids; \
+                 refusing to fall back to hub-advertised edges"
+            );
+        }
+        pinned
+    } else {
+        let mut edges = HashSet::new();
+        if resp.trusted_edges.is_empty() {
+            edges.extend(resp.edge_node_id);
+        } else {
+            edges.extend(resp.trusted_edges.iter().copied());
+        }
+        edges
+    };
+
+    // Addresses only belong to the edge that owns them; an edge without an
+    // advertised endpoint gets empty addrs (the supervisor skips it).
+    let edge_contacts: Vec<EdgeContact> = trusted_edges
+        .iter()
+        .map(|id| EdgeContact {
+            id: *id,
+            addrs: resp
+                .iroh_endpoints
+                .iter()
+                .find(|e| e.node_id == *id)
+                .map(|e| e.addresses.clone())
+                .unwrap_or_default(),
+        })
+        .collect();
+    Ok((trusted_edges, edge_contacts))
+}
+
+/// Re-query the hub for the current trusted-edge set, reusing the existing
+/// identity. The topology-refresh loop calls this to pick up edges that came or
+/// went after startup.
+pub async fn refresh_edge_contacts(
+    token_str: &str,
+    ctx: &BootstrapContext,
+) -> anyhow::Result<Vec<EdgeContact>> {
+    let token = InviteToken::decode(token_str).context("invalid invite token")?;
+    let resp = post_bootstrap(&ctx.client, &token, &ctx.agent_id()).await?;
+    let (_trusted, contacts) = resolve_edge_contacts(&resp)?;
+    Ok(contacts)
 }
 
 async fn post_bootstrap(

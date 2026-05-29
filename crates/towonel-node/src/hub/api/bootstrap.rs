@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::State;
@@ -42,6 +43,49 @@ struct EdgeCandidate {
     node_id: iroh::EndpointId,
     addresses: Vec<String>,
     region: Option<String>,
+}
+
+/// Colocated edge first, then port-capable edges, then portless edges as
+/// HTTP-only fallback (deduped by node id). Edges lacking the tenant's TCP/UDP
+/// capability are kept rather than dropped so HTTP survives when every
+/// port-capable edge is down; a portless edge ignores port routes it can't bind.
+///
+/// The colocated edge is exempt from the capability partition: `HubIdentity`
+/// carries no capability flags, and the bundled in-process edge defaults to
+/// serving TCP/UDP, so it is always ranked primary.
+fn select_edge_candidates(
+    colocated: Option<EdgeCandidate>,
+    live_edges: Vec<super::super::live_edges::EdgeSnapshot>,
+    needs_tcp: bool,
+    needs_udp: bool,
+) -> Vec<EdgeCandidate> {
+    let mut candidates: Vec<EdgeCandidate> = Vec::new();
+    let mut fallback: Vec<EdgeCandidate> = Vec::new();
+    let mut seen: HashSet<iroh::EndpointId> = HashSet::new();
+    if let Some(candidate) = colocated {
+        seen.insert(candidate.node_id);
+        candidates.push(candidate);
+    }
+    for (edge_id, addresses, capabilities, _public_ips, region) in live_edges {
+        let Ok(node_id) = iroh::EndpointId::from_bytes(&edge_id) else {
+            continue;
+        };
+        if !seen.insert(node_id) {
+            continue;
+        }
+        let candidate = EdgeCandidate {
+            node_id,
+            addresses,
+            region,
+        };
+        if (needs_tcp && !capabilities.tcp_services) || (needs_udp && !capabilities.udp_services) {
+            fallback.push(candidate);
+        } else {
+            candidates.push(candidate);
+        }
+    }
+    candidates.extend(fallback);
+    candidates
 }
 
 #[derive(Debug, Serialize)]
@@ -151,35 +195,15 @@ pub(super) async fn post_bootstrap(
         }
     };
 
-    // Candidate edges (colocated first, then remote) after capability + dedup
-    // filters, before the region filter.
-    let mut candidates: Vec<EdgeCandidate> = Vec::new();
-    if let Some(node_id) = state.identity.edge_node_id {
-        candidates.push(EdgeCandidate {
-            node_id,
-            addresses: state.identity.edge_iroh_addresses.clone(),
-            region: state.identity.edge_region.clone(),
-        });
-    }
-    for (edge_id, addresses, capabilities, _public_ips, region) in state.live_edges.snapshot() {
-        if needs_tcp && !capabilities.tcp_services {
-            continue;
-        }
-        if needs_udp && !capabilities.udp_services {
-            continue;
-        }
-        let Some(node_id) = iroh::EndpointId::from_bytes(&edge_id).ok() else {
-            continue;
-        };
-        if candidates.iter().any(|c| c.node_id == node_id) {
-            continue;
-        }
-        candidates.push(EdgeCandidate {
-            node_id,
-            addresses,
-            region,
-        });
-    }
+    // Candidate edges (colocated first, then remote) after dedup, before the
+    // region filter.
+    let colocated = state.identity.edge_node_id.map(|node_id| EdgeCandidate {
+        node_id,
+        addresses: state.identity.edge_iroh_addresses.clone(),
+        region: state.identity.edge_region.clone(),
+    });
+    let candidates =
+        select_edge_candidates(colocated, state.live_edges.snapshot(), needs_tcp, needs_udp);
 
     // Keep only edges in the invite's allowed regions. If that leaves nothing
     // dialable, fall back to every candidate so the agent is never stranded.
@@ -282,4 +306,87 @@ fn allowed_regions(region: Option<&str>, failover: &[String]) -> std::collection
         set.insert(r.clone());
     }
     set
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use towonel_common::edge_link::EdgeCapabilities;
+
+    fn endpoint_id(seed: u8) -> iroh::EndpointId {
+        iroh::SecretKey::from([seed; 32]).public()
+    }
+
+    fn caps(tcp: bool, udp: bool) -> EdgeCapabilities {
+        EdgeCapabilities {
+            tcp_services: tcp,
+            udp_services: udp,
+        }
+    }
+
+    fn snapshot_entry(
+        seed: u8,
+        capabilities: EdgeCapabilities,
+    ) -> super::super::super::live_edges::EdgeSnapshot {
+        (
+            *endpoint_id(seed).as_bytes(),
+            vec!["127.0.0.1:51820".to_string()],
+            capabilities,
+            vec!["127.0.0.1".to_string()],
+            Some(towonel_common::DEFAULT_REGION.to_string()),
+        )
+    }
+
+    fn ids(candidates: &[EdgeCandidate]) -> Vec<iroh::EndpointId> {
+        candidates.iter().map(|c| c.node_id).collect()
+    }
+
+    #[test]
+    fn portless_edge_kept_as_fallback_after_capable_one() {
+        // Tenant needs TCP. A port-capable edge and a portless edge are live.
+        let live = vec![
+            snapshot_entry(2, caps(false, false)), // portless, listed first
+            snapshot_entry(1, caps(true, true)),   // port-capable
+        ];
+        let got = select_edge_candidates(None, live, true, false);
+        // Both kept; the port-capable edge is ordered ahead of the portless one.
+        assert_eq!(got.len(), 2);
+        assert_eq!(ids(&got), vec![endpoint_id(1), endpoint_id(2)]);
+    }
+
+    #[test]
+    fn portless_only_still_returned_when_no_capable_edge() {
+        // Tenant needs TCP but only a portless edge is live: return it so HTTP
+        // still works (degraded — TCP unavailable until a capable edge returns).
+        let live = vec![snapshot_entry(2, caps(false, false))];
+        let got = select_edge_candidates(None, live, true, false);
+        assert_eq!(ids(&got), vec![endpoint_id(2)]);
+    }
+
+    #[test]
+    fn colocated_edge_leads_and_dedups() {
+        let colocated = EdgeCandidate {
+            node_id: endpoint_id(1),
+            addresses: vec![],
+            region: None,
+        };
+        // Same id appears again in the live set: must not be duplicated.
+        let live = vec![
+            snapshot_entry(1, caps(true, true)),
+            snapshot_entry(2, caps(true, true)),
+        ];
+        let got = select_edge_candidates(Some(colocated), live, true, true);
+        assert_eq!(ids(&got), vec![endpoint_id(1), endpoint_id(2)]);
+    }
+
+    #[test]
+    fn no_partition_when_tenant_has_no_port_services() {
+        // No TCP/UDP need: every edge is a primary candidate, order preserved.
+        let live = vec![
+            snapshot_entry(1, caps(false, false)),
+            snapshot_entry(2, caps(true, true)),
+        ];
+        let got = select_edge_candidates(None, live, false, false);
+        assert_eq!(ids(&got), vec![endpoint_id(1), endpoint_id(2)]);
+    }
 }

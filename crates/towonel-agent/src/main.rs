@@ -10,6 +10,7 @@ mod tunnel;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::Router;
@@ -77,23 +78,32 @@ async fn main() -> anyhow::Result<()> {
     run_agent(cli).await
 }
 
+/// How often the agent re-queries the hub for the current trusted-edge set.
+const TOPOLOGY_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
+/// Delay between bring-up attempts while the hub is unreachable at startup.
+const BRING_UP_RETRY_DELAY: Duration = Duration::from_secs(10);
+
+/// A live agent: stable endpoint + supervisor pool, built once and kept for the
+/// process lifetime (no identity churn after the first successful bring-up).
+struct BroughtUp {
+    ctx: Arc<stateless::BootstrapContext>,
+    endpoint: Endpoint,
+    cred_refresh: tokio::task::JoinHandle<()>,
+    pool: edge_session::SupervisorPool,
+}
+
 #[expect(
     clippy::large_futures,
     reason = "top-level orchestration future is large; boxing it provides no benefit"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "boot sequence is intentionally linear so the order of operations is auditable"
 )]
 async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     let metrics = Arc::new(AgentMetrics::new());
     metrics.set_info(env!("CARGO_PKG_VERSION"));
 
     let token = stateless::token_from_env()?;
-    let ctx = Arc::new(stateless::bootstrap(&token).await?);
-
     let agent_config = config::AgentConfig::load()?;
 
+    // Derived from static env config, not the hub: built once for the process.
     let service_map = Arc::new(
         tunnel::ServiceMap::from_config(
             &agent_config.services,
@@ -103,6 +113,122 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         .await?,
     );
     service_map.spawn_dns_refresher();
+
+    let desired_tcp_bindings: Vec<(String, u16)> = agent_config
+        .tcp_services
+        .iter()
+        .map(|s| (s.name.clone(), s.listen_port))
+        .collect();
+    let desired_udp_bindings: Vec<(String, u16)> = agent_config
+        .udp_services
+        .iter()
+        .map(|s| (s.name.clone(), s.listen_port))
+        .collect();
+
+    let health_handle = tokio::spawn(serve_http(cli.health_listen_addr, metrics.clone()));
+
+    // Fired on SIGINT/SIGTERM; supervisors are child tokens of it.
+    let shutdown = CancellationToken::new();
+    tokio::spawn({
+        let shutdown = shutdown.clone();
+        async move {
+            towonel_common::shutdown::shutdown_signal().await;
+            shutdown.cancel();
+        }
+    });
+
+    // Bring the agent up, retrying until the hub is reachable or we're stopped.
+    let BroughtUp {
+        ctx,
+        endpoint,
+        cred_refresh,
+        mut pool,
+    } = loop {
+        if shutdown.is_cancelled() {
+            health_handle.abort();
+            info!("towonel-agent stopped before bring-up");
+            return Ok(());
+        }
+        match try_bring_up(
+            &cli,
+            &token,
+            &agent_config,
+            &service_map,
+            &metrics,
+            &desired_tcp_bindings,
+            &desired_udp_bindings,
+            &shutdown,
+        )
+        .await
+        {
+            Ok(brought) => break brought,
+            Err(e) => {
+                error!(error = %e, delay_secs = BRING_UP_RETRY_DELAY.as_secs(),
+                       "agent bring-up failed; retrying");
+                tokio::select! {
+                    () = shutdown.cancelled() => {
+                        health_handle.abort();
+                        info!("towonel-agent stopped");
+                        return Ok(());
+                    }
+                    () = tokio::time::sleep(BRING_UP_RETRY_DELAY) => {}
+                }
+            }
+        }
+    };
+
+    // Steady state: poll the hub and reconcile the pool — new edges dialed,
+    // departed ones stopped, healthy connections untouched.
+    info!(
+        interval_secs = TOPOLOGY_REFRESH_INTERVAL.as_secs(),
+        "agent up; entering topology-refresh loop"
+    );
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            () = tokio::time::sleep(TOPOLOGY_REFRESH_INTERVAL) => {
+                match stateless::refresh_edge_contacts(&token, &ctx).await {
+                    Ok(contacts) => pool.reconcile(&contacts),
+                    Err(e) => warn!(error = %e, "topology refresh failed; keeping current edge set"),
+                }
+            }
+        }
+    }
+
+    pool.shutdown().await;
+    cred_refresh.abort();
+    endpoint.close().await;
+    health_handle.abort();
+    info!("towonel-agent stopped");
+    Ok(())
+}
+
+/// Bootstrap, bind the iroh endpoint, register, publish, and start a supervisor
+/// pool reconciled to the initial edge set. `Err` if the agent can't be brought
+/// up (hub unreachable, registration rejected) — the caller retries.
+#[expect(
+    clippy::too_many_lines,
+    reason = "boot sequence is intentionally linear so the order of operations is auditable"
+)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "process-wide state passed by ref"
+)]
+#[expect(
+    clippy::large_futures,
+    reason = "boot sequence future is large; boxing it provides no benefit"
+)]
+async fn try_bring_up(
+    cli: &Cli,
+    token: &str,
+    agent_config: &config::AgentConfig,
+    service_map: &Arc<tunnel::ServiceMap>,
+    metrics: &Arc<AgentMetrics>,
+    desired_tcp_bindings: &[(String, u16)],
+    desired_udp_bindings: &[(String, u16)],
+    shutdown: &CancellationToken,
+) -> anyhow::Result<BroughtUp> {
+    let ctx = Arc::new(stateless::bootstrap(token).await?);
 
     // Env override wins over the hub-advertised relay; either may be absent.
     let (relay_url_str, relay_source) = std::env::var("TOWONEL_AGENT_RELAY_URL")
@@ -121,10 +247,10 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         .and_then(|url| towonel_common::relay::relay_url_from_str(url, relay_source));
 
     if relay_url.is_none() && ctx.edge_contacts.iter().all(|c| c.addrs.is_empty()) {
-        anyhow::bail!(
-            "no edge advertised an iroh address and no relay is configured. Set \
-             TOWONEL_EDGE_IROH_PORT on the hub so it can advertise a reachable endpoint, \
-             or configure a relay, then restart the agent."
+        warn!(
+            "no edge advertised an iroh address and no relay is configured; waiting for \
+             an edge to come online. Set TOWONEL_EDGE_IROH_PORT on the hub so it can \
+             advertise a reachable endpoint, or configure a relay."
         );
     }
     // Seed an empty lookup with the known edge ids so iroh's RemoteStateActor
@@ -175,42 +301,36 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         info!(addr = %addr, "agent listening on");
     }
 
-    if let Some(path) = cli.node_id_out.as_ref() {
-        write_atomic(path, node_id.to_string().as_bytes())
-            .with_context(|| format!("failed to write node id to {}", path.display()))?;
-    }
-    if let Some(path) = cli.addr_out.as_ref() {
-        let joined = bound_sockets
-            .iter()
-            .map(std::string::ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
-        write_atomic(path, joined.as_bytes())
-            .with_context(|| format!("failed to write addresses to {}", path.display()))?;
+    // Out-files, register, and publish run once. On failure the caller retries
+    // the whole bring-up, so close the endpoint first to avoid leaking it.
+    let setup = async {
+        if let Some(path) = cli.node_id_out.as_ref() {
+            write_atomic(path, node_id.to_string().as_bytes())
+                .with_context(|| format!("failed to write node id to {}", path.display()))?;
+        }
+        if let Some(path) = cli.addr_out.as_ref() {
+            let joined = bound_sockets
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            write_atomic(path, joined.as_bytes())
+                .with_context(|| format!("failed to write addresses to {}", path.display()))?;
+        }
+        stateless::register(&ctx).await?;
+        stateless::publish_hostnames(&ctx).await?;
+        stateless::publish_tcp_services(&ctx, desired_tcp_bindings).await?;
+        stateless::publish_udp_services(&ctx, desired_udp_bindings).await?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = setup.await {
+        endpoint.close().await;
+        return Err(e);
     }
 
     if ctx.trusted_edges.is_empty() {
-        anyhow::bail!(
-            "no trusted edges available. Provision an edge with `towonel edge-invite create`."
-        );
+        warn!("no trusted edges yet; the topology-refresh loop will dial them once provisioned");
     }
-
-    stateless::register(&ctx).await?;
-    let _cred_refresh = stateless::spawn_edge_cred_refresh(ctx.clone());
-
-    stateless::publish_hostnames(&ctx).await?;
-    let desired_tcp_bindings: Vec<(String, u16)> = agent_config
-        .tcp_services
-        .iter()
-        .map(|s| (s.name.clone(), s.listen_port))
-        .collect();
-    stateless::publish_tcp_services(&ctx, &desired_tcp_bindings).await?;
-    let desired_udp_bindings: Vec<(String, u16)> = agent_config
-        .udp_services
-        .iter()
-        .map(|s| (s.name.clone(), s.listen_port))
-        .collect();
-    stateless::publish_udp_services(&ctx, &desired_udp_bindings).await?;
 
     if !agent_config.services.is_empty() {
         let result = publish_tls::publish(
@@ -225,36 +345,25 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         }
     }
 
-    let health_handle = tokio::spawn(serve_http(cli.health_listen_addr, metrics.clone()));
+    let cred_refresh = stateless::spawn_edge_cred_refresh(ctx.clone());
 
-    info!(
-        edges = ctx.edge_contacts.len(),
-        "spawning reverse-dial supervisors"
-    );
-    let shutdown = CancellationToken::new();
-    let mut supervisors = edge_session::spawn(
+    let mut pool = edge_session::SupervisorPool::new(
         &endpoint,
-        &ctx.edge_contacts,
-        &service_map,
-        &metrics,
-        &shutdown,
+        service_map,
+        metrics,
         &ctx.edge_cred,
         relay_url.as_ref(),
+        shutdown,
     );
-    tokio::select! {
-        () = towonel_common::shutdown::shutdown_signal() => {}
-        // Supervisors retry forever; exit here is catastrophic — let
-        // the container restart policy take over.
-        r = supervisors.join_next() => {
-            error!(?r, "edge supervisor exited unexpectedly; shutting down");
-        }
-    }
-    shutdown.cancel();
-    supervisors.shutdown().await;
-    health_handle.abort();
-    endpoint.close().await;
-    info!("towonel-agent stopped");
-    Ok(())
+    info!(edges = ctx.edge_contacts.len(), "starting edge supervisors");
+    pool.reconcile(&ctx.edge_contacts);
+
+    Ok(BroughtUp {
+        ctx,
+        endpoint,
+        cred_refresh,
+        pool,
+    })
 }
 
 async fn serve_http(addr: SocketAddr, metrics: Arc<AgentMetrics>) {
