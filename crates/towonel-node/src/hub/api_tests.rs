@@ -2519,6 +2519,47 @@ async fn operator_bearer_bypasses_quota() {
 }
 
 #[tokio::test]
+async fn chosen_port_auto_assigns_concrete_ip() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "ip-tenant", &["a.ip.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "tcp", "preferred": 22600}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert_eq!(
+        body["ip"], "127.0.0.1",
+        "chosen port should get a concrete IP"
+    );
+}
+
+#[tokio::test]
+async fn chosen_port_fails_when_no_edge_ip() {
+    let hub = TestHub::start_without_edge_ips().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "noip-tenant", &["a.noip.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "tcp", "preferred": 22700}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 503, "{body}");
+    assert_eq!(body["error"]["code"], "no_assignable_ip");
+}
+
+#[tokio::test]
 async fn available_ports_skips_reserved() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();

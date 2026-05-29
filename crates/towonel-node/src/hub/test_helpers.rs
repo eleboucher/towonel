@@ -88,6 +88,16 @@ impl TestHub {
     }
 
     pub(super) async fn start_with(ports_require_reservation: bool) -> Self {
+        Self::start_full(ports_require_reservation, vec!["127.0.0.1".to_string()]).await
+    }
+
+    /// Start a hub whose edge advertises no public IPs, for exercising the
+    /// "nothing to assign" path in port reservation.
+    pub(super) async fn start_without_edge_ips() -> Self {
+        Self::start_full(false, Vec::new()).await
+    }
+
+    async fn start_full(ports_require_reservation: bool, edge_public_ips: Vec<String>) -> Self {
         // Init once so test failures show the hub's `warn!`/`error!` lines.
         // Safe to call repeatedly; only the first wins.
         use std::sync::Once;
@@ -124,7 +134,7 @@ impl TestHub {
                 node_id: fake_endpoint_id(),
                 edge_addresses: vec!["127.0.0.1:4443".to_string()],
                 edge_iroh_addresses: vec!["127.0.0.1:51820".to_string()],
-                edge_public_ips: vec!["127.0.0.1".to_string()],
+                edge_public_ips,
                 edge_node_id: Some(fake_endpoint_id()),
                 edge_region: Some(towonel_common::DEFAULT_REGION.to_string()),
                 relay_url: None,
