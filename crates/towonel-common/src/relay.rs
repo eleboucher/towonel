@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use iroh::{RelayMap, RelayMode};
+use iroh::{RelayMap, RelayMode, RelayUrl};
 use tracing::warn;
 
 /// On parse error, warns and falls back to `Disabled` so the binary still starts.
@@ -26,6 +26,23 @@ pub fn relay_mode_from_url(url: &str, source: &str) -> RelayMode {
         Err(e) => {
             warn!(source = source, url = trimmed, error = %e, "invalid relay URL; running without relay");
             RelayMode::Disabled
+        }
+    }
+}
+
+/// Parses a single relay URL, warning and returning `None` on failure.
+/// `source` is a label used in the warning log on parse failure.
+#[must_use]
+pub fn relay_url_from_str(url: &str, source: &str) -> Option<RelayUrl> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<RelayUrl>() {
+        Ok(relay) => Some(relay),
+        Err(e) => {
+            warn!(source = source, url = trimmed, error = %e, "invalid relay URL");
+            None
         }
     }
 }

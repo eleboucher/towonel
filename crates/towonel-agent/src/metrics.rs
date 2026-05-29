@@ -20,10 +20,14 @@ pub mod direction {
     pub const ORIGIN_TO_EDGE: &str = "origin_to_edge";
 }
 
+/// `path` label values for `edge_path`; `set_edge_path` keeps exactly one at 1.
+pub const PATH_LABELS: [&str; 3] = ["direct", "relay", "custom"];
+
 #[derive(Clone)]
 pub struct AgentMetrics {
     pub edge_session_reconnects: IntCounterVec,
     pub edge_session_state: IntGaugeVec,
+    pub edge_path: IntGaugeVec,
     pub streams_accepted: IntCounter,
     pub streams_completed: IntCounter,
     pub stream_errors: IntCounterVec,
@@ -49,6 +53,12 @@ impl AgentMetrics {
                 "towonel_agent_edge_session_state",
                 "1 while a session to the edge is held, 0 otherwise",
                 &["edge"],
+            ),
+            edge_path: register_gauge_vec(
+                &r,
+                "towonel_agent_edge_path",
+                "1 for the network path currently selected to the edge (direct|relay|custom), 0 otherwise",
+                &["edge", "path"],
             ),
             streams_accepted: register_counter(
                 &r,
@@ -93,6 +103,22 @@ impl AgentMetrics {
 
     pub fn set_info(&self, version: &str) {
         self.info.with_label_values(&[version]).set(1);
+    }
+
+    /// Sets `path` to 1 and zeroes the other path series for `edge`.
+    pub fn set_edge_path(&self, edge: &str, path: &str) {
+        for label in PATH_LABELS {
+            self.edge_path
+                .with_label_values(&[edge, label])
+                .set(i64::from(label == path));
+        }
+    }
+
+    /// Zeroes every path series for `edge`; call when its session ends.
+    pub fn clear_edge_path(&self, edge: &str) {
+        for label in PATH_LABELS {
+            self.edge_path.with_label_values(&[edge, label]).set(0);
+        }
     }
 
     pub fn record_stream_error(&self, reason: &'static str) {

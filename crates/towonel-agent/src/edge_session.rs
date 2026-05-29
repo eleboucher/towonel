@@ -3,9 +3,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
-use iroh::{Endpoint, EndpointAddr};
+use iroh::endpoint::{PathEvent, PathEventStream};
+use iroh::{Endpoint, EndpointAddr, RelayUrl, TransportAddr};
 use tokio::net::lookup_host;
 use tokio::task::JoinSet;
+use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, error, info, info_span, warn};
 
@@ -35,14 +37,15 @@ pub fn spawn(
     metrics: &Arc<AgentMetrics>,
     shutdown: &CancellationToken,
     edge_cred: &Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
+    relay_url: Option<&RelayUrl>,
 ) -> JoinSet<()> {
     let mut set = JoinSet::new();
     let mut spawned = 0usize;
     for contact in contacts {
-        if contact.addrs.is_empty() {
+        if contact.addrs.is_empty() && relay_url.is_none() {
             warn!(
                 edge = %contact.id.fmt_short(),
-                "skipping edge with no advertised socket addresses (relay disabled)"
+                "skipping edge with no advertised socket addresses and no relay configured"
             );
             continue;
         }
@@ -52,8 +55,18 @@ pub fn spawn(
         let metrics = Arc::clone(metrics);
         let shutdown = shutdown.clone();
         let edge_cred = Arc::clone(edge_cred);
+        let relay_url = relay_url.cloned();
         set.spawn(async move {
-            supervise(endpoint, contact, service_map, metrics, shutdown, edge_cred).await;
+            supervise(
+                endpoint,
+                contact,
+                service_map,
+                metrics,
+                shutdown,
+                edge_cred,
+                relay_url,
+            )
+            .await;
         });
         spawned += 1;
     }
@@ -71,6 +84,7 @@ async fn supervise(
     metrics: Arc<AgentMetrics>,
     shutdown: CancellationToken,
     edge_cred: Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
+    relay_url: Option<RelayUrl>,
 ) {
     let edge_label = contact.id.fmt_short().to_string();
     let span = info_span!("edge_supervisor", edge = %edge_label);
@@ -88,7 +102,7 @@ async fn supervise(
                     info!("supervisor cancelled mid-dial");
                     return;
                 }
-                r = dial_and_serve(&endpoint, &contact, &service_map, &metrics, &edge_cred) => r,
+                r = dial_and_serve(&endpoint, &contact, &service_map, &metrics, &edge_cred, relay_url.as_ref()) => r,
             };
 
             match outcome {
@@ -151,14 +165,19 @@ async fn dial_and_serve(
     service_map: &Arc<ServiceMap>,
     metrics: &Arc<AgentMetrics>,
     edge_cred: &Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
+    relay_url: Option<&RelayUrl>,
 ) -> anyhow::Result<Duration> {
     let resolved = resolve_addrs(&contact.addrs).await;
-    if resolved.is_empty() {
+    if resolved.is_empty() && relay_url.is_none() {
         anyhow::bail!("no addresses resolved for edge {}", contact.id.fmt_short());
     }
+    // Offer both: iroh prefers the direct path, falls back to relay.
     let mut addr = EndpointAddr::new(contact.id);
     for sock in resolved {
         addr = addr.with_ip_addr(sock);
+    }
+    if let Some(relay) = relay_url {
+        addr = addr.with_relay_url(relay.clone());
     }
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, ALPN_TUNNEL))
         .await
@@ -180,6 +199,13 @@ async fn dial_and_serve(
         present_edge_cred(&conn, &edge_label, &cred).await;
     }
 
+    // iroh usually opens on the relay and upgrades to direct once holepunched.
+    let path_watcher = tokio::spawn(watch_paths(
+        conn.path_events(),
+        edge_label.clone(),
+        Arc::clone(metrics),
+    ));
+
     let started = Instant::now();
     tunnel::handle_connection(
         conn,
@@ -189,6 +215,8 @@ async fn dial_and_serve(
     )
     .await;
 
+    path_watcher.abort();
+    metrics.clear_edge_path(&edge_label);
     metrics
         .edge_session_state
         .with_label_values(&[&edge_label])
@@ -240,6 +268,27 @@ async fn do_present_edge_cred(
         .await
         .context("read control status")?;
     Ok(status)
+}
+
+/// Mirrors the connection's selected path into `edge_path` until it closes.
+async fn watch_paths(mut events: PathEventStream, edge_label: String, metrics: Arc<AgentMetrics>) {
+    while let Some(event) = events.next().await {
+        if let PathEvent::Selected { remote_addr, .. } = event {
+            let path = classify_path(&remote_addr);
+            metrics.set_edge_path(&edge_label, path);
+            info!(edge = %edge_label, path, "edge path selected");
+        }
+    }
+}
+
+fn classify_path(addr: &TransportAddr) -> &'static str {
+    if addr.is_relay() {
+        "relay"
+    } else if addr.is_ip() {
+        "direct"
+    } else {
+        "custom"
+    }
 }
 
 async fn resolve_addrs(addrs: &[String]) -> Vec<SocketAddr> {
@@ -310,5 +359,13 @@ mod tests {
     fn falls_back_when_all_rejected() {
         let input: Vec<SocketAddr> = vec![V4.parse().unwrap(), V6.parse().unwrap()];
         assert_eq!(filter_with(input.clone(), |_| false), input);
+    }
+
+    #[test]
+    fn classify_path_maps_transport_addr() {
+        let ip = TransportAddr::Ip(V4.parse().unwrap());
+        let relay = TransportAddr::Relay("https://relay.example".parse().unwrap());
+        assert_eq!(classify_path(&ip), "direct");
+        assert_eq!(classify_path(&relay), "relay");
     }
 }

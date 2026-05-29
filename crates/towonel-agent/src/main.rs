@@ -104,24 +104,29 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     );
     service_map.spawn_dns_refresher();
 
-    if ctx.edge_contacts.iter().all(|c| c.addrs.is_empty()) {
-        anyhow::bail!(
-            "no edge advertised an iroh address. Set TOWONEL_EDGE_IROH_PORT on the hub so it can \
-             advertise a reachable endpoint, then restart the agent."
-        );
-    }
-
-    let relay_mode = std::env::var("TOWONEL_AGENT_RELAY_URL")
+    // Env override wins over the hub-advertised relay; either may be absent.
+    let (relay_url_str, relay_source) = std::env::var("TOWONEL_AGENT_RELAY_URL")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .map_or_else(
-            || {
-                ctx.relay_url.as_deref().map_or(RelayMode::Disabled, |url| {
-                    towonel_common::relay::relay_mode_from_url(url, "hub bootstrap")
-                })
-            },
-            |url| towonel_common::relay::relay_mode_from_url(&url, "TOWONEL_AGENT_RELAY_URL"),
+            || (ctx.relay_url.clone(), "hub bootstrap"),
+            |url| (Some(url), "TOWONEL_AGENT_RELAY_URL"),
         );
+    let relay_mode = relay_url_str.as_deref().map_or(RelayMode::Disabled, |url| {
+        towonel_common::relay::relay_mode_from_url(url, relay_source)
+    });
+    // Attached to each edge's EndpointAddr as a relay fallback path.
+    let relay_url = relay_url_str
+        .as_deref()
+        .and_then(|url| towonel_common::relay::relay_url_from_str(url, relay_source));
+
+    if relay_url.is_none() && ctx.edge_contacts.iter().all(|c| c.addrs.is_empty()) {
+        anyhow::bail!(
+            "no edge advertised an iroh address and no relay is configured. Set \
+             TOWONEL_EDGE_IROH_PORT on the hub so it can advertise a reachable endpoint, \
+             or configure a relay, then restart the agent."
+        );
+    }
     // Seed an empty lookup with the known edge ids so iroh's RemoteStateActor
     // doesn't warn "No address lookup configured" — addrs come from connect().
     let edge_lookup = MemoryLookup::new();
@@ -234,6 +239,7 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         &metrics,
         &shutdown,
         &ctx.edge_cred,
+        relay_url.as_ref(),
     );
     tokio::select! {
         () = towonel_common::shutdown::shutdown_signal() => {}

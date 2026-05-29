@@ -26,6 +26,7 @@ rustls = { workspace = true }
 webpki-roots = { workspace = true }
 ppp = { workspace = true }
 arc-swap = { workspace = true }
+tokio-stream = { workspace = true }
 backon = { workspace = true }
 fastrand = { workspace = true }
 prometheus = { workspace = true }
