@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
@@ -6,7 +7,7 @@ use tracing::{debug, info};
 
 use towonel_common::identity::TenantId;
 
-use super::health::EdgeMetrics;
+use super::health::{EdgeMetrics, session_reject_reason};
 
 pub struct AgentSession {
     pub agent_id: EndpointId,
@@ -39,28 +40,93 @@ impl AgentSession {
 
 pub struct SessionRegistry {
     by_id: papaya::HashMap<EndpointId, Arc<AgentSession>>,
-    /// Populated after the hub verifies the agent's `EdgeCred`.
     tenants: papaya::HashMap<EndpointId, TenantId>,
     metrics: EdgeMetrics,
+    max_per_tenant: usize,
+    iroh_per_tenant: papaya::HashMap<TenantId, AtomicUsize>,
 }
 
 impl SessionRegistry {
     #[must_use]
-    pub fn new(metrics: EdgeMetrics) -> Self {
+    pub fn new(metrics: EdgeMetrics, max_per_tenant: usize) -> Self {
         Self {
             by_id: papaya::HashMap::new(),
             tenants: papaya::HashMap::new(),
             metrics,
+            max_per_tenant,
+            iroh_per_tenant: papaya::HashMap::new(),
         }
     }
 
-    pub fn record_tenant(&self, agent_id: EndpointId, tenant_id: TenantId) {
-        self.tenants.pin().insert(agent_id, tenant_id);
+    pub fn record_tenant(&self, agent_id: EndpointId, tenant_id: TenantId) -> bool {
+        let tenants = self.tenants.pin();
+        if tenants.contains_key(&agent_id) {
+            return true;
+        }
+        if !self.try_acquire_iroh(&tenant_id) {
+            self.metrics
+                .sessions_rejected_total
+                .with_label_values(&[session_reject_reason::PER_TENANT_LIMIT])
+                .inc();
+            return false;
+        }
+        tenants.insert(agent_id, tenant_id);
+        true
     }
 
     #[must_use]
     pub fn tenant_for(&self, agent_id: &EndpointId) -> Option<TenantId> {
         self.tenants.pin().get(agent_id).copied()
+    }
+
+    /// Try to acquire an iroh connection slot for the tenant. Returns `true`
+    /// if the slot was acquired; returns `false` if the tenant is at its limit.
+    fn try_acquire_iroh(&self, tenant_id: &TenantId) -> bool {
+        let map = self.iroh_per_tenant.pin();
+        let counter = map.get_or_insert_with(*tenant_id, || AtomicUsize::new(0));
+        let mut current = counter.load(Ordering::Relaxed);
+        loop {
+            if current >= self.max_per_tenant {
+                return false;
+            }
+            match counter.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Release an iroh connection slot for the tenant.
+    fn release_iroh(&self, tenant_id: &TenantId) {
+        if let Some(counter) = self.iroh_per_tenant.pin().get(tenant_id) {
+            let mut current = counter.load(Ordering::Relaxed);
+            while current > 0 {
+                match counter.compare_exchange_weak(
+                    current,
+                    current - 1,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => return,
+                    Err(observed) => current = observed,
+                }
+            }
+        }
+    }
+
+    /// Returns the current iroh connection count for a tenant.
+    #[cfg(test)]
+    #[must_use]
+    pub fn iroh_count(&self, tenant_id: &TenantId) -> usize {
+        self.iroh_per_tenant
+            .pin()
+            .get(tenant_id)
+            .map_or(0, |c| c.load(Ordering::Relaxed))
     }
 
     pub fn register(&self, session: &Arc<AgentSession>) {
@@ -94,7 +160,9 @@ impl SessionRegistry {
         });
         if let Ok(Some(_)) = result {
             self.metrics.active_sessions.dec();
-            self.tenants.pin().remove(&agent_id);
+            if let Some(tenant_id) = self.tenants.pin().remove(&agent_id) {
+                self.release_iroh(tenant_id);
+            }
             info!(agent = %agent_id.fmt_short(), "agent session removed");
             true
         } else {
@@ -171,9 +239,42 @@ mod tests {
         });
     }
 
+    const TEST_MAX_PER_TENANT: usize = 1000;
+
+    #[test]
+    fn per_tenant_connection_limit_enforced() {
+        const MAX: usize = 2;
+        let registry = SessionRegistry::new(EdgeMetrics::new(), MAX);
+        let tenant = TenantId::from_bytes(&[7u8; 32]);
+        let a1 = iroh::SecretKey::generate().public();
+        let a2 = iroh::SecretKey::generate().public();
+        let a3 = iroh::SecretKey::generate().public();
+
+        assert!(registry.record_tenant(a1, tenant));
+        assert!(registry.record_tenant(a2, tenant));
+        assert_eq!(registry.iroh_count(&tenant), MAX);
+
+        // A third agent for the same tenant is over the limit.
+        assert!(!registry.record_tenant(a3, tenant));
+        assert_eq!(registry.iroh_count(&tenant), MAX);
+
+        // Re-recording an already-known agent must not consume another slot.
+        assert!(registry.record_tenant(a1, tenant));
+        assert_eq!(registry.iroh_count(&tenant), MAX);
+
+        // Releasing a slot lets a new agent in.
+        registry.release_iroh(&tenant);
+        assert_eq!(registry.iroh_count(&tenant), MAX - 1);
+        assert!(registry.record_tenant(a3, tenant));
+        assert_eq!(registry.iroh_count(&tenant), MAX);
+    }
+
     #[tokio::test]
     async fn register_then_remove_on_close() {
-        let registry = Arc::new(SessionRegistry::new(EdgeMetrics::new()));
+        let registry = Arc::new(SessionRegistry::new(
+            EdgeMetrics::new(),
+            TEST_MAX_PER_TENANT,
+        ));
         let (edge_ep, agent_ep, edge_addr) = make_endpoints().await;
         let agent_id = agent_ep.id();
 
@@ -215,7 +316,10 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_register_supersedes_previous() {
-        let registry = Arc::new(SessionRegistry::new(EdgeMetrics::new()));
+        let registry = Arc::new(SessionRegistry::new(
+            EdgeMetrics::new(),
+            TEST_MAX_PER_TENANT,
+        ));
         let (edge_ep, agent_ep, edge_addr) = make_endpoints().await;
         let agent_id = agent_ep.id();
 
@@ -266,7 +370,10 @@ mod tests {
 
     #[tokio::test]
     async fn remove_if_current_no_op_when_superseded() {
-        let registry = Arc::new(SessionRegistry::new(EdgeMetrics::new()));
+        let registry = Arc::new(SessionRegistry::new(
+            EdgeMetrics::new(),
+            TEST_MAX_PER_TENANT,
+        ));
         let (edge_ep, agent_ep, edge_addr) = make_endpoints().await;
         let agent_id = agent_ep.id();
 

@@ -91,6 +91,7 @@ impl EdgeMetrics {
 pub mod session_reject_reason {
     pub const UNKNOWN_AGENT: &str = "unknown_agent";
     pub const HANDSHAKE_ERROR: &str = "handshake_error";
+    pub const PER_TENANT_LIMIT: &str = "per_tenant_limit";
 }
 
 #[derive(Serialize)]

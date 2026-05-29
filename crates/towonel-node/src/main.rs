@@ -796,6 +796,7 @@ async fn build_edge(
         Arc::clone(&endpoint),
         edge_config.listen_addr.clone(),
         edge_config.health_listen_addr.clone(),
+        edge_config.max_connections_per_tenant,
     )
     .with_listen_workers(edge_config.listen_workers)
     .with_proxy_protocol(edge_config.proxy_protocol.clone())

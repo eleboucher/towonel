@@ -109,9 +109,13 @@ impl Edge {
         endpoint: Arc<Endpoint>,
         listen_addr: String,
         health_listen_addr: String,
+        max_connections_per_tenant: usize,
     ) -> Self {
         let metrics = EdgeMetrics::new();
-        let sessions = Arc::new(SessionRegistry::new(metrics.clone()));
+        let sessions = Arc::new(SessionRegistry::new(
+            metrics.clone(),
+            max_connections_per_tenant,
+        ));
         Self {
             router,
             endpoint,
@@ -444,8 +448,18 @@ async fn run_control_stream(
         && let Some((tenant_id, cred_agent_id)) = decode_cred_identity(&frame)
         && cred_agent_id.as_bytes() == agent_id.as_bytes()
     {
-        sessions.record_tenant(agent_id, tenant_id);
-        client.record_session_added(tenant_id, cred_agent_id).await;
+        if sessions.record_tenant(agent_id, tenant_id) {
+            client.record_session_added(tenant_id, cred_agent_id).await;
+        } else {
+            warn!(
+                agent = %agent_id.fmt_short(),
+                "rejecting agent connection: tenant at connection limit"
+            );
+            if let Some(session) = sessions.get(&agent_id) {
+                session.close(429, b"tenant connection limit reached");
+            }
+            return;
+        }
     }
 
     if let Err(e) = write_control_status(&mut send, status).await {
