@@ -31,6 +31,12 @@ pub(super) struct CreateInviteRequest {
     /// Operator-key only: attach the new invite to an existing hub user.
     #[serde(default)]
     owner_email: Option<String>,
+    /// Region the agent belongs to. Absent/empty resolves to `EU`.
+    #[serde(default)]
+    region: Option<String>,
+    /// Extra regions whose edges the agent also dials for failover.
+    #[serde(default)]
+    failover_regions: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,6 +144,20 @@ pub(super) async fn post_invite(
 
     let created_at_ms = now_ms();
 
+    // Uppercased so region matching is case-insensitive.
+    let region = req
+        .region
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_uppercase);
+    let failover_regions: Vec<String> = req
+        .failover_regions
+        .iter()
+        .map(|r| r.trim().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
     let pending = PendingInvite {
         invite_id: token.invite_id,
         name: &name,
@@ -147,6 +167,8 @@ pub(super) async fn post_invite(
         pq_public_key: &pq_public_key,
         expires_at_ms,
         created_at_ms,
+        region,
+        failover_regions: &failover_regions,
     };
 
     if let Err(e) = state.db.insert_invite(&pending).await {

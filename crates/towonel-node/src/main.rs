@@ -281,6 +281,13 @@ enum InviteAction {
         /// Attach the tunnel to an existing hub user (email).
         #[arg(long)]
         owner_email: Option<String>,
+        /// Region the agent belongs to. Defaults to `EU` at the hub when
+        /// omitted; the agent is handed only edges serving this region.
+        #[arg(long)]
+        region: Option<String>,
+        /// Extra regions whose edges the agent should also dial for failover.
+        #[arg(long, value_delimiter = ',')]
+        failover_regions: Vec<String>,
     },
     /// List invites on the hub. Operator-only.
     List {
@@ -372,6 +379,8 @@ async fn main() -> anyhow::Result<()> {
                 hostnames,
                 expires,
                 owner_email,
+                region,
+                failover_regions,
             } => {
                 admin::invite::cmd_invite_create(
                     hub_url,
@@ -380,6 +389,8 @@ async fn main() -> anyhow::Result<()> {
                     hostnames,
                     expires,
                     owner_email,
+                    region,
+                    failover_regions,
                 )
                 .await
             }
@@ -499,6 +510,7 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_addresses: public_addresses.clone(),
                 edge_iroh_addresses,
                 edge_public_ips,
+                edge_region: Some(config.edge.region.clone()),
                 relay_url: std::env::var("TOWONEL_HUB_RELAY_URL")
                     .ok()
                     .filter(|v| !v.is_empty()),
@@ -527,6 +539,7 @@ async fn run_node() -> anyhow::Result<()> {
                 edge_addresses: Vec::new(),
                 edge_iroh_addresses: Vec::new(),
                 edge_public_ips: Vec::new(),
+                edge_region: None,
                 relay_url: std::env::var("TOWONEL_HUB_RELAY_URL")
                     .ok()
                     .filter(|v| !v.is_empty()),
@@ -584,6 +597,7 @@ async fn run_node() -> anyhow::Result<()> {
                     udp_services: config.edge.udp_services,
                 },
                 public_ips,
+                region: config.edge.region.clone(),
             };
             let hub_client: Arc<dyn edge::hub_client::HubClient> =
                 Arc::new(edge::hub_client::RemoteHubClient::new(handle.clone()));

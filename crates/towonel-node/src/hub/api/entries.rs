@@ -481,7 +481,7 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
             addresses: state.identity.edge_addresses.clone(),
         });
     }
-    for (edge_id, iroh_endpoints, _, _) in state.live_edges.snapshot() {
+    for (edge_id, iroh_endpoints, _, _, _) in state.live_edges.snapshot() {
         if let Ok(node_id) = iroh::EndpointId::from_bytes(&edge_id)
             && !edges.iter().any(|e| e.node_id == node_id)
         {

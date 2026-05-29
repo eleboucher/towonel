@@ -12,6 +12,10 @@ struct CreateInviteReq<'a> {
     expires_in_secs: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     owner_email: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    failover_regions: &'a [String],
 }
 
 #[derive(serde::Deserialize)]
@@ -23,6 +27,10 @@ struct CreateInviteResp {
     expires_at_ms: Option<u64>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "flat CLI args mapped 1:1 from the clap subcommand"
+)]
 pub async fn cmd_invite_create(
     hub_url: Option<String>,
     api_key: Option<String>,
@@ -30,6 +38,8 @@ pub async fn cmd_invite_create(
     hostnames: Vec<String>,
     expires: String,
     owner_email: Option<String>,
+    region: Option<String>,
+    failover_regions: Vec<String>,
 ) -> anyhow::Result<()> {
     if hostnames.is_empty() {
         return Err(anyhow!("--hostnames must have at least one entry"));
@@ -48,6 +58,8 @@ pub async fn cmd_invite_create(
             hostnames: &hostnames,
             expires_in_secs,
             owner_email: owner_email.as_deref(),
+            region: region.as_deref(),
+            failover_regions: &failover_regions,
         })
         .send()
         .await
@@ -60,6 +72,12 @@ pub async fn cmd_invite_create(
     println!("  Invite ID: {}", parsed.invite_id);
     println!("  Tenant ID: {}", parsed.tenant_id);
     println!("  Hostnames: {}", hostnames.join(", "));
+    if let Some(r) = region.as_deref() {
+        println!("  Region:    {r}");
+    }
+    if !failover_regions.is_empty() {
+        println!("  Failover:  {}", failover_regions.join(", "));
+    }
     if let Some(email) = owner_email.as_deref() {
         println!("  Owner:     {email}");
     }

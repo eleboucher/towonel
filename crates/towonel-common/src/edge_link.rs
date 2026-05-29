@@ -4,7 +4,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::identity::{AgentId, PQ_PUB_KEY_LEN, TenantId};
 use crate::routing::RouteTable;
 
-pub const EDGE_LINK_VERSION: u16 = 4;
+pub const EDGE_LINK_VERSION: u16 = 5;
 
 pub const EDGE_LINK_MAX_FRAME: usize = 16 * 1024 * 1024;
 
@@ -54,6 +54,9 @@ pub enum EdgeToHub {
         capabilities: EdgeCapabilities,
         #[serde(default)]
         public_ips: Vec<String>,
+        /// Region this edge serves. `None` from a pre-v5 edge.
+        #[serde(default)]
+        region: Option<String>,
     },
     SessionAdded {
         agent_id: AgentId,
@@ -238,6 +241,26 @@ mod tests {
             psk: [5u8; 32],
             capabilities: EdgeCapabilities::default(),
             public_ips: vec!["1.2.3.4".into(), "2001:db8::1".into()],
+            region: Some("EU".into()),
+        };
+        let mut buf = Vec::new();
+        write_edge_to_hub(&mut buf, &msg).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let got = read_edge_to_hub(&mut cur).await.unwrap();
+        assert_eq!(got, msg);
+    }
+
+    // A region-less Hello (as a pre-v5 edge would send) round-trips to None.
+    #[tokio::test]
+    async fn edge_to_hub_round_trip_hello_no_region() {
+        let msg = EdgeToHub::Hello {
+            edge_id: [3u8; 32],
+            iroh_endpoints: vec!["edge.example:51820".into()],
+            software_version: "0.1.2".into(),
+            psk: [5u8; 32],
+            capabilities: EdgeCapabilities::default(),
+            public_ips: vec![],
+            region: None,
         };
         let mut buf = Vec::new();
         write_edge_to_hub(&mut buf, &msg).await.unwrap();

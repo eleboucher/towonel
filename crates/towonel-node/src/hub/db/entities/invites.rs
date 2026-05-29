@@ -14,6 +14,11 @@ pub struct Model {
     pub created_at_ms: i64,
     #[sea_orm(column_type = "Json")]
     pub hostnames: Json,
+    /// Region this invite's agents belong to. `None` resolves to `EU`.
+    pub region: Option<String>,
+    /// Extra regions whose edges the agent also dials for failover.
+    #[sea_orm(column_type = "Json")]
+    pub failover_regions: Json,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -41,6 +46,16 @@ impl Model {
                 hex::encode(&self.invite_id),
                 self.hostnames
             );
+            Vec::new()
+        }
+    }
+
+    pub fn failover_regions_vec(&self) -> Vec<String> {
+        if let sea_orm::JsonValue::Array(arr) = &self.failover_regions {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        } else {
             Vec::new()
         }
     }

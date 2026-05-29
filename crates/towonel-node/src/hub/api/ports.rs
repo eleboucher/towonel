@@ -450,7 +450,7 @@ fn validate_port_allowed(port: u16) -> Result<(), String> {
 
 fn available_ips(state: &Arc<AppState>) -> Vec<String> {
     let mut ips = state.identity.edge_public_ips.clone();
-    for (_, _, _, public_ips) in state.live_edges.snapshot() {
+    for (_, _, _, public_ips, _) in state.live_edges.snapshot() {
         for ip in public_ips {
             if !ips.contains(&ip) {
                 ips.push(ip);
@@ -471,7 +471,7 @@ fn find_edge_for_ip(state: &Arc<AppState>, ip: Option<&str>) -> Option<EdgeInfo>
             addresses: state.identity.edge_iroh_addresses.clone(),
         });
     }
-    for (edge_id, iroh_endpoints, _, public_ips) in state.live_edges.snapshot() {
+    for (edge_id, iroh_endpoints, _, public_ips, _) in state.live_edges.snapshot() {
         if public_ips.iter().any(|i| i == ip)
             && let Ok(node_id) = iroh::EndpointId::from_bytes(&edge_id)
         {

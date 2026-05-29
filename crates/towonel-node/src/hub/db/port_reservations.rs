@@ -428,6 +428,8 @@ mod tests {
             pq_public_key: tenant_kp.public_key(),
             created_at_ms: now_ms_u,
             hostnames: &[],
+            region: None,
+            failover_regions: &[],
         };
         db.insert_invite(&invite).await.unwrap();
 

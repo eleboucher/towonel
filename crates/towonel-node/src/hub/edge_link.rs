@@ -128,7 +128,8 @@ async fn handle_connection(
         Err(_) => anyhow::bail!("hello timed out"),
     };
 
-    let (edge_id, iroh_endpoints, software_version, capabilities, public_ips) = match hello {
+    let (edge_id, iroh_endpoints, software_version, capabilities, public_ips, region) = match hello
+    {
         EdgeToHub::Hello {
             edge_id,
             iroh_endpoints,
@@ -136,6 +137,7 @@ async fn handle_connection(
             psk,
             capabilities,
             public_ips,
+            region,
         } => {
             if expected_psk.ct_eq(&psk).into() {
                 (
@@ -144,6 +146,7 @@ async fn handle_connection(
                     software_version,
                     capabilities,
                     public_ips,
+                    region,
                 )
             } else {
                 anyhow::bail!("Hello PSK mismatch");
@@ -170,9 +173,14 @@ async fn handle_connection(
     // Upsert AFTER Welcome lands so a peer that disconnects mid-handshake
     // doesn't leave a stale entry; there is no janitor yet.
     write_hub_to_edge(&mut writer, &welcome).await?;
-    state
-        .live_edges
-        .upsert(edge_id, iroh_endpoints, capabilities, public_ips, now_ms());
+    state.live_edges.upsert(
+        edge_id,
+        iroh_endpoints,
+        capabilities,
+        public_ips,
+        region,
+        now_ms(),
+    );
 
     let (writer_tx, writer_rx) = mpsc::channel::<HubToEdge>(64);
     let writer_task = tokio::spawn(run_writer(writer, writer_rx));

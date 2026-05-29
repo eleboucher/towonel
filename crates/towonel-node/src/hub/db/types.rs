@@ -53,6 +53,10 @@ pub struct PendingInvite<'a> {
     /// `None` means the token never expires.
     pub expires_at_ms: Option<u64>,
     pub created_at_ms: u64,
+    /// Region the agent belongs to. `None` resolves to `DEFAULT_REGION`.
+    pub region: Option<String>,
+    /// Extra regions whose edges the agent also dials for failover.
+    pub failover_regions: &'a [String],
 }
 
 /// Fully hydrated tenant invite row, as returned by list/get. In v2 the
@@ -68,6 +72,10 @@ pub struct InviteRow {
     pub status: InviteStatus,
     pub tenant_id: TenantId,
     pub created_at_ms: u64,
+    /// Region the agent belongs to. `None` resolves to `DEFAULT_REGION`.
+    pub region: Option<String>,
+    /// Extra regions whose edges the agent also dials for failover.
+    pub failover_regions: Vec<String>,
 }
 
 pub struct RedeemedTenant {

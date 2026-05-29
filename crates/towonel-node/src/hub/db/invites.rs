@@ -31,6 +31,14 @@ impl Db {
                     .map(|h| Value::String(h.clone()))
                     .collect(),
             )),
+            region: ActiveValue::Set(invite.region.clone()),
+            failover_regions: ActiveValue::Set(Value::Array(
+                invite
+                    .failover_regions
+                    .iter()
+                    .map(|r| Value::String(r.clone()))
+                    .collect(),
+            )),
         }
         .insert(&self.conn)
         .await?;
@@ -275,6 +283,7 @@ fn model_to_invite_row(model: invites::Model) -> anyhow::Result<InviteRow> {
     })?;
     let tenant_arr = bytes_to_array::<32>(tenant_bytes, "tenant_id")?;
     let hostnames = model.hostnames_vec();
+    let failover_regions = model.failover_regions_vec();
     Ok(InviteRow {
         invite_id: bytes_to_array(model.invite_id, "invite_id")?,
         name: model.name,
@@ -284,6 +293,8 @@ fn model_to_invite_row(model: invites::Model) -> anyhow::Result<InviteRow> {
         status: InviteStatus::parse(&model.status)?,
         tenant_id: TenantId::from_bytes(&tenant_arr),
         created_at_ms: model.created_at_ms.cast_unsigned(),
+        region: model.region,
+        failover_regions,
     })
 }
 
@@ -330,6 +341,8 @@ mod tests {
             pq_public_key: i.tenant.public_key(),
             expires_at_ms: i.expires_at_ms,
             created_at_ms: 1_700_000_000_000,
+            region: None,
+            failover_regions: &[],
         };
         db.insert_invite(&pending).await.unwrap();
         pending.invite_id
@@ -349,6 +362,40 @@ mod tests {
         assert_eq!(row.status, InviteStatus::Pending);
         assert_eq!(row.expires_at_ms, Some(2_000_000_000_000));
         assert_eq!(row.tenant_id, i.tenant.id());
+    }
+
+    #[tokio::test]
+    async fn invite_region_round_trips() {
+        let db = temp_db().await;
+        let i = input(9, "regional", &["r.example.eu"]);
+        let pending = PendingInvite {
+            invite_id: [9; INVITE_ID_LEN],
+            name: &i.name,
+            hostnames: &i.hostnames,
+            secret_hash: hash_invite_secret(test_key(), &i.secret),
+            tenant_id: i.tenant.id(),
+            pq_public_key: i.tenant.public_key(),
+            expires_at_ms: i.expires_at_ms,
+            created_at_ms: 1_700_000_000_000,
+            region: Some("EU".to_string()),
+            failover_regions: &["CA".to_string()],
+        };
+        db.insert_invite(&pending).await.unwrap();
+
+        let row = db.get_invite(&[9; INVITE_ID_LEN]).await.unwrap().unwrap();
+        assert_eq!(row.region.as_deref(), Some("EU"));
+        assert_eq!(row.failover_regions, vec!["CA".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn invite_without_region_persists_as_null() {
+        let db = temp_db().await;
+        let i = input(1, "default", &["d.example.eu"]);
+        let id = insert(&db, &i).await;
+
+        let row = db.get_invite(&id).await.unwrap().unwrap();
+        assert_eq!(row.region, None);
+        assert!(row.failover_regions.is_empty());
     }
 
     #[tokio::test]
@@ -377,6 +424,8 @@ mod tests {
             pq_public_key: b.tenant.public_key(),
             expires_at_ms: b.expires_at_ms,
             created_at_ms: 1_700_000_000_001,
+            region: None,
+            failover_regions: &[],
         };
         assert!(db.insert_invite(&pending).await.is_err());
     }

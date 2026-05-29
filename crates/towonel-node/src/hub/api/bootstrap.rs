@@ -37,6 +37,13 @@ pub(super) struct IrohEndpoint {
     addresses: Vec<String>,
 }
 
+/// An edge under consideration at bootstrap, before the region filter.
+struct EdgeCandidate {
+    node_id: iroh::EndpointId,
+    addresses: Vec<String>,
+    region: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub(super) struct BootstrapResponse {
     status: &'static str,
@@ -123,22 +130,6 @@ pub(super) async fn post_bootstrap(
         warn!(error = %e, "mark_invite_claimed failed; bootstrap proceeding");
     }
 
-    let mut trusted_edges: Vec<iroh::EndpointId> = Vec::new();
-    if let Some(self_edge) = state.identity.edge_node_id {
-        trusted_edges.push(self_edge);
-    }
-
-    let mut iroh_endpoints: Vec<IrohEndpoint> = match (
-        state.identity.edge_node_id,
-        state.identity.edge_iroh_addresses.as_slice(),
-    ) {
-        (Some(node_id), addrs) if !addrs.is_empty() => vec![IrohEndpoint {
-            node_id,
-            addresses: addrs.to_vec(),
-        }],
-        _ => Vec::new(),
-    };
-
     let policy = state.policy.load_full();
     let Some(pq_pubkey) = policy.pq_public_key(&invite.tenant_id) else {
         warn!(
@@ -160,7 +151,17 @@ pub(super) async fn post_bootstrap(
         }
     };
 
-    for (edge_id, addresses, capabilities, _public_ips) in state.live_edges.snapshot() {
+    // Candidate edges (colocated first, then remote) after capability + dedup
+    // filters, before the region filter.
+    let mut candidates: Vec<EdgeCandidate> = Vec::new();
+    if let Some(node_id) = state.identity.edge_node_id {
+        candidates.push(EdgeCandidate {
+            node_id,
+            addresses: state.identity.edge_iroh_addresses.clone(),
+            region: state.identity.edge_region.clone(),
+        });
+    }
+    for (edge_id, addresses, capabilities, _public_ips, region) in state.live_edges.snapshot() {
         if needs_tcp && !capabilities.tcp_services {
             continue;
         }
@@ -170,15 +171,49 @@ pub(super) async fn post_bootstrap(
         let Some(node_id) = iroh::EndpointId::from_bytes(&edge_id).ok() else {
             continue;
         };
-        if iroh_endpoints
-            .iter()
-            .any(|existing| existing.node_id == node_id)
-        {
+        if candidates.iter().any(|c| c.node_id == node_id) {
             continue;
         }
-        iroh_endpoints.push(IrohEndpoint { node_id, addresses });
-        if !trusted_edges.contains(&node_id) {
-            trusted_edges.push(node_id);
+        candidates.push(EdgeCandidate {
+            node_id,
+            addresses,
+            region,
+        });
+    }
+
+    // Keep only edges in the invite's allowed regions. If that leaves nothing
+    // dialable, fall back to every candidate so the agent is never stranded.
+    let allowed = allowed_regions(invite.region.as_deref(), &invite.failover_regions);
+    let in_region = |c: &EdgeCandidate| {
+        allowed.contains(
+            c.region
+                .as_deref()
+                .unwrap_or(towonel_common::DEFAULT_REGION),
+        )
+    };
+    let any_dialable_in_region = candidates
+        .iter()
+        .any(|c| in_region(c) && !c.addresses.is_empty());
+    if !any_dialable_in_region {
+        warn!(
+            tenant = %invite.tenant_id,
+            ?allowed,
+            "bootstrap: no dialable edge in the invite's region(s); returning all edges"
+        );
+    }
+
+    let mut trusted_edges: Vec<iroh::EndpointId> = Vec::new();
+    let mut iroh_endpoints: Vec<IrohEndpoint> = Vec::new();
+    for c in &candidates {
+        if any_dialable_in_region && !in_region(c) {
+            continue;
+        }
+        trusted_edges.push(c.node_id);
+        if !c.addresses.is_empty() {
+            iroh_endpoints.push(IrohEndpoint {
+                node_id: c.node_id,
+                addresses: c.addresses.clone(),
+            });
         }
     }
 
@@ -236,4 +271,15 @@ pub(super) fn mint_edge_cred(
         Box::new(internal_error())
     })?;
     Ok((cred.kid, B64.encode(&cred_bytes), B64.encode(sig)))
+}
+
+/// Regions an invite's agent may be served from: its region (default `EU`)
+/// plus any failover regions.
+fn allowed_regions(region: Option<&str>, failover: &[String]) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    set.insert(region.unwrap_or(towonel_common::DEFAULT_REGION).to_string());
+    for r in failover {
+        set.insert(r.clone());
+    }
+    set
 }

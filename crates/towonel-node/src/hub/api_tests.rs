@@ -660,6 +660,190 @@ async fn bootstrap_iroh_endpoints_only_describe_colocated_edge() {
     assert_eq!(addrs, vec!["127.0.0.1:51820".to_string()]);
 }
 
+/// Create an invite with an explicit region + failover regions.
+async fn create_invite_with_region(
+    hub: &TestHub,
+    client: &reqwest::Client,
+    name: &str,
+    hostnames: &[&str],
+    region: Option<&str>,
+    failover_regions: &[&str],
+) -> InviteToken {
+    let (status, body) = post_json(
+        client,
+        &hub.url("/v1/invites"),
+        json!({
+            "name": name,
+            "hostnames": hostnames,
+            "expires_in_secs": 3600,
+            "region": region,
+            "failover_regions": failover_regions,
+        }),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200, "create_invite failed: {body}");
+    InviteToken::decode(body["token"].as_str().expect("token field")).expect("decode token")
+}
+
+/// Register a live remote edge in a region with one dialable iroh address.
+/// Returns its node-id string for endpoint assertions.
+fn inject_edge(hub: &TestHub, seed: u8, addr: &str, region: &str) -> String {
+    let node_id = iroh::SecretKey::from([seed; 32]).public();
+    hub.state.live_edges.upsert(
+        *node_id.as_bytes(),
+        vec![addr.to_string()],
+        towonel_common::edge_link::EdgeCapabilities::default(),
+        vec![],
+        Some(region.to_string()),
+        towonel_common::time::now_ms(),
+    );
+    node_id.to_string()
+}
+
+/// Collect the `node_id`s returned in `iroh_endpoints`.
+fn endpoint_node_ids(body: &Value) -> Vec<String> {
+    body["iroh_endpoints"]
+        .as_array()
+        .expect("iroh_endpoints array")
+        .iter()
+        .map(|e| e["node_id"].as_str().expect("node_id").to_string())
+        .collect()
+}
+
+async fn bootstrap_endpoints(
+    hub: &TestHub,
+    client: &reqwest::Client,
+    token: &InviteToken,
+) -> Vec<String> {
+    let (status, body) = post_json(
+        client,
+        &hub.url("/v1/bootstrap"),
+        json!({
+            "invite_id": B64.encode(token.invite_id),
+            "invite_secret": B64.encode(token.invite_secret),
+        }),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "bootstrap: {body}");
+    endpoint_node_ids(&body)
+}
+
+// The colocated test edge serves the default region (EU).
+
+#[tokio::test]
+async fn bootstrap_region_selects_matching_edges() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let eu = inject_edge(&hub, 2, "10.0.0.2:51820", "EU");
+    let ca = inject_edge(&hub, 3, "10.0.0.3:51820", "CA");
+
+    let token = create_invite_with_region(&hub, &client, "a", &["a.test"], Some("EU"), &[]).await;
+    let ids = bootstrap_endpoints(&hub, &client, &token).await;
+
+    assert!(ids.contains(&eu), "EU remote edge included: {ids:?}");
+    assert!(!ids.contains(&ca), "CA remote edge excluded: {ids:?}");
+}
+
+#[tokio::test]
+async fn bootstrap_failover_region_included() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let eu = inject_edge(&hub, 2, "10.0.0.2:51820", "EU");
+    let ca = inject_edge(&hub, 3, "10.0.0.3:51820", "CA");
+
+    let token =
+        create_invite_with_region(&hub, &client, "a", &["a.test"], Some("EU"), &["CA"]).await;
+    let ids = bootstrap_endpoints(&hub, &client, &token).await;
+
+    assert!(ids.contains(&eu), "EU edge included: {ids:?}");
+    assert!(ids.contains(&ca), "CA failover edge included: {ids:?}");
+}
+
+#[tokio::test]
+async fn bootstrap_default_region_excludes_other_regions() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let ca = inject_edge(&hub, 3, "10.0.0.3:51820", "CA");
+
+    // No region on the invite resolves to the default (EU); the colocated EU
+    // edge is returned but the CA edge is not.
+    let token = create_invite_with_region(&hub, &client, "a", &["a.test"], None, &[]).await;
+    let ids = bootstrap_endpoints(&hub, &client, &token).await;
+
+    assert!(
+        !ids.contains(&ca),
+        "CA edge excluded for default EU: {ids:?}"
+    );
+    assert!(!ids.is_empty(), "colocated EU edge still returned");
+}
+
+#[tokio::test]
+async fn bootstrap_region_match_is_case_insensitive() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let ca = inject_edge(&hub, 3, "10.0.0.3:51820", "CA");
+
+    // Lowercase `eu` must canonicalize to the `EU` default region, so the
+    // colocated EU edge matches and the CA edge is excluded -- NOT the
+    // no-strand fallback (which would return CA too).
+    let token = create_invite_with_region(&hub, &client, "a", &["a.test"], Some("eu"), &[]).await;
+    let ids = bootstrap_endpoints(&hub, &client, &token).await;
+
+    assert!(!ids.contains(&ca), "CA excluded for lowercase eu: {ids:?}");
+    assert!(!ids.is_empty(), "colocated EU edge still returned");
+}
+
+#[tokio::test]
+async fn bootstrap_in_region_but_undialable_falls_back() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    // A CA edge that advertises no dialable iroh address.
+    let ca_node = iroh::SecretKey::from([4u8; 32]).public();
+    hub.state.live_edges.upsert(
+        *ca_node.as_bytes(),
+        vec![],
+        towonel_common::edge_link::EdgeCapabilities::default(),
+        vec![],
+        Some("CA".to_string()),
+        towonel_common::time::now_ms(),
+    );
+
+    // Invite is CA-scoped, but the only CA edge has no addresses, so no
+    // dialable edge is in-region -> fall back to all edges, which surfaces
+    // the dialable colocated EU edge.
+    let token = create_invite_with_region(&hub, &client, "a", &["a.test"], Some("CA"), &[]).await;
+    let ids = bootstrap_endpoints(&hub, &client, &token).await;
+
+    let colocated = hub
+        .state
+        .identity
+        .edge_node_id
+        .expect("test hub has edge_node_id")
+        .to_string();
+    assert!(
+        ids.contains(&colocated),
+        "fallback surfaces the dialable EU edge: {ids:?}"
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_no_edge_in_region_returns_all() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let ca = inject_edge(&hub, 3, "10.0.0.3:51820", "CA");
+
+    // No edge serves ASIA, so the filter would strand the agent -> fall back
+    // to every edge (colocated EU + the CA remote).
+    let token = create_invite_with_region(&hub, &client, "a", &["a.test"], Some("ASIA"), &[]).await;
+    let ids = bootstrap_endpoints(&hub, &client, &token).await;
+
+    assert!(ids.contains(&ca), "fallback returns the CA edge: {ids:?}");
+    assert!(ids.len() >= 2, "fallback returns all edges: {ids:?}");
+}
+
 #[tokio::test]
 async fn bootstrap_rejects_wrong_secret() {
     let hub = TestHub::start().await;

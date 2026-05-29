@@ -313,6 +313,35 @@ the legacy SSE federation transport via `TOWONEL_EDGE_HUB_URL`. The SSE
 path will be removed in a future release; new deployments should use
 the control link.
 
+## Multi-region
+
+Run one global hub and one or more edges per region for lower client
+latency. Front the edges with GeoDNS or anycast so a client's TLS
+connection lands on a nearby edge (that steering is external to towonel).
+
+Region is scoped on both sides:
+
+- Each edge declares the region it serves with `TOWONEL_EDGE_REGION`
+  (default `EU`), reported to the hub over the control link.
+- Each invite declares the region its agents belong to:
+
+  ```bash
+  towonel invite create --name alice \
+    --hostnames 'app.alice.example.eu' \
+    --region EU --failover-regions CA
+  ```
+
+At `POST /v1/bootstrap` the hub hands an agent only the edges whose
+region matches its invite's `--region` (plus any `--failover-regions`);
+the agent then dials all of them. Because the tunnel is reverse-dialed
+(the agent dials the edge, never the reverse), an edge can only serve an
+agent that dialed it — so run an agent+origin in each region you serve.
+If no edge matches the invite's region, the hub falls back to returning
+every edge so the agent is never stranded.
+
+Anything left unset resolves to `EU`, so existing single-region
+deployments keep working unchanged.
+
 ## Deployment
 
 ### Docker Compose
@@ -386,6 +415,7 @@ identity at startup.
 | `TOWONEL_EDGE_IROH_PORT`            | `51820`                                | UDP port for the iroh QUIC socket. Operators forward this port through the firewall. Binds both `0.0.0.0` and `[::]` — IPv6 stack required          |
 | `TOWONEL_EDGE_HUB_LINK_ADDR`        |                                        | `host:port` of the hub's control-link listener. Enables the modern control plane in place of SSE federation (see [Hub↔edge control link](#hubedge-control-link)) |
 | `TOWONEL_EDGE_HUB_LINK_PSK`         |                                        | 32-byte hex PSK shared with the hub                                                                                                                                  |
+| `TOWONEL_EDGE_REGION`               | `EU`                                   | Region this edge serves. The hub hands an agent only the edges whose region matches its invite's region (plus failover regions). See [Multi-region](#multi-region) |
 
 ### Agent
 

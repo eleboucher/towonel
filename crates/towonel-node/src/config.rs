@@ -237,6 +237,8 @@ pub struct EdgeConfig {
     pub tcp_services: bool,
     pub udp_services: bool,
     pub max_connections_per_tenant: usize,
+    /// Region this edge serves, from `TOWONEL_EDGE_REGION` (default `EU`).
+    pub region: String,
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +381,7 @@ struct RawEnv {
     edge_tcp_services: Option<bool>,
     edge_udp_services: Option<bool>,
     edge_max_connections_per_tenant: Option<usize>,
+    edge_region: Option<String>,
 
     hub_tls_cert_dir: Option<PathBuf>,
     hub_tls_acme_email: Option<String>,
@@ -449,6 +452,7 @@ impl NodeConfig {
             edge_tcp_services,
             edge_udp_services,
             edge_max_connections_per_tenant,
+            edge_region,
             tenants,
             ..
         } = r;
@@ -574,6 +578,13 @@ impl NodeConfig {
             tcp_services: edge_tcp_services.unwrap_or(true),
             udp_services: edge_udp_services.unwrap_or(true),
             max_connections_per_tenant: edge_max_connections_per_tenant.unwrap_or(1_000),
+            // Uppercased so region matching is case-insensitive.
+            region: edge_region
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(towonel_common::DEFAULT_REGION)
+                .to_uppercase(),
         };
 
         let tenants = parse_json_opt("TOWONEL_TENANTS", tenants.as_deref())?.unwrap_or_default();

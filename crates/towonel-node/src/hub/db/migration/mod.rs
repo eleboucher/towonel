@@ -25,6 +25,7 @@ mod m20260617_000000_app_settings;
 mod m20260618_000000_user_2fa;
 mod m20260619_000000_user_passkeys;
 mod m20260619_000001_invites_hostnames_array;
+mod m20260620_000000_invites_region;
 
 pub struct Migrator;
 
@@ -57,6 +58,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260619_000000_user_passkeys::Migration),
             Box::new(m20260527_000000_tenants_table_with_fk::Migration),
             Box::new(m20260619_000001_invites_hostnames_array::Migration),
+            Box::new(m20260620_000000_invites_region::Migration),
         ]
     }
 }

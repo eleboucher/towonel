@@ -22,6 +22,9 @@ pub mod time;
 pub mod tls_policy;
 pub mod tunnel;
 
+/// Region an edge or invite falls back to when none is set.
+pub const DEFAULT_REGION: &str = "EU";
+
 /// Standard CBOR content type used across all crates.
 pub const CBOR_CONTENT_TYPE: &str = "application/cbor";
 
