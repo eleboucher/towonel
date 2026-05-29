@@ -28,6 +28,12 @@ const DNS_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 /// handshake bytes. Bounded to stop silent/malicious edges pinning tasks open.
 const STREAM_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Cap on concurrent in-flight streams per edge connection. A buggy or
+/// compromised edge can open bi-streams in a tight loop; without a bound the
+/// agent would spawn an unbounded number of buffer-holding tasks and OOM.
+/// Reaching the cap applies QUIC backpressure rather than dropping streams.
+const MAX_CONCURRENT_STREAMS: usize = 1024;
+
 /// Bound on each TCP/UDP `connect` to the configured origin. A tarpitting
 /// or firewall-dropped origin must not pin an agent task indefinitely.
 const ORIGIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -386,7 +392,14 @@ pub async fn handle_connection(
     service_map: Arc<ServiceMap>,
     metrics: Arc<AgentMetrics>,
 ) {
+    let stream_limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_STREAMS));
     loop {
+        // Acquire before accepting so a flood of stream-opens backs up on the
+        // QUIC layer instead of spawning unbounded tasks. The Semaphore is
+        // never closed, so acquire only fails if we drop it — treat as exit.
+        let Ok(permit) = Arc::clone(&stream_limit).acquire_owned().await else {
+            return;
+        };
         let (send, recv) = match conn.accept_bi().await {
             Ok(streams) => streams,
             Err(e) => {
@@ -398,6 +411,7 @@ pub async fn handle_connection(
         let map = Arc::clone(&service_map);
         let m = Arc::clone(&metrics);
         tokio::spawn(async move {
+            let _permit = permit;
             if let Err(e) = handle_stream(send, recv, &map, remote_id, &m).await {
                 warn!("stream error: {e}");
             }

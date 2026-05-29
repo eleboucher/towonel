@@ -6,6 +6,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 const SIGNATURE_LEN: usize = 12;
 const FIXED_HEADER_LEN: usize = SIGNATURE_LEN + 4;
 
+/// The fixed 12-byte PROXY protocol v2 signature (spec constant).
+const V2_SIGNATURE: [u8; SIGNATURE_LEN] = [
+    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+];
+
 /// Read a `HAProxy` PROXY protocol v2 header from `stream` and return the
 /// originating client address. The stream is advanced past the header so the
 /// caller can keep reading the original payload (TLS handshake, HTTP request,
@@ -13,6 +18,12 @@ const FIXED_HEADER_LEN: usize = SIGNATURE_LEN + 4;
 pub async fn read_v2<R: AsyncRead + Unpin>(stream: &mut R) -> anyhow::Result<SocketAddr> {
     let mut head = [0u8; FIXED_HEADER_LEN];
     stream.read_exact(&mut head).await?;
+
+    // Validate the cheap fixed signature before trusting the attacker-supplied
+    // payload length, so a non-PROXY peer can't force a ~64 KiB alloc + read.
+    if head[..SIGNATURE_LEN] != V2_SIGNATURE {
+        anyhow::bail!("invalid PROXY v2 signature");
+    }
 
     let payload_len = u16::from_be_bytes([head[14], head[15]]) as usize;
     let mut buf = vec![0u8; FIXED_HEADER_LEN + payload_len];
@@ -78,6 +89,21 @@ mod tests {
     async fn rejects_non_v2_bytes() {
         let (mut client, mut server) = tokio::io::duplex(64);
         tokio::io::AsyncWriteExt::write_all(&mut client, b"GET / HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        drop(client);
+        read_v2(&mut server).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn rejects_bad_signature_before_reading_payload() {
+        // 16-byte header: wrong signature but a max advertised payload length.
+        // Must reject on the signature alone without waiting for 64 KiB.
+        let mut head = [0u8; FIXED_HEADER_LEN];
+        head[14] = 0xFF;
+        head[15] = 0xFF;
+        let (mut client, mut server) = tokio::io::duplex(64);
+        tokio::io::AsyncWriteExt::write_all(&mut client, &head)
             .await
             .unwrap();
         drop(client);

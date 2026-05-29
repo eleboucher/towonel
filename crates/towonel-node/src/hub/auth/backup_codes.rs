@@ -55,7 +55,9 @@ pub async fn verify(code: &str, phc: &str) -> anyhow::Result<bool> {
 #[must_use]
 pub fn looks_like_backup_code(input: &str) -> bool {
     let n = normalise(input);
-    n.len() == HALF_LEN * 2 && n.chars().all(|c| c.is_ascii_alphanumeric())
+    // Gate on the real alphabet (which excludes 0/1/O/I/L), not any alphanumeric,
+    // so impossible-character strings are rejected before the argon2 verify loop.
+    n.len() == HALF_LEN * 2 && n.bytes().all(|b| ALPHABET.contains(&b))
 }
 
 #[cfg(test)]
@@ -97,6 +99,13 @@ mod tests {
         assert!(!looks_like_backup_code("123456"));
         assert!(!looks_like_backup_code("hello"));
         assert!(!looks_like_backup_code("ABCDEFGHIJK"));
+    }
+
+    #[test]
+    fn shape_check_rejects_impossible_alphabet() {
+        // 10 chars, all alphanumeric, but uses characters the alphabet excludes
+        // (0/1/O/I/L) — must reject before triggering an argon2 verify loop.
+        assert!(!looks_like_backup_code("0O1IL0O1IL"));
     }
 
     #[tokio::test]

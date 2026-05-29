@@ -126,14 +126,26 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
         );
     }
 
-    let mut trusted_edges = parse_trusted_edges_env();
-    if trusted_edges.is_empty() {
-        if resp.trusted_edges.is_empty() {
-            trusted_edges.extend(resp.edge_node_id);
-        } else {
-            trusted_edges.extend(resp.trusted_edges.iter().copied());
+    // Operator pinned a set: honor it exactly. An empty pin (every entry
+    // invalid) must fail closed, not silently trust hub-advertised edges.
+    let trusted_edges = if let Some(pinned) = parse_trusted_edges_env() {
+        if pinned.is_empty() {
+            bail!(
+                "{TRUSTED_EDGES_ENV} is set but yielded no valid edge endpoint ids; \
+                 refusing to fall back to hub-advertised edges"
+            );
         }
-    }
+        pinned
+    } else {
+        // No override: trust the edges the hub advertises.
+        let mut edges = HashSet::new();
+        if resp.trusted_edges.is_empty() {
+            edges.extend(resp.edge_node_id);
+        } else {
+            edges.extend(resp.trusted_edges.iter().copied());
+        }
+        edges
+    };
 
     // Match each trusted edge against the hub's advertised iroh endpoints
     // by id — addresses only belong to the edge that owns them. Edges
@@ -554,6 +566,10 @@ pub async fn publish_udp_services(
 /// Tighter than a full TTL so a transient hub blip doesn't extend exposure.
 const REFRESH_RETRY_DELAY: Duration = Duration::from_secs(30);
 
+/// Floor on the computed refresh delay. Keeps an already-expired cred (or a
+/// hub clock ahead of ours) from busy-spinning the refresh loop at zero delay.
+const REFRESH_MIN_DELAY: Duration = Duration::from_secs(5);
+
 pub fn spawn_edge_cred_refresh(ctx: Arc<BootstrapContext>) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -583,9 +599,6 @@ pub fn spawn_edge_cred_refresh(ctx: Arc<BootstrapContext>) -> JoinHandle<()> {
 /// agents don't all wake at the same fractional moment.
 fn compute_refresh_delay(not_after_ms: u64, now_ms: u64) -> Duration {
     let remaining_ms = not_after_ms.saturating_sub(now_ms);
-    if remaining_ms == 0 {
-        return Duration::ZERO;
-    }
     let pct = fastrand::u64(50..=75);
     let target_ms = remaining_ms.saturating_mul(pct) / 100;
     let jitter_ms = fastrand::i64(-300_000..=300_000);
@@ -593,7 +606,9 @@ fn compute_refresh_delay(not_after_ms: u64, now_ms: u64) -> Duration {
         .unwrap_or(i64::MAX)
         .saturating_add(jitter_ms)
         .max(0);
-    Duration::from_millis(u64::try_from(signed).unwrap_or(0))
+    // Floor to a minimum so an already-expired cred (target 0) can't drive the
+    // refresh loop to spin at zero delay.
+    Duration::from_millis(u64::try_from(signed).unwrap_or(0)).max(REFRESH_MIN_DELAY)
 }
 
 async fn call_refresh(ctx: &BootstrapContext) -> anyhow::Result<CachedEdgeCred> {
@@ -737,12 +752,14 @@ async fn post_bootstrap(
     serde_json::from_slice(&body).context("hub returned malformed bootstrap response")
 }
 
-fn parse_trusted_edges_env() -> HashSet<EndpointId> {
-    let Ok(raw) = std::env::var(TRUSTED_EDGES_ENV) else {
-        return HashSet::new();
-    };
+/// Parse the operator's trusted-edge pin. Returns `None` when the variable is
+/// unset (no override), or `Some(set)` when it is set — even if the set is
+/// empty because every entry was invalid. The caller fails closed on an empty
+/// override rather than silently falling back to hub-advertised edges.
+fn parse_trusted_edges_env() -> Option<HashSet<EndpointId>> {
+    let raw = std::env::var(TRUSTED_EDGES_ENV).ok()?;
     let parsed: Result<Vec<String>, _> = serde_json::from_str(&raw);
-    match parsed {
+    let set = match parsed {
         Ok(list) => list
             .into_iter()
             .filter_map(|s| match s.parse::<EndpointId>() {
@@ -757,7 +774,8 @@ fn parse_trusted_edges_env() -> HashSet<EndpointId> {
             warn!(error = %e, "TOWONEL_AGENT_TRUSTED_EDGES is not valid JSON, ignoring");
             HashSet::new()
         }
-    }
+    };
+    Some(set)
 }
 
 /// Read [`INVITE_TOKEN_ENV`] or return a helpful error.
@@ -786,6 +804,15 @@ mod tests {
             msg.contains("127.0.0.1:1") || msg.contains("/v1/bootstrap"),
             "error should mention the failing URL, got: {msg}"
         );
+    }
+
+    #[test]
+    fn refresh_delay_never_busy_spins() {
+        let now = 1_000_000;
+        // Already expired and clock-ahead cases must still yield the floor.
+        assert!(compute_refresh_delay(now, now) >= REFRESH_MIN_DELAY);
+        assert!(compute_refresh_delay(now - 1, now) >= REFRESH_MIN_DELAY);
+        assert!(compute_refresh_delay(0, now) >= REFRESH_MIN_DELAY);
     }
 
     #[tokio::test]
