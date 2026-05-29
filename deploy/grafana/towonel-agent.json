@@ -135,7 +135,8 @@
     {
       "id": 5,
       "type": "stat",
-      "title": "Heartbeat success ratio",
+      "title": "Connected edges",
+      "description": "Edges with a live session held right now (`towonel_agent_edge_session_state` == 1).",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 4, "w": 6, "x": 18, "y": 1},
       "options": {
@@ -146,17 +147,14 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit",
-          "decimals": 3,
-          "min": 0,
-          "max": 1,
+          "unit": "short",
+          "decimals": 0,
           "color": {"mode": "thresholds"},
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {"color": "red", "value": null},
-              {"color": "orange", "value": 0.95},
-              {"color": "green", "value": 0.99}
+              {"color": "green", "value": 1}
             ]
           }
         },
@@ -165,8 +163,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(rate(towonel_agent_heartbeats_total{instance=~\"$instance\",outcome=\"ok\"}[5m])) / sum(rate(towonel_agent_heartbeats_total{instance=~\"$instance\"}[5m]))) or on() vector(1)",
-          "legendFormat": "ok"
+          "expr": "sum(towonel_agent_edge_session_state{instance=~\"$instance\"})",
+          "legendFormat": "edges up"
         }
       ]
     },
@@ -181,36 +179,61 @@
     {
       "id": 11,
       "type": "timeseries",
-      "title": "Edge connections (accepted / rejected)",
-      "description": "iroh connections. Rejected = remote not in trusted-edge allowlist.",
+      "title": "Edge session state (1 = up)",
+      "description": "Per-edge session liveness. Drops to 0 while the agent is disconnected from that edge.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 6},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 6},
       "fieldConfig": {
         "defaults": {
-          "unit": "cps",
-          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10, "showPoints": "never"}
         },
-        "overrides": [
-          {
-            "matcher": {"id": "byRegexp", "options": "/rejected$/"},
-            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
-          }
-        ]
+        "overrides": []
       },
       "options": {
-        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["min", "lastNotNull"]},
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (instance) (rate(towonel_agent_edge_connections_accepted_total{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} accepted"
+          "expr": "towonel_agent_edge_session_state{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}} {{edge}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Edge path (direct / relay)",
+      "description": "Selected network path per edge (`towonel_agent_edge_path` == 1). relay = holepunch failed — adds latency and uses relay bandwidth; sustained relay is worth investigating.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 6},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "custom": {"drawStyle": "line", "lineInterpolation": "stepAfter", "fillOpacity": 10, "showPoints": "never"}
         },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/relay$/"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
         {
-          "refId": "B",
-          "expr": "sum by (instance) (rate(towonel_agent_edge_connections_rejected_total{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{instance}} rejected"
+          "refId": "A",
+          "expr": "towonel_agent_edge_path{instance=~\"$instance\"} == 1",
+          "legendFormat": "{{edge}} {{path}}"
         }
       ]
     },
@@ -219,7 +242,7 @@
       "type": "timeseries",
       "title": "Active streams",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 6},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 6},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -382,14 +405,15 @@
     {
       "id": 40,
       "type": "row",
-      "title": "Heartbeats & Build",
+      "title": "Edge sessions & Build",
       "gridPos": {"h": 1, "w": 24, "x": 0, "y": 40},
       "collapsed": false
     },
     {
       "id": 41,
       "type": "timeseries",
-      "title": "Heartbeats by outcome",
+      "title": "Edge reconnects / s",
+      "description": "Rate of agent → edge session reconnects. Sustained values mean a flapping link or an edge restarting.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 41},
       "fieldConfig": {
@@ -397,12 +421,7 @@
           "unit": "ops",
           "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
         },
-        "overrides": [
-          {
-            "matcher": {"id": "byRegexp", "options": "/error$/"},
-            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
-          }
-        ]
+        "overrides": []
       },
       "options": {
         "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
@@ -411,8 +430,8 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(towonel_agent_heartbeats_total{instance=~\"$instance\"}[5m]))",
-          "legendFormat": "{{outcome}}"
+          "expr": "sum by (edge) (rate(towonel_agent_edge_session_reconnects_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{edge}}"
         }
       ]
     },

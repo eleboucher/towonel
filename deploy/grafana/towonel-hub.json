@@ -241,10 +241,237 @@
     },
 
     {
+      "id": 10,
+      "type": "row",
+      "title": "Edge — Agent Sessions",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "collapsed": false
+    },
+    {
+      "id": 11,
+      "type": "stat",
+      "title": "Active sessions",
+      "description": "Agent iroh sessions currently registered with the edge.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 22},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {"mode": "fixed", "fixedColor": "green"}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(towonel_edge_active_sessions{instance=~\"$instance\"})",
+          "legendFormat": "sessions"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "stat",
+      "title": "Registrations / s",
+      "description": "Agent sessions registered (each reconnect counts once).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 22},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {"mode": "fixed", "fixedColor": "blue"}
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_edge_sessions_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "registered"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "stat",
+      "title": "Rejections / s",
+      "description": "Inbound iroh connections rejected (unknown_agent, handshake_error, per_tenant_limit).",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 22},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 0.1},
+              {"color": "red", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_edge_sessions_rejected_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "rejected"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "stat",
+      "title": "Route misses / s",
+      "description": "Requests where no session was registered for the target agent at lookup time.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 22},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "decimals": 2,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 0.1},
+              {"color": "red", "value": 1}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_edge_route_no_session_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "no session"
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Active sessions",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never"}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "towonel_edge_active_sessions{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Session rejections by reason",
+      "description": "per_tenant_limit fires when a tenant exceeds TOWONEL_EDGE_MAX_CONNECTIONS_PER_TENANT.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 15, "showPoints": "never", "stacking": {"mode": "normal"}}
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (rate(towonel_edge_sessions_rejected_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Overload drops & route misses",
+      "description": "connections_rejected_overload = inflight-connection cap hit (accept-time DoS or under-sized cap). route_no_session = lookup with no registered agent session.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 34},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/overload$/"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance) (rate(towonel_edge_connections_rejected_overload_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} overload"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (instance) (rate(towonel_edge_route_no_session_total{instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}} route miss"
+        }
+      ]
+    },
+
+    {
       "id": 20,
       "type": "row",
       "title": "Hub — Config Entries",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 21},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 42},
       "collapsed": false
     },
     {
@@ -252,7 +479,7 @@
       "type": "stat",
       "title": "Tenants",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 22},
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 43},
       "options": {
         "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
         "graphMode": "none",
@@ -266,29 +493,11 @@
       "targets": [{"refId": "A", "expr": "max(towonel_hub_tenants_total)", "legendFormat": "tenants"}]
     },
     {
-      "id": 22,
-      "type": "stat",
-      "title": "SSE subscribers",
-      "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 22},
-      "options": {
-        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
-        "graphMode": "area",
-        "colorMode": "value",
-        "textMode": "auto"
-      },
-      "fieldConfig": {
-        "defaults": {"unit": "short", "decimals": 0, "color": {"mode": "fixed", "fixedColor": "green"}},
-        "overrides": []
-      },
-      "targets": [{"refId": "A", "expr": "sum(towonel_hub_sse_subscribers_connected)", "legendFormat": "subscribers"}]
-    },
-    {
       "id": 23,
       "type": "stat",
       "title": "Entries accepted / s",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 22},
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 43},
       "options": {
         "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
         "graphMode": "area",
@@ -306,7 +515,7 @@
       "type": "stat",
       "title": "Entries rejected / s",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 22},
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 43},
       "options": {
         "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
         "graphMode": "area",
@@ -332,11 +541,50 @@
       "targets": [{"refId": "A", "expr": "sum(rate(towonel_hub_entries_rejected_total[5m]))", "legendFormat": "rejected"}]
     },
     {
+      "id": 22,
+      "type": "stat",
+      "title": "Reject ratio",
+      "description": "Rejected / (accepted + rejected) over 5m.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 43},
+      "options": {
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 2,
+          "min": 0,
+          "max": 1,
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 0.1},
+              {"color": "red", "value": 0.5}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(towonel_hub_entries_rejected_total[5m])) / clamp_min(sum(rate(towonel_hub_entries_accepted_total[5m])) + sum(rate(towonel_hub_entries_rejected_total[5m])), 1)",
+          "legendFormat": "reject ratio"
+        }
+      ]
+    },
+    {
       "id": 25,
       "type": "timeseries",
       "title": "Entries accepted vs rejected",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 47},
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -358,7 +606,7 @@
       "type": "timeseries",
       "title": "Rejections by reason",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 47},
       "fieldConfig": {
         "defaults": {
           "unit": "ops",
@@ -379,7 +627,7 @@
       "id": 40,
       "type": "row",
       "title": "Hub — HTTP API",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 34},
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 55},
       "collapsed": false
     },
     {
@@ -387,7 +635,7 @@
       "type": "timeseries",
       "title": "Requests by endpoint",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 35},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 56},
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -408,7 +656,7 @@
       "type": "timeseries",
       "title": "Requests by status",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 35},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 56},
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
@@ -429,7 +677,7 @@
       "type": "timeseries",
       "title": "Error ratio (4xx / 5xx over total)",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 43},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 64},
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -458,10 +706,83 @@
     },
 
     {
+      "id": 50,
+      "type": "row",
+      "title": "Hub — OIDC",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 72},
+      "collapsed": false
+    },
+    {
+      "id": 51,
+      "type": "timeseries",
+      "title": "JWKS refresh rate by provider / outcome",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 73},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never"}
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/failure$/"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          }
+        ]
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (provider, outcome) (rate(towonel_hub_oidc_jwks_refresh_total[5m]))",
+          "legendFormat": "{{provider}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 52,
+      "type": "timeseries",
+      "title": "Seconds since last successful JWKS refresh",
+      "description": "Alert when this exceeds 2× the refresh interval — the provider's metadata may be stale.",
+      "datasource": {"type": "prometheus", "uid": "${datasource}"},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 73},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 0, "showPoints": "never"},
+          "color": {"mode": "thresholds"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "orange", "value": 3600},
+              {"color": "red", "value": 7200}
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"]},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - towonel_hub_oidc_jwks_last_refresh_success_timestamp_seconds",
+          "legendFormat": "{{provider}}"
+        }
+      ]
+    },
+
+    {
       "id": 70,
       "type": "row",
-      "title": "Hub — Process",
-      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 51},
+      "title": "Node — Process",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 81},
       "collapsed": false
     },
     {
@@ -469,7 +790,7 @@
       "type": "timeseries",
       "title": "Resident memory (RSS)",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 52},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 82},
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
@@ -490,7 +811,7 @@
       "type": "timeseries",
       "title": "CPU usage",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 52},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 82},
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
@@ -512,7 +833,7 @@
       "title": "Open file descriptors",
       "description": "`process_open_fds / process_max_fds`. Rising ratios hint at FD leaks.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 60},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 90},
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -535,7 +856,7 @@
       "title": "Uptime",
       "description": "Time since process start.",
       "datasource": {"type": "prometheus", "uid": "${datasource}"},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 60},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 90},
       "fieldConfig": {
         "defaults": {"unit": "s"},
         "overrides": []
