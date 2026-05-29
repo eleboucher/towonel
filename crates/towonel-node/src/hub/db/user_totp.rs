@@ -66,16 +66,26 @@ impl Db {
         Ok(result.rows_affected == 1)
     }
 
-    pub async fn set_totp_last_used_step(&self, user_id: &str, step: i64) -> anyhow::Result<()> {
-        user_totp::Entity::update_many()
+    /// Compare-and-swap the last-used TOTP step: only advances `last_used_step`
+    /// when `step` is strictly newer than the stored value (or none stored yet).
+    /// Returns `true` if this call won the update, `false` if the step was
+    /// already consumed — which is how concurrent verifies of one code are
+    /// collapsed to a single success (replay guard).
+    pub async fn set_totp_last_used_step(&self, user_id: &str, step: i64) -> anyhow::Result<bool> {
+        let result = user_totp::Entity::update_many()
             .col_expr(
                 user_totp::Column::LastUsedStep,
                 sea_orm::sea_query::Expr::value(step),
             )
             .filter(user_totp::Column::UserId.eq(user_id))
+            .filter(
+                user_totp::Column::LastUsedStep
+                    .lt(step)
+                    .or(user_totp::Column::LastUsedStep.is_null()),
+            )
             .exec(&self.conn)
             .await?;
-        Ok(())
+        Ok(result.rows_affected == 1)
     }
 
     pub async fn delete_user_totp(&self, user_id: &str) -> anyhow::Result<()> {

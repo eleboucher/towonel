@@ -320,8 +320,13 @@ pub(super) async fn post_regenerate(
     let Ok(step_i) = i64::try_from(step) else {
         return internal_error();
     };
-    if let Err(e) = state.db.set_totp_last_used_step(&user.id, step_i).await {
-        warn!(error = %e, "set_totp_last_used_step failed");
+    match state.db.set_totp_last_used_step(&user.id, step_i).await {
+        Ok(true) => {}
+        Ok(false) => return unauthorized("invalid code"),
+        Err(e) => {
+            warn!(error = %e, "set_totp_last_used_step failed");
+            return internal_error();
+        }
     }
 
     let now = now_ms_i64();
@@ -358,10 +363,20 @@ pub(super) async fn verify_code_or_backup(
         let Ok(step_i) = i64::try_from(step) else {
             return false;
         };
-        if let Err(e) = state.db.set_totp_last_used_step(&user.id, step_i).await {
-            warn!(error = %e, "set_totp_last_used_step failed");
-        }
-        return true;
+        return match state.db.set_totp_last_used_step(&user.id, step_i).await {
+            // Won the CAS: this is the first (and only) use of this step.
+            Ok(true) => true,
+            // A concurrent request already consumed this step — replay.
+            Ok(false) => {
+                warn!(user = %user.id, "TOTP step already consumed; treating as replay");
+                false
+            }
+            // Couldn't persist the replay guard: fail closed.
+            Err(e) => {
+                warn!(error = %e, "set_totp_last_used_step failed");
+                false
+            }
+        };
     }
 
     if !backup_codes::looks_like_backup_code(code) {
