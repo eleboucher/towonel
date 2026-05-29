@@ -325,8 +325,9 @@ async fn handle_inbound_agent(
             while let Ok((send, recv)) = conn.accept_bi().await {
                 let hub_client = hub_client.clone();
                 let sessions = Arc::clone(&sessions);
+                let conn = conn.clone();
                 tokio::spawn(handle_agent_stream(
-                    send, recv, agent_id, hub_client, sessions,
+                    send, recv, conn, agent_id, hub_client, sessions,
                 ));
             }
         }
@@ -371,13 +372,14 @@ const CONTROL_RESET_BODY_WRITE_FAILED: u32 = 1;
 async fn handle_agent_stream(
     send: iroh::endpoint::SendStream,
     recv: iroh::endpoint::RecvStream,
+    conn: iroh::endpoint::Connection,
     agent_id: iroh::EndpointId,
     hub_client: Option<Arc<dyn HubClient>>,
     sessions: Arc<SessionRegistry>,
 ) {
     match tokio::time::timeout(
         CONTROL_STREAM_TIMEOUT,
-        run_control_stream(send, recv, agent_id, hub_client, sessions),
+        run_control_stream(send, recv, conn, agent_id, hub_client, sessions),
     )
     .await
     {
@@ -395,6 +397,7 @@ async fn handle_agent_stream(
 async fn run_control_stream(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
+    conn: iroh::endpoint::Connection,
     agent_id: iroh::EndpointId,
     hub_client: Option<Arc<dyn HubClient>>,
     sessions: Arc<SessionRegistry>,
@@ -455,9 +458,9 @@ async fn run_control_stream(
                 agent = %agent_id.fmt_short(),
                 "rejecting agent connection: tenant at connection limit"
             );
-            if let Some(session) = sessions.get(&agent_id) {
-                session.close(429, b"tenant connection limit reached");
-            }
+            // Close our own connection, not a registry lookup that could hit
+            // a superseding session for the same agent_id.
+            conn.close(429u32.into(), b"tenant connection limit reached");
             return;
         }
     }

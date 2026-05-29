@@ -70,7 +70,10 @@ impl SessionRegistry {
                 .inc();
             return false;
         }
-        tenants.insert(agent_id, tenant_id);
+
+        if tenants.try_insert(agent_id, tenant_id).is_err() {
+            self.release_iroh(&tenant_id);
+        }
         true
     }
 
@@ -267,6 +270,35 @@ mod tests {
         assert_eq!(registry.iroh_count(&tenant), MAX - 1);
         assert!(registry.record_tenant(a3, tenant));
         assert_eq!(registry.iroh_count(&tenant), MAX);
+    }
+
+    #[test]
+    fn concurrent_record_tenant_same_agent_acquires_one_slot() {
+        use std::sync::Barrier;
+
+        const MAX: usize = 1000;
+        const THREADS: usize = 32;
+        let registry = Arc::new(SessionRegistry::new(EdgeMetrics::new(), MAX));
+        let tenant = TenantId::from_bytes(&[9u8; 32]);
+        let agent = iroh::SecretKey::generate().public();
+        let barrier = Arc::new(Barrier::new(THREADS));
+
+        std::thread::scope(|s| {
+            for _ in 0..THREADS {
+                let registry = Arc::clone(&registry);
+                let barrier = Arc::clone(&barrier);
+                s.spawn(move || {
+                    barrier.wait();
+                    assert!(registry.record_tenant(agent, tenant));
+                });
+            }
+        });
+
+        assert_eq!(
+            registry.iroh_count(&tenant),
+            1,
+            "concurrent record_tenant for one agent must consume a single slot"
+        );
     }
 
     #[tokio::test]
