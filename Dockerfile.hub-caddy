@@ -16,7 +16,7 @@ ARG CADDY_L4_VERSION=v0.1.1
 # ============================================================
 # Stage 1: build the towonel binary (mirrors Dockerfile.node)
 # ============================================================
-FROM --platform=$BUILDPLATFORM rust:1.95-bookworm AS towonel-builder
+FROM --platform=$BUILDPLATFORM rust:1.96-bookworm AS towonel-builder
 ARG BUILDARCH
 ARG TARGETARCH
 # renovate: datasource=github-releases depName=ziglang/zig

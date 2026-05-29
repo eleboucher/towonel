@@ -4,7 +4,7 @@
 # debian-slim so the entrypoint can poll the test-runner's token broker
 # before exec'ing the agent.
 
-FROM rust:1.95-bookworm AS builder
+FROM rust:1.96-bookworm AS builder
 WORKDIR /app
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ crates/
