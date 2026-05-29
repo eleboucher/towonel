@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use tracing::warn;
 
 use towonel_common::edge_cred::{
-    AuthFrame, CONTROL_OPCODE_AUTHENTICATE, EDGE_CRED_NONCE_LEN, EdgeCred, verify_edge_cred,
+    AuthFrame, CONTROL_OPCODE_AUTHENTICATE, EDGE_CRED_NONCE_LEN, EDGE_CRED_VERSION, EdgeCred,
+    verify_edge_cred,
 };
 use towonel_common::identity::PqPublicKey;
 use towonel_common::time::now_ms;
@@ -67,6 +68,14 @@ impl HubControlHandler {
                 return Ok((CONTROL_STATUS_INVALID, Vec::new()));
             }
         };
+        if cred.version != EDGE_CRED_VERSION {
+            warn!(
+                cred_version = cred.version,
+                expected = EDGE_CRED_VERSION,
+                "EdgeCred version mismatch"
+            );
+            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+        }
         if cred.kid != auth.kid {
             warn!(
                 wire_kid = auth.kid,
@@ -89,6 +98,16 @@ impl HubControlHandler {
         };
         if !verify_edge_cred(&pubkey, &auth.cred_cbor, &auth.sig) {
             warn!(agent = %cred.agent_id, "EdgeCred signature invalid");
+            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+        }
+        // A removed tenant is dropped from the in-memory policy; its still-valid
+        // creds (TTL up to 1h) must not keep authenticating after revocation.
+        if !self.state.policy.load().is_known_tenant(&cred.tenant_id) {
+            warn!(
+                agent = %cred.agent_id,
+                tenant = %cred.tenant_id,
+                "EdgeCred for unknown or removed tenant"
+            );
             return Ok((CONTROL_STATUS_INVALID, Vec::new()));
         }
         let key = (*cred.agent_id.as_bytes(), cred.nonce);
@@ -116,17 +135,32 @@ impl HubControlHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use towonel_common::edge_cred::EDGE_CRED_VERSION;
-    use towonel_common::identity::AgentKeypair;
+    use towonel_common::identity::{AgentKeypair, TenantId, TenantKeypair};
 
     use crate::hub::test_helpers::TestHub;
 
+    /// Insert a tenant into the in-memory policy so authenticate's
+    /// known-tenant gate passes. `is_known_tenant` only checks key presence,
+    /// so the pq key need not relate to `tenant_id`.
+    fn register_tenant(state: &AppState, tenant_id: &TenantId) {
+        let key = TenantKeypair::generate();
+        state.policy_update(|p| {
+            p.register_tenant(
+                tenant_id,
+                key.public_key().clone(),
+                std::iter::empty::<String>(),
+            );
+        });
+    }
+
     fn build_auth(state: &AppState, agent: &AgentKeypair) -> AuthFrame {
+        let tenant_id = TenantId::from_bytes(&[1u8; 32]);
+        register_tenant(state, &tenant_id);
         let cred = EdgeCred {
             version: EDGE_CRED_VERSION,
             kid: state.signer.kid(),
             agent_id: agent.id(),
-            tenant_id: towonel_common::identity::TenantId::from_bytes(&[1u8; 32]),
+            tenant_id,
             not_after_ms: now_ms() + 60_000,
             nonce: [42u8; EDGE_CRED_NONCE_LEN],
         };
@@ -177,6 +211,33 @@ mod tests {
             tenant_id: towonel_common::identity::TenantId::from_bytes(&[1u8; 32]),
             not_after_ms: now_ms().saturating_sub(1),
             nonce: [7u8; EDGE_CRED_NONCE_LEN],
+        };
+        let (cred_cbor, sig) = hub.state.signer.sign_edge_cred(&cred).unwrap();
+        let frame = AuthFrame {
+            kid: hub.state.signer.kid(),
+            cred_cbor,
+            sig,
+        }
+        .encode();
+        assert_eq!(
+            handler.handle(frame).await.unwrap().0,
+            CONTROL_STATUS_INVALID
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_cred_for_unknown_tenant() {
+        let hub = TestHub::start().await;
+        let handler = HubControlHandler::new(Arc::clone(&hub.state));
+        let agent = AgentKeypair::generate();
+        // Valid, unexpired cred whose tenant was never registered (or removed).
+        let cred = EdgeCred {
+            version: EDGE_CRED_VERSION,
+            kid: hub.state.signer.kid(),
+            agent_id: agent.id(),
+            tenant_id: TenantId::from_bytes(&[2u8; 32]),
+            not_after_ms: now_ms() + 60_000,
+            nonce: [11u8; EDGE_CRED_NONCE_LEN],
         };
         let (cred_cbor, sig) = hub.state.signer.sign_edge_cred(&cred).unwrap();
         let frame = AuthFrame {

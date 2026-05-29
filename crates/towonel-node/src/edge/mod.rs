@@ -449,8 +449,19 @@ async fn run_control_stream(
     if status == CONTROL_STATUS_OK
         && let Some(client) = hub_client.as_deref()
         && let Some((tenant_id, cred_agent_id)) = decode_cred_identity(&frame)
-        && cred_agent_id.as_bytes() == agent_id.as_bytes()
     {
+        // The hub verified the credential but does not see our authenticated
+        // iroh agent_id. A credential issued for a different agent must be
+        // rejected here, otherwise it would route while evading the per-tenant
+        // connection cap (which keys on agent_id).
+        if cred_agent_id.as_bytes() != agent_id.as_bytes() {
+            warn!(
+                agent = %agent_id.fmt_short(),
+                "rejecting agent connection: credential agent_id does not match connection"
+            );
+            conn.close(403u32.into(), b"credential agent_id mismatch");
+            return;
+        }
         if sessions.record_tenant(agent_id, tenant_id) {
             client.record_session_added(tenant_id, cred_agent_id).await;
         } else {
