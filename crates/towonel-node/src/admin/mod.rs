@@ -55,7 +55,13 @@ pub fn resolve_hub_url(flag: Option<String>) -> String {
     // listen address so admin commands work without flags.
     let listen =
         std::env::var(HUB_LISTEN_ADDR_ENV).unwrap_or_else(|_| DEFAULT_HUB_LISTEN_ADDR.to_string());
-    let port = listen.rsplit(':').next().unwrap_or("8443");
+    // Take the segment after the last colon only when there is one; a
+    // port-less address must fall back to the default, not become the "port".
+    let port = listen
+        .rsplit_once(':')
+        .map(|(_, p)| p)
+        .filter(|p| !p.is_empty())
+        .unwrap_or("8443");
     format!("http://127.0.0.1:{port}")
 }
 

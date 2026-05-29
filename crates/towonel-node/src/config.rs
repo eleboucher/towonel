@@ -564,6 +564,12 @@ impl NodeConfig {
             edge_health_listen_addr.unwrap_or_else(|| "0.0.0.0:9090".to_string());
         validate_socket_addr("TOWONEL_EDGE_LISTEN_ADDR", &edge_listen_addr)?;
         validate_socket_addr("TOWONEL_EDGE_HEALTH_LISTEN_ADDR", &edge_health_listen_addr)?;
+        let max_connections_per_tenant = edge_max_connections_per_tenant.unwrap_or(1_000);
+        if max_connections_per_tenant == 0 {
+            // Enforcement rejects when current >= max, so 0 would reject every
+            // connection rather than mean "unlimited" — refuse it explicitly.
+            anyhow::bail!("TOWONEL_EDGE_MAX_CONNECTIONS_PER_TENANT must be greater than 0");
+        }
         let edge = EdgeConfig {
             enabled: edge_enabled.unwrap_or(true),
             listen_addr: edge_listen_addr,
@@ -577,7 +583,7 @@ impl NodeConfig {
             proxy_protocol,
             tcp_services: edge_tcp_services.unwrap_or(true),
             udp_services: edge_udp_services.unwrap_or(true),
-            max_connections_per_tenant: edge_max_connections_per_tenant.unwrap_or(1_000),
+            max_connections_per_tenant,
             // Uppercased so region matching is case-insensitive.
             region: edge_region
                 .as_deref()

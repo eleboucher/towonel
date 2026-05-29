@@ -7,7 +7,9 @@ use super::entities::users;
 
 #[must_use]
 pub fn normalize_email(email: &str) -> String {
-    email.trim().to_ascii_lowercase()
+    // Unicode lowercasing so non-ASCII letters case-fold too; otherwise
+    // `josé` and `JOSÉ` normalize differently and both slip past UNIQUE(email).
+    email.trim().to_lowercase()
 }
 
 pub struct NewUser<'a> {
@@ -141,8 +143,11 @@ mod tests {
     }
 
     #[test]
-    fn leaves_non_ascii_uppercase_alone() {
-        assert_eq!(normalize_email("JOSÉ@x.com"), "josÉ@x.com");
+    fn folds_non_ascii_case() {
+        // Both casings must collapse to the same key so UNIQUE(email) catches
+        // the duplicate instead of admitting two accounts for one mailbox.
+        assert_eq!(normalize_email("JOSÉ@x.com"), "josé@x.com");
+        assert_eq!(normalize_email("JOSÉ@x.com"), normalize_email("josé@x.com"));
     }
 
     #[test]

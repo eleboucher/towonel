@@ -454,6 +454,21 @@ pub(super) async fn delete_invite_hostname(
 
     let _guard = state.invite_lock.lock().await;
 
+    // Re-read under the lock so two concurrent removals can't both pass the
+    // "more than one hostname" check and strand the invite with none — which
+    // post_invite forbids on creation.
+    let current = match state.db.get_invite(&invite_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found("invite does not exist"),
+        Err(e) => {
+            warn!(error = %e, "failed to re-read invite under lock");
+            return internal_error();
+        }
+    };
+    if current.hostnames.len() <= 1 {
+        return invalid_request("an invite must keep at least one hostname");
+    }
+
     match state.db.remove_invite_hostname(&invite_id, &hostname).await {
         Ok(true) => {
             state.policy_update(|policy| {

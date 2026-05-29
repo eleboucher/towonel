@@ -7,6 +7,8 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 
+use tracing::warn;
+
 use towonel_common::edge_link::PortReservationEntry;
 use towonel_common::identity::TenantId;
 
@@ -105,9 +107,27 @@ impl PortReservations {
 }
 
 fn parse_entry(entry: &PortReservationEntry) -> Option<(ReservationKey, TenantId)> {
-    let protocol = Protocol::parse(&entry.protocol)?;
+    let Some(protocol) = Protocol::parse(&entry.protocol) else {
+        warn!(
+            protocol = %entry.protocol,
+            port = entry.port,
+            "dropping port reservation with unknown protocol; port may appear unreserved"
+        );
+        return None;
+    };
     let ip = match &entry.ip {
-        Some(s) => Some(s.parse::<IpAddr>().ok()?),
+        Some(s) => match s.parse::<IpAddr>() {
+            Ok(ip) => Some(ip),
+            Err(e) => {
+                warn!(
+                    ip = %s,
+                    port = entry.port,
+                    error = %e,
+                    "dropping port reservation with unparsable ip; port may appear unreserved"
+                );
+                return None;
+            }
+        },
         None => None,
     };
     Some((
