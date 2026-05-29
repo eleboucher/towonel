@@ -115,11 +115,24 @@ async fn supervise(
                         failure_start = None;
                         continue;
                     }
+                    // A session too short to be healthy is a failure too; accrue
+                    // it and give up after the same window as a hard dial error,
+                    // otherwise repeatedly short Ok sessions loop forever.
+                    let failure_start = failure_start.get_or_insert_with(Instant::now);
+                    let failure_duration = failure_start.elapsed();
+                    if failure_duration >= MAX_FAILURE_DURATION {
+                        error!(
+                            edge = %edge_label,
+                            failure_secs = failure_duration.as_secs(),
+                            "edge sessions too short for {MAX_FAILURE_DURATION:?}; giving up"
+                        );
+                        return;
+                    }
                     debug!(
                         session_secs = session_duration.as_secs(),
+                        failure_secs = failure_duration.as_secs(),
                         "short-lived session"
                     );
-                    failure_start.get_or_insert_with(Instant::now);
                 }
                 Err(e) => {
                     let failure_start = failure_start.get_or_insert_with(Instant::now);

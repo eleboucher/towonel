@@ -58,9 +58,11 @@ impl Db {
             .collect()
     }
 
-    pub async fn update_passkey(&self, id: &str, passkey: &Passkey) -> anyhow::Result<()> {
+    /// Returns `true` if a row matched. Lets callers tell a real `sign_count`
+    /// persist apart from a no-op (e.g. the passkey was deleted concurrently).
+    pub async fn update_passkey(&self, id: &str, passkey: &Passkey) -> anyhow::Result<bool> {
         let passkey_json = serde_json::to_string(passkey)?;
-        user_passkeys::Entity::update_many()
+        let result = user_passkeys::Entity::update_many()
             .col_expr(
                 user_passkeys::Column::PasskeyJson,
                 sea_orm::sea_query::Expr::value(passkey_json),
@@ -68,7 +70,7 @@ impl Db {
             .filter(user_passkeys::Column::Id.eq(id))
             .exec(&self.conn)
             .await?;
-        Ok(())
+        Ok(result.rows_affected == 1)
     }
 
     pub async fn delete_passkey(&self, id: &str, user_id: &str) -> anyhow::Result<bool> {

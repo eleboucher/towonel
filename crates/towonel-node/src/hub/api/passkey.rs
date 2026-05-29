@@ -439,10 +439,15 @@ pub(super) async fn post_authenticate_finish(
                     .into_iter()
                     .find(|r| r.passkey.cred_id() == auth_result.cred_id())
                 {
-                    if row.passkey.update_credential(&auth_result) == Some(true)
-                        && let Err(e) = state.db.update_passkey(&row.id, &row.passkey).await
-                    {
-                        warn!(error = %e, "update_passkey sign_count failed");
+                    if row.passkey.update_credential(&auth_result) == Some(true) {
+                        match state.db.update_passkey(&row.id, &row.passkey).await {
+                            Ok(true) => {}
+                            Ok(false) => warn!(
+                                passkey_id = %row.id,
+                                "update_passkey sign_count matched no row"
+                            ),
+                            Err(e) => warn!(error = %e, "update_passkey sign_count failed"),
+                        }
                     }
                 } else {
                     warn!(

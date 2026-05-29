@@ -32,14 +32,18 @@ impl MigrationTrait for Migration {
         tracing::info!("Successfully added hostnames column");
 
         // Check if the invite_hostnames table exists to migrate data
+        // Alias the result column explicitly: SQLite names a bare
+        // `SELECT EXISTS(...)` column after the whole expression text, so
+        // try_get("exists") would miss it and the data copy + drop would be
+        // silently skipped.
         let table_exists_sql = match backend {
             sea_orm::DatabaseBackend::Postgres => {
-                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'invite_hostnames')"
+                "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'invite_hostnames') AS \"exists\""
             }
             sea_orm::DatabaseBackend::Sqlite => {
-                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invite_hostnames')"
+                "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invite_hostnames') AS \"exists\""
             }
-            sea_orm::DatabaseBackend::MySql => "SELECT FALSE",
+            sea_orm::DatabaseBackend::MySql => "SELECT FALSE AS \"exists\"",
         };
         let table_exists = db
             .query_one(Statement::from_string(
