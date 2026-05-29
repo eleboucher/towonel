@@ -403,7 +403,6 @@ impl Hub {
             route_rebuild_notify: Arc::clone(&route_rebuild_notify),
             web_enabled: self.p.web_enabled,
             mailer: self.p.mailer.clone(),
-            port_reservations_tx: tokio::sync::broadcast::channel(64).0,
             ports_require_reservation: self.p.ports_require_reservation,
             port_index: arc_swap::ArcSwap::from_pointee(api::PortIndex::default()),
             oidc,

@@ -21,7 +21,7 @@ use super::signup_invites::{now_ms_i64, random_code};
 use super::twofa::verify_code_or_backup;
 use super::{
     AppState, LOGIN_MAX_FAILURES, TWOFA_MAX_ATTEMPTS_PER_CHALLENGE, error_response, internal_error,
-    invalid_request, json_ok, unauthorized,
+    invalid_request, json_ok, unauthorized, user_required,
 };
 
 const PASSKEY_NS: Uuid = Uuid::from_u128(0x6b_a7_b8_11_9d_ad_11_d1_80_b4_00_c0_4f_d4_30_c8);
@@ -42,11 +42,7 @@ pub(super) async fn list_passkeys(
     principal: Principal,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "user session required",
-        );
+        return user_required("user session required");
     };
     let rows = match state.db.find_passkeys_for_user(&user.id).await {
         Ok(r) => r,
@@ -71,11 +67,7 @@ pub(super) async fn post_register_begin(
     principal: Principal,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "user session required",
-        );
+        return user_required("user session required");
     };
     let existing = match state.db.find_passkeys_for_user(&user.id).await {
         Ok(r) => r,
@@ -127,11 +119,7 @@ pub(super) async fn post_register_finish(
     axum::Json(body): axum::Json<RegisterFinishRequest>,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "user session required",
-        );
+        return user_required("user session required");
     };
     let name = body.name.trim().to_string();
     if name.is_empty() || name.len() > 64 {
@@ -212,11 +200,7 @@ pub(super) async fn delete_passkey(
     axum::Json(body): axum::Json<DeletePasskeyRequest>,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "user session required",
-        );
+        return user_required("user session required");
     };
     // Mirrors twofa::post_disable: password + existing factor so a session
     // hijack can't silently strip 2FA.

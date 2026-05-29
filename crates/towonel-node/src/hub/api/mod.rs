@@ -43,7 +43,6 @@ use tracing::Level;
 
 use super::auth::middleware::OperatorPrincipal;
 use super::db;
-use super::edge_link::PortReservationDelta;
 use super::metrics::HubMetrics;
 use super::signing::HubSigner;
 use db::Db;
@@ -217,7 +216,6 @@ pub struct AppState {
     pub route_rebuild_notify: Arc<tokio::sync::Notify>,
     pub web_enabled: bool,
     pub mailer: Option<super::mail::SharedMailer>,
-    pub port_reservations_tx: broadcast::Sender<PortReservationDelta>,
     pub ports_require_reservation: bool,
     /// Port → (tenant, service) index, computed without the liveness filter
     /// so an offline agent's reservation still blocks another tenant from
@@ -648,6 +646,9 @@ pub(super) fn tenant_not_allowed(msg: impl Into<String>) -> Response {
 }
 pub(super) fn hostname_not_owned(msg: impl Into<String>) -> Response {
     error_response(StatusCode::FORBIDDEN, "hostname_not_owned", msg)
+}
+pub(super) fn user_required(msg: impl Into<String>) -> Response {
+    error_response(StatusCode::FORBIDDEN, "user_required", msg)
 }
 pub(super) fn sequence_conflict(msg: impl Into<String>) -> Response {
     error_response(StatusCode::CONFLICT, "sequence_conflict", msg)

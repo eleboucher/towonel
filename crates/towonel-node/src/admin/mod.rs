@@ -17,6 +17,8 @@ use ed25519_dalek::SigningKey;
 use towonel_common::hub_error;
 use towonel_common::identity::write_key_file;
 
+use crate::config::{DatabaseConfig, DbDriver};
+
 pub use towonel_common::CBOR_CONTENT_TYPE;
 pub use towonel_common::JSON_CONTENT_TYPE_PLAIN as JSON_CONTENT_TYPE;
 
@@ -93,6 +95,29 @@ pub fn resolve_operator_key(flag: Option<String>) -> anyhow::Result<String> {
         "no operator API key available. Pass --api-key, set ${OPERATOR_KEY_ENV}, \
          or ensure the key file exists at {path} (override with ${OPERATOR_KEY_PATH_ENV})."
     ))
+}
+
+/// Build a `DatabaseConfig` from the hub env vars, for direct-DB admin
+/// commands that bypass the web flow.
+pub fn load_database_from_env() -> DatabaseConfig {
+    let driver = std::env::var("TOWONEL_HUB_DB_DRIVER")
+        .ok()
+        .as_deref()
+        .map_or(DbDriver::Sqlite, |s| match s {
+            "postgres" => DbDriver::Postgres,
+            _ => DbDriver::Sqlite,
+        });
+    let dsn = std::env::var("TOWONEL_HUB_DB_DSN").ok().or_else(|| {
+        std::env::var("TOWONEL_DATA_DIR")
+            .ok()
+            .map(|d| format!("{d}/hub.db"))
+    });
+    DatabaseConfig {
+        driver,
+        dsn,
+        max_open_conns: None,
+        max_idle_conns: None,
+    }
 }
 
 pub fn generate_and_save_agent_key(path: &Path) -> anyhow::Result<SigningKey> {

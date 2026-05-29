@@ -153,7 +153,6 @@ impl TestHub {
             route_rebuild_notify: Arc::new(tokio::sync::Notify::new()),
             web_enabled: true,
             mailer: Some(Arc::clone(&mailer) as super::mail::SharedMailer),
-            port_reservations_tx: tokio::sync::broadcast::channel(64).0,
             ports_require_reservation,
             oidc: super::api::OidcRuntimes::default(),
             webauthn: {

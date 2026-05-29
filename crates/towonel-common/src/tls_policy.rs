@@ -71,11 +71,6 @@ impl TlsPolicyTable {
         Self::default()
     }
 
-    #[must_use]
-    pub const fn from_raw(policies: HashMap<String, TlsMode>) -> Self {
-        Self { policies }
-    }
-
     pub fn insert(&mut self, hostname: impl Into<String>, mode: TlsMode) {
         self.policies.insert(hostname.into().to_lowercase(), mode);
     }
@@ -99,11 +94,6 @@ impl TlsPolicyTable {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.policies.is_empty()
-    }
-
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.policies.len()
     }
 }
 

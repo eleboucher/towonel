@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, info, info_span, warn};
 
 use towonel_common::edge_link::{
-    EdgeToHub, HubSigningKey, HubToEdge, PortReservationEntry, read_edge_to_hub, write_hub_to_edge,
+    EdgeToHub, HubSigningKey, HubToEdge, read_edge_to_hub, write_hub_to_edge,
 };
 use towonel_common::routing::RouteTable;
 use towonel_common::time::now_ms;
@@ -194,12 +194,6 @@ async fn handle_connection(
         state.clone(),
         Arc::clone(&snapshot_received),
     ));
-    let port_pusher_task = tokio::spawn(push_port_reservations(
-        state.port_reservations_tx.subscribe(),
-        writer_tx.clone(),
-        state.clone(),
-    ));
-
     let control_semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_CONTROL));
     let result = read_loop(
         reader,
@@ -217,7 +211,6 @@ async fn handle_connection(
 
     drop(writer_tx);
     pusher_task.abort();
-    port_pusher_task.abort();
     writer_task.abort();
     state.live_edges.remove(&edge_id);
     if state.live_agents.drop_source(SourceKey::Remote(edge_id)) {
@@ -395,68 +388,4 @@ fn current_signing_keys(state: &AppState) -> anyhow::Result<Vec<HubSigningKey>> 
     let signer = state.signer.as_ref();
     let pubkey = signer.public_key().as_bytes().to_vec();
     Ok(vec![HubSigningKey::new(signer.kid(), pubkey)?])
-}
-
-async fn push_port_reservations(
-    mut delta_rx: broadcast::Receiver<PortReservationDelta>,
-    writer_tx: mpsc::Sender<HubToEdge>,
-    state: Arc<AppState>,
-) -> anyhow::Result<()> {
-    let initial = current_port_reservations(&state).await.unwrap_or_default();
-    if writer_tx
-        .send(HubToEdge::PortReservationsSnapshot { entries: initial })
-        .await
-        .is_err()
-    {
-        return Ok(());
-    }
-    loop {
-        match delta_rx.recv().await {
-            Ok(delta) => {
-                if writer_tx
-                    .send(HubToEdge::PortReservationsChanged {
-                        added: delta.added,
-                        removed: delta.removed,
-                    })
-                    .await
-                    .is_err()
-                {
-                    return Ok(());
-                }
-            }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                warn!(skipped, "edge_link port reservations stream lagged");
-                if let Ok(snapshot) = current_port_reservations(&state).await
-                    && writer_tx
-                        .send(HubToEdge::PortReservationsSnapshot { entries: snapshot })
-                        .await
-                        .is_err()
-                {
-                    return Ok(());
-                }
-            }
-            Err(broadcast::error::RecvError::Closed) => return Ok(()),
-        }
-    }
-}
-
-async fn current_port_reservations(
-    state: &Arc<AppState>,
-) -> anyhow::Result<Vec<PortReservationEntry>> {
-    let rows = state.db.list_port_reservations(None).await?;
-    Ok(rows
-        .into_iter()
-        .map(|r| PortReservationEntry {
-            tenant_id: r.tenant_id,
-            ip: r.ip_address,
-            port: r.port,
-            protocol: r.protocol.as_str().to_string(),
-        })
-        .collect())
-}
-
-#[derive(Clone, Debug)]
-pub struct PortReservationDelta {
-    pub added: Vec<PortReservationEntry>,
-    pub removed: Vec<PortReservationEntry>,
 }

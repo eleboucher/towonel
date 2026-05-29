@@ -3,7 +3,6 @@
 
 use anyhow::{Context, anyhow};
 
-use crate::config::{DatabaseConfig, DbDriver};
 use crate::hub::auth::password;
 use crate::hub::db::Db;
 use crate::hub::db::users::NewUser;
@@ -38,7 +37,7 @@ pub async fn cmd_user_create(
         return Err(anyhow!("password must be at least 8 characters"));
     }
 
-    let database = load_database_from_env();
+    let database = super::load_database_from_env();
     let url = database.connection_url()?;
     let db = Db::open(&url, database.max_open(), database.max_idle())
         .await
@@ -67,27 +66,6 @@ pub async fn cmd_user_create(
 
     println!("created {role} account {email} (id {id})");
     Ok(())
-}
-
-fn load_database_from_env() -> DatabaseConfig {
-    let driver = std::env::var("TOWONEL_HUB_DB_DRIVER")
-        .ok()
-        .as_deref()
-        .map_or(DbDriver::Sqlite, |s| match s {
-            "postgres" => DbDriver::Postgres,
-            _ => DbDriver::Sqlite,
-        });
-    let dsn = std::env::var("TOWONEL_HUB_DB_DSN").ok().or_else(|| {
-        std::env::var("TOWONEL_DATA_DIR")
-            .ok()
-            .map(|d| format!("{d}/hub.db"))
-    });
-    DatabaseConfig {
-        driver,
-        dsn,
-        max_open_conns: None,
-        max_idle_conns: None,
-    }
 }
 
 fn new_user_id() -> String {

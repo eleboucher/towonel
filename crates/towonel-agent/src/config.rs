@@ -80,26 +80,10 @@ impl AgentConfig {
     /// `TOWONEL_AGENT_UDP_SERVICES` (each JSON-encoded array). Empty when the
     /// env var is unset.
     pub fn load() -> anyhow::Result<Self> {
-        let services = std::env::var("TOWONEL_AGENT_SERVICES")
-            .ok()
-            .map(|v| serde_json::from_str::<Vec<ServiceConfig>>(&v))
-            .transpose()?
-            .unwrap_or_default();
-        let tcp_services = std::env::var("TOWONEL_AGENT_TCP_SERVICES")
-            .ok()
-            .map(|v| serde_json::from_str::<Vec<TcpServiceConfig>>(&v))
-            .transpose()?
-            .unwrap_or_default();
-        let udp_services = std::env::var("TOWONEL_AGENT_UDP_SERVICES")
-            .ok()
-            .map(|v| serde_json::from_str::<Vec<UdpServiceConfig>>(&v))
-            .transpose()?
-            .unwrap_or_default();
-
         let cfg = Self {
-            services,
-            tcp_services,
-            udp_services,
+            services: load_json_env("TOWONEL_AGENT_SERVICES")?,
+            tcp_services: load_json_env("TOWONEL_AGENT_TCP_SERVICES")?,
+            udp_services: load_json_env("TOWONEL_AGENT_UDP_SERVICES")?,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -118,6 +102,16 @@ impl AgentConfig {
         validate_raw_services("udp_service", &self.udp_services, &hostnames)?;
         Ok(())
     }
+}
+
+/// Parse a JSON-encoded array from env var `name`; empty when unset.
+fn load_json_env<T: serde::de::DeserializeOwned>(name: &str) -> anyhow::Result<Vec<T>> {
+    let parsed = std::env::var(name)
+        .ok()
+        .map(|v| serde_json::from_str::<Vec<T>>(&v))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(parsed)
 }
 
 fn validate_raw_services(

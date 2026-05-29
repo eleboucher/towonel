@@ -151,19 +151,6 @@ impl RouteTable {
         }
     }
 
-    /// Borrow the TLS policy table for in-process lookups on the edge.
-    #[must_use]
-    pub const fn tls_policies(&self) -> &TlsPolicyTable {
-        &self.tls_policies
-    }
-
-    /// Look up the TLS mode for a hostname (exact or wildcard); missing
-    /// entries default to `Passthrough`.
-    #[must_use]
-    pub fn tls_mode(&self, hostname: &str) -> TlsMode {
-        self.tls_policies.lookup(hostname)
-    }
-
     /// Look up which agents serve a hostname.
     ///
     /// Tries exact match first, then a single-level wildcard: `*.example.eu`

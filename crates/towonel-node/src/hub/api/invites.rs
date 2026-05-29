@@ -5,7 +5,7 @@ use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
-use towonel_common::identity::TenantKeypair;
+use towonel_common::identity::{TenantId, TenantKeypair};
 use towonel_common::invite::{InviteToken, hash_invite_secret};
 use tracing::warn;
 
@@ -51,6 +51,72 @@ pub(super) struct CreateInviteResponse {
 }
 
 const MAX_TTL_SECS: u64 = 30 * 24 * 3600;
+
+/// For a non-operator user principal, verify they own `invite_id`. Operators
+/// and the operator key bypass the check. On failure returns the response the
+/// caller should propagate (`not_found`/`internal_error`).
+async fn check_invite_ownership(
+    state: &AppState,
+    principal: &Principal,
+    invite_id: &[u8],
+) -> Result<(), Response> {
+    if let Principal::User(u) = principal
+        && u.role != "operator"
+    {
+        let owned = match state
+            .db
+            .find_tenant_ownership_by_invite(&u.id, invite_id)
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(error = %e, "find_tenant_ownership_by_invite failed");
+                return Err(internal_error());
+            }
+        };
+        if owned.is_none() {
+            return Err(not_found("invite does not exist"));
+        }
+    }
+    Ok(())
+}
+
+/// Reject if any candidate hostname is already claimed by an active policy
+/// pattern (skipping `skip_tenant`, used when adding to an existing invite) or
+/// reserved by another active invite. `originals` parallels `candidates_lower`
+/// for error messages. Returns the conflict/error response, or `None` if clear.
+async fn check_hostname_conflicts(
+    state: &AppState,
+    candidates_lower: &[String],
+    originals: &[String],
+    skip_tenant: Option<&TenantId>,
+) -> Option<Response> {
+    {
+        let policy = state.policy.load();
+        for (h_lower, h_orig) in candidates_lower.iter().zip(originals.iter()) {
+            for (tenant, patterns) in policy.iter_patterns() {
+                if patterns.contains(h_lower) && skip_tenant != Some(tenant) {
+                    return Some(conflict(
+                        "hostname_conflict",
+                        format!("hostname `{h_orig}` is already owned by tenant {tenant}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    match state.db.any_active_invite_claims(candidates_lower).await {
+        Ok(Some(h)) => Some(conflict(
+            "hostname_conflict",
+            format!("hostname `{h}` is already reserved by an active invite"),
+        )),
+        Ok(None) => None,
+        Err(e) => {
+            warn!(error = %e, "failed to check active invites");
+            Some(internal_error())
+        }
+    }
+}
 
 #[expect(
     clippy::too_many_lines,
@@ -107,32 +173,10 @@ pub(super) async fn post_invite(
     let _guard = state.invite_lock.lock().await;
 
     let candidates_lower: Vec<String> = req.hostnames.iter().map(|h| h.to_lowercase()).collect();
+    if let Some(resp) =
+        check_hostname_conflicts(&state, &candidates_lower, &req.hostnames, None).await
     {
-        let policy = state.policy.load();
-        for (h_lower, h_orig) in candidates_lower.iter().zip(req.hostnames.iter()) {
-            for (tenant, patterns) in policy.iter_patterns() {
-                if patterns.contains(h_lower) {
-                    return conflict(
-                        "hostname_conflict",
-                        format!("hostname `{h_orig}` is already owned by tenant {tenant}"),
-                    );
-                }
-            }
-        }
-    }
-
-    match state.db.any_active_invite_claims(&candidates_lower).await {
-        Ok(Some(h)) => {
-            return conflict(
-                "hostname_conflict",
-                format!("hostname `{h}` is already reserved by an active invite"),
-            );
-        }
-        Ok(None) => {}
-        Err(e) => {
-            warn!(error = %e, "failed to check active invites");
-            return internal_error();
-        }
+        return resp;
     }
 
     // v2 token generation bundles a fresh tenant seed so pods can derive the
@@ -323,54 +367,22 @@ pub(super) async fn post_invite_hostnames(
         }
     };
 
-    if let Principal::User(u) = &principal
-        && u.role != "operator"
-    {
-        let owned = match state
-            .db
-            .find_tenant_ownership_by_invite(&u.id, &invite_id)
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                warn!(error = %e, "find_tenant_ownership_by_invite failed");
-                return internal_error();
-            }
-        };
-        if owned.is_none() {
-            return not_found("invite does not exist");
-        }
+    if let Err(resp) = check_invite_ownership(&state, &principal, &invite_id).await {
+        return resp;
     }
 
     let _guard = state.invite_lock.lock().await;
 
     let candidates_lower: Vec<String> = req.hostnames.iter().map(|h| h.to_lowercase()).collect();
+    if let Some(resp) = check_hostname_conflicts(
+        &state,
+        &candidates_lower,
+        &req.hostnames,
+        Some(&row.tenant_id),
+    )
+    .await
     {
-        let policy = state.policy.load();
-        for (h_lower, h_orig) in candidates_lower.iter().zip(req.hostnames.iter()) {
-            for (tenant, patterns) in policy.iter_patterns() {
-                if patterns.contains(h_lower) && tenant != &row.tenant_id {
-                    return conflict(
-                        "hostname_conflict",
-                        format!("hostname `{h_orig}` is already owned by tenant {tenant}"),
-                    );
-                }
-            }
-        }
-    }
-
-    match state.db.any_active_invite_claims(&candidates_lower).await {
-        Ok(Some(h)) => {
-            return conflict(
-                "hostname_conflict",
-                format!("hostname `{h}` is already reserved by an active invite"),
-            );
-        }
-        Ok(None) => {}
-        Err(e) => {
-            warn!(error = %e, "failed to check active invites");
-            return internal_error();
-        }
+        return resp;
     }
 
     match state
@@ -433,23 +445,8 @@ pub(super) async fn delete_invite_hostname(
         return not_found("invite does not exist");
     }
 
-    if let Principal::User(u) = &principal
-        && u.role != "operator"
-    {
-        let owned = match state
-            .db
-            .find_tenant_ownership_by_invite(&u.id, &invite_id)
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                warn!(error = %e, "find_tenant_ownership_by_invite failed");
-                return internal_error();
-            }
-        };
-        if owned.is_none() {
-            return not_found("invite does not exist");
-        }
+    if let Err(resp) = check_invite_ownership(&state, &principal, &invite_id).await {
+        return resp;
     }
 
     let _guard = state.invite_lock.lock().await;
@@ -514,23 +511,8 @@ pub(super) async fn delete_invite(
         return not_found("invite does not exist");
     }
 
-    if let Principal::User(u) = &principal
-        && u.role != "operator"
-    {
-        let owned = match state
-            .db
-            .find_tenant_ownership_by_invite(&u.id, &invite_id)
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                warn!(error = %e, "find_tenant_ownership_by_invite failed");
-                return internal_error();
-            }
-        };
-        if owned.is_none() {
-            return not_found("invite does not exist");
-        }
+    if let Err(resp) = check_invite_ownership(&state, &principal, &invite_id).await {
+        return resp;
     }
 
     // Serialize the revoke+policy_update window against concurrent invite

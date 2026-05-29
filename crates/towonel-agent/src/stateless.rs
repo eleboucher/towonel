@@ -615,11 +615,17 @@ async fn call_refresh(ctx: &BootstrapContext) -> anyhow::Result<CachedEdgeCred> 
     let body = check_response(resp).await?;
     let parsed: RefreshResp =
         serde_json::from_slice(&body).context("hub returned malformed refresh response")?;
+    decode_cached_cred(parsed.kid, &parsed.edge_cred_b64, &parsed.edge_cred_sig_b64)
+}
+
+/// Decode a base64url-encoded `(EdgeCred CBOR, ML-DSA signature)` pair into a
+/// `CachedEdgeCred`.
+fn decode_cached_cred(kid: u32, cred_b64: &str, sig_b64: &str) -> anyhow::Result<CachedEdgeCred> {
     let cred_cbor = B64
-        .decode(&parsed.edge_cred_b64)
+        .decode(cred_b64)
         .context("edge_cred_b64 invalid base64url")?;
     let sig_vec = B64
-        .decode(&parsed.edge_cred_sig_b64)
+        .decode(sig_b64)
         .context("edge_cred_sig_b64 invalid base64url")?;
     let sig: [u8; towonel_common::identity::PQ_SIGNATURE_LEN] = sig_vec
         .try_into()
@@ -627,7 +633,7 @@ async fn call_refresh(ctx: &BootstrapContext) -> anyhow::Result<CachedEdgeCred> 
     let decoded = towonel_common::edge_cred::EdgeCred::from_cbor(&cred_cbor)
         .context("edge_cred_b64 is not a valid EdgeCred CBOR")?;
     Ok(CachedEdgeCred {
-        kid: parsed.kid,
+        kid,
         cred_cbor,
         sig,
         not_after_ms: decoded.not_after_ms,
@@ -669,23 +675,7 @@ impl BootstrapResponse {
         let Some(wire) = self.edge_cred.as_ref() else {
             return Ok(None);
         };
-        let cred_cbor = B64
-            .decode(&wire.edge_cred_b64)
-            .context("edge_cred_b64 invalid base64url")?;
-        let sig_vec = B64
-            .decode(&wire.edge_cred_sig_b64)
-            .context("edge_cred_sig_b64 invalid base64url")?;
-        let sig: [u8; towonel_common::identity::PQ_SIGNATURE_LEN] = sig_vec
-            .try_into()
-            .map_err(|_| anyhow!("edge_cred_sig has wrong length"))?;
-        let decoded = towonel_common::edge_cred::EdgeCred::from_cbor(&cred_cbor)
-            .context("edge_cred_b64 is not a valid EdgeCred CBOR")?;
-        Ok(Some(CachedEdgeCred {
-            kid: wire.kid,
-            cred_cbor,
-            sig,
-            not_after_ms: decoded.not_after_ms,
-        }))
+        decode_cached_cred(wire.kid, &wire.edge_cred_b64, &wire.edge_cred_sig_b64).map(Some)
     }
 }
 

@@ -18,8 +18,6 @@ use towonel_common::edge_link::{
 use towonel_common::identity::AgentId;
 use towonel_common::routing::RouteTable;
 
-use super::port_reservations::PortReservations;
-
 pub type LinkPsk = [u8; 32];
 
 pub type SigningKeyMap = Arc<RwLock<HashMap<Kid, Vec<u8>>>>;
@@ -56,7 +54,6 @@ pub struct HubLinkHandle {
     pub session_event_rx: Arc<Mutex<Option<SessionEventRx>>>,
     pub control_request_tx: ControlRequestTx,
     pub control_request_rx: Arc<Mutex<Option<ControlRequestRx>>>,
-    pub port_reservations: Arc<PortReservations>,
     pub next_request_id: Arc<AtomicU64>,
     pub pending_control: PendingControl,
     /// Source the supervisor reads to ship a `SessionsSnapshot` after each
@@ -76,7 +73,6 @@ impl HubLinkHandle {
             session_event_rx: Arc::new(Mutex::new(Some(session_event_rx))),
             control_request_tx,
             control_request_rx: Arc::new(Mutex::new(Some(control_request_rx))),
-            port_reservations: PortReservations::new(),
             next_request_id: Arc::new(AtomicU64::new(1)),
             pending_control: Arc::new(Mutex::new(HashMap::new())),
             sessions: None,
@@ -329,18 +325,6 @@ fn handle_frame(frame: HubToEdge, handle: &HubLinkHandle) {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             guard.remove(&kid);
-        }
-        HubToEdge::PortReservationsSnapshot { entries } => {
-            handle.port_reservations.replace_all(&entries);
-            tracing::info!(count = entries.len(), "applied port reservations snapshot");
-        }
-        HubToEdge::PortReservationsChanged { added, removed } => {
-            handle.port_reservations.apply_delta(&added, &removed);
-            tracing::info!(
-                added = added.len(),
-                removed = removed.len(),
-                "applied port reservations delta"
-            );
         }
         HubToEdge::ControlResponse {
             request_id,

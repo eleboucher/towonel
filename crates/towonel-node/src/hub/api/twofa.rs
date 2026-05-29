@@ -15,7 +15,9 @@ use crate::hub::db::user_backup_codes::NewBackupCode;
 use crate::hub::db::user_totp::UserTotpRow;
 
 use super::signup_invites::{now_ms_i64, principal_actor, random_code};
-use super::{AppState, error_response, internal_error, invalid_request, json_ok, unauthorized};
+use super::{
+    AppState, error_response, internal_error, invalid_request, json_ok, unauthorized, user_required,
+};
 
 #[derive(Debug, Serialize)]
 pub(super) struct StatusResponse {
@@ -45,11 +47,7 @@ pub(super) async fn get_status(
     principal: Principal,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "2FA management is per-user",
-        );
+        return user_required("2FA management is per-user");
     };
     let row = match state.db.find_user_totp(&user.id).await {
         Ok(r) => r,
@@ -84,11 +82,7 @@ pub(super) async fn post_setup(
     principal: Principal,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "2FA management is per-user",
-        );
+        return user_required("2FA management is per-user");
     };
     if let Ok(Some(row)) = state.db.find_user_totp(&user.id).await
         && row.confirmed_at_ms.is_some()
@@ -131,11 +125,7 @@ pub(super) async fn post_confirm(
     axum::Json(body): axum::Json<ConfirmRequest>,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "2FA management is per-user",
-        );
+        return user_required("2FA management is per-user");
     };
     let row = match state.db.find_user_totp(&user.id).await {
         Ok(Some(r)) if r.confirmed_at_ms.is_none() => r,
@@ -215,11 +205,7 @@ pub(super) async fn post_disable(
     axum::Json(body): axum::Json<DisableRequest>,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "2FA management is per-user",
-        );
+        return user_required("2FA management is per-user");
     };
     // Both factors required so a session-hijack attacker can't silently
     // strip 2FA. Pending (never-confirmed) rows accept password-only.
@@ -286,11 +272,7 @@ pub(super) async fn post_regenerate(
     axum::Json(body): axum::Json<RegenerateRequest>,
 ) -> Response {
     let Principal::User(ref user) = principal else {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "user_required",
-            "2FA management is per-user",
-        );
+        return user_required("2FA management is per-user");
     };
     let Ok(Some(row)) = state.db.find_user_totp(&user.id).await else {
         return error_response(

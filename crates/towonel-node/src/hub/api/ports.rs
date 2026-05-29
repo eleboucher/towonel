@@ -4,7 +4,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
-use towonel_common::edge_link::PortReservationEntry;
 use towonel_common::identity::TenantId;
 use towonel_common::time::now_ms;
 use tracing::warn;
@@ -12,7 +11,6 @@ use tracing::warn;
 use crate::hub::auth::middleware::Principal;
 use crate::hub::db::app_settings::{DEFAULT_USER_PORT_QUOTA, USER_PORT_QUOTA_KEY};
 use crate::hub::db::port_reservations::{NewPortReservation, PortProtocol, PortReservationRow};
-use crate::hub::edge_link::PortReservationDelta;
 
 use super::{
     AppState, conflict, error_response, internal_error, invalid_request, json_ok, json_with_status,
@@ -160,30 +158,18 @@ pub(super) async fn post_port(
     };
     let edge = find_edge_for_ip(&state, selected_ip.as_deref());
     match state.db.insert_port_reservation(&row).await {
-        Ok(_) => {
-            broadcast_delta(
-                &state,
-                vec![PortReservationEntry {
-                    tenant_id,
-                    ip: selected_ip.clone(),
-                    port,
-                    protocol: protocol.as_str().to_string(),
-                }],
-                vec![],
-            );
-            json_with_status(
-                StatusCode::CREATED,
-                ReservePortResponse {
-                    status: "ok",
-                    port,
-                    protocol: protocol.as_str().to_string(),
-                    ip: selected_ip,
-                    label,
-                    claimed_at_ms,
-                    edge,
-                },
-            )
-        }
+        Ok(_) => json_with_status(
+            StatusCode::CREATED,
+            ReservePortResponse {
+                status: "ok",
+                port,
+                protocol: protocol.as_str().to_string(),
+                ip: selected_ip,
+                label,
+                claimed_at_ms,
+                edge,
+            },
+        ),
         Err(e) if crate::hub::db::is_unique_violation(&e) => conflict(
             "port_in_use",
             format!("{} port {port} is already reserved", protocol.as_str()),
@@ -192,23 +178,6 @@ pub(super) async fn post_port(
             warn!(error = %e, "insert_port_reservation failed");
             internal_error()
         }
-    }
-}
-
-fn broadcast_delta(
-    state: &Arc<AppState>,
-    added: Vec<PortReservationEntry>,
-    removed: Vec<PortReservationEntry>,
-) {
-    if state.port_reservations_tx.receiver_count() == 0 {
-        return;
-    }
-    if state
-        .port_reservations_tx
-        .send(PortReservationDelta { added, removed })
-        .is_err()
-    {
-        tracing::debug!("port reservation delta: no subscribers");
     }
 }
 
@@ -276,37 +245,17 @@ pub(super) async fn delete_port(
         }
     };
 
-    let mut released = 0;
     for r in &reservations {
-        match state
+        if let Err(e) = state
             .db
             .delete_port_reservation(&tenant_id, r.ip_address.as_deref(), port, protocol)
             .await
         {
-            Ok(true) => released += 1,
-            Ok(false) => {}
-            Err(e) => {
-                warn!(error = %e, "delete_port_reservation failed");
-                return internal_error();
-            }
+            warn!(error = %e, "delete_port_reservation failed");
+            return internal_error();
         }
     }
 
-    if released > 0 {
-        broadcast_delta(
-            &state,
-            vec![],
-            reservations
-                .into_iter()
-                .map(|r| PortReservationEntry {
-                    tenant_id,
-                    ip: r.ip_address,
-                    port,
-                    protocol: protocol.as_str().to_string(),
-                })
-                .collect(),
-        );
-    }
     json_ok(serde_json::json!({"status": "released"}))
 }
 
@@ -506,10 +455,40 @@ async fn select_ip_and_port(
     match req.preferred {
         Some(p) => {
             let ip = pick_ip_for_port(state, protocol, p).await?;
-            Ok((ip, p))
+            Ok((Some(ip), p))
         }
         None => pick_ip_and_port(state, protocol).await,
     }
+}
+
+/// Fetch all port reservations, mapping a DB error to a 500 response. `ctx`
+/// names the calling operation for the log line.
+async fn load_reservations(
+    state: &Arc<AppState>,
+    ctx: &str,
+) -> Result<Vec<PortReservationRow>, Response> {
+    state.db.list_port_reservations(None).await.map_err(|e| {
+        warn!(error = %e, "list_port_reservations failed during {ctx}");
+        internal_error()
+    })
+}
+
+/// Ports already reserved for `protocol` on `ip` (`None` = the shared,
+/// IP-less pool).
+fn used_ports(
+    rows: &[PortReservationRow],
+    protocol: PortProtocol,
+    ip: Option<&str>,
+) -> std::collections::HashSet<u16> {
+    rows.iter()
+        .filter(|r| r.protocol == protocol && r.ip_address.as_deref() == ip)
+        .map(|r| r.port)
+        .collect()
+}
+
+/// First port in the auto-pick range that is neither `used` nor hub-reserved.
+fn first_free_port(used: &std::collections::HashSet<u16>) -> Option<u16> {
+    (AUTO_PICK_START..=AUTO_PICK_END).find(|p| !used.contains(p) && !HUB_RESERVED_PORTS.contains(p))
 }
 
 async fn pick_ip_and_port(
@@ -517,43 +496,23 @@ async fn pick_ip_and_port(
     protocol: PortProtocol,
 ) -> Result<(Option<String>, u16), Response> {
     let ips = available_ips(state);
-    let existing = match state.db.list_port_reservations(None).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!(error = %e, "list_port_reservations failed during auto-pick");
-            return Err(internal_error());
-        }
-    };
+    let existing = load_reservations(state, "auto-pick").await?;
 
     if ips.is_empty() {
-        let used: std::collections::HashSet<u16> = existing
-            .into_iter()
-            .filter(|r| r.protocol == protocol && r.ip_address.is_none())
-            .map(|r| r.port)
-            .collect();
-        let port = (AUTO_PICK_START..=AUTO_PICK_END)
-            .find(|p| !used.contains(p) && !HUB_RESERVED_PORTS.contains(p))
-            .ok_or_else(|| {
-                conflict(
-                    "port_pool_exhausted",
-                    format!(
-                        "no free {} port in {AUTO_PICK_START}..={AUTO_PICK_END}",
-                        protocol.as_str()
-                    ),
-                )
-            })?;
+        let port = first_free_port(&used_ports(&existing, protocol, None)).ok_or_else(|| {
+            conflict(
+                "port_pool_exhausted",
+                format!(
+                    "no free {} port in {AUTO_PICK_START}..={AUTO_PICK_END}",
+                    protocol.as_str()
+                ),
+            )
+        })?;
         return Ok((None, port));
     }
 
     for ip in &ips {
-        let used: std::collections::HashSet<u16> = existing
-            .iter()
-            .filter(|r| r.protocol == protocol && r.ip_address.as_deref() == Some(ip.as_str()))
-            .map(|r| r.port)
-            .collect();
-        if let Some(port) = (AUTO_PICK_START..=AUTO_PICK_END)
-            .find(|p| !used.contains(p) && !HUB_RESERVED_PORTS.contains(p))
-        {
+        if let Some(port) = first_free_port(&used_ports(&existing, protocol, Some(ip))) {
             return Ok((Some(ip.clone()), port));
         }
     }
@@ -567,39 +526,34 @@ async fn pick_ip_and_port(
     ))
 }
 
+/// Auto-assign a concrete IP for a user-chosen `port`: the first available
+/// edge IP on which the port is still free. Fails if no edge advertises a
+/// public IP (nothing to assign) or the port is taken on every IP.
 async fn pick_ip_for_port(
     state: &Arc<AppState>,
     protocol: PortProtocol,
     port: u16,
-) -> Result<Option<String>, Response> {
+) -> Result<String, Response> {
     let ips = available_ips(state);
-    let existing = match state.db.list_port_reservations(None).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!(error = %e, "list_port_reservations failed during ip-for-port pick");
-            return Err(internal_error());
-        }
-    };
-
     if ips.is_empty() {
-        let taken = existing
-            .iter()
-            .any(|r| r.protocol == protocol && r.port == port && r.ip_address.is_none());
-        if !taken {
-            return Ok(None);
-        }
-        return Err(conflict(
-            "port_in_use",
-            format!("{} port {port} is already reserved", protocol.as_str()),
+        return Err(error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no_assignable_ip",
+            format!(
+                "no edge advertises a public IP to assign for {} port {port}; \
+                 connect an edge with a public IP and retry",
+                protocol.as_str()
+            ),
         ));
     }
 
+    let existing = load_reservations(state, "ip-for-port pick").await?;
     for ip in &ips {
         let taken = existing.iter().any(|r| {
             r.protocol == protocol && r.port == port && r.ip_address.as_deref() == Some(ip.as_str())
         });
         if !taken {
-            return Ok(Some(ip.clone()));
+            return Ok(ip.clone());
         }
     }
 
@@ -617,31 +571,17 @@ async fn pick_free_port_for_ip(
     protocol: PortProtocol,
     ip: Option<&str>,
 ) -> Result<u16, Response> {
-    let existing = match state.db.list_port_reservations(None).await {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!(error = %e, "list_port_reservations failed during auto-pick for ip");
-            return Err(internal_error());
-        }
-    };
-    let used: std::collections::HashSet<u16> = existing
-        .into_iter()
-        .filter(|r| r.protocol == protocol && r.ip_address.as_deref() == ip)
-        .map(|r| r.port)
-        .collect();
-
-    (AUTO_PICK_START..=AUTO_PICK_END)
-        .find(|p| !used.contains(p) && !HUB_RESERVED_PORTS.contains(p))
-        .ok_or_else(|| {
-            let ip_label = ip.unwrap_or("shared");
-            conflict(
-                "port_pool_exhausted",
-                format!(
-                    "no free {} port in {AUTO_PICK_START}..={AUTO_PICK_END} on {ip_label}",
-                    protocol.as_str()
-                ),
-            )
-        })
+    let existing = load_reservations(state, "auto-pick for ip").await?;
+    first_free_port(&used_ports(&existing, protocol, ip)).ok_or_else(|| {
+        let ip_label = ip.unwrap_or("shared");
+        conflict(
+            "port_pool_exhausted",
+            format!(
+                "no free {} port in {AUTO_PICK_START}..={AUTO_PICK_END} on {ip_label}",
+                protocol.as_str()
+            ),
+        )
+    })
 }
 
 #[cfg(test)]

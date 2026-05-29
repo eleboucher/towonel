@@ -1,7 +1,6 @@
 pub mod health;
 pub mod hub_client;
 pub mod hub_link;
-pub mod port_reservations;
 pub mod proxy_protocol;
 pub mod router;
 pub mod sessions;
@@ -774,7 +773,7 @@ async fn handle_connection_inner(
         };
         let (bytes_in, bytes_out) = match policy {
             TlsMode::Passthrough => {
-                pipe_passthrough(
+                pipe_tcp(
                     tcp_stream,
                     &hostname,
                     client_addrs,
@@ -848,39 +847,6 @@ async fn prepare_connection(tcp_stream: &TcpStream, ctx: &ConnCtx) -> anyhow::Re
         send_stream,
         recv_stream,
     })
-}
-
-async fn pipe_passthrough(
-    tcp_stream: TcpStream,
-    hostname: &str,
-    client_addrs: ClientAddrs,
-    mut send_stream: iroh::endpoint::SendStream,
-    mut recv_stream: iroh::endpoint::RecvStream,
-) -> anyhow::Result<(u64, u64)> {
-    write_handshake(&mut send_stream, hostname, client_addrs).await?;
-
-    let (tcp_read, mut tcp_write) = tcp_stream.into_split();
-    let mut tcp_read = tokio::io::BufReader::with_capacity(COPY_BUF_SIZE, tcp_read);
-
-    let c2a = async {
-        let res = tokio::io::copy_buf(&mut tcp_read, &mut send_stream).await;
-        if let Err(ref e) = res {
-            warn!(%hostname, "client->agent forward: {e}");
-        }
-        drop(send_stream.finish());
-        res.unwrap_or(0)
-    };
-    let a2c = async {
-        let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
-        if let Err(ref e) = res {
-            warn!(%hostname, "agent->client forward: {e}");
-        }
-        drop(tcp_write.shutdown().await);
-        res.unwrap_or(0)
-    };
-
-    let (c2a, a2c) = tokio::join!(c2a, a2c);
-    Ok((c2a, a2c))
 }
 
 /// Open a bi-stream on the agent's registered session. Returns an error

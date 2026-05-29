@@ -564,6 +564,25 @@ async fn handle_stream(
     .await
 }
 
+/// Record byte counts from a finished bidirectional copy, warning on either
+/// direction's error. `e2o_label`/`o2e_label` scope the warning to the caller.
+fn record_copy_results(
+    metrics: &AgentMetrics,
+    edge_to_origin: io::Result<u64>,
+    origin_to_edge: io::Result<u64>,
+    e2o_label: &str,
+    o2e_label: &str,
+) {
+    match edge_to_origin {
+        Ok(n) => metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, n),
+        Err(e) => warn!("{e2o_label}: {e}"),
+    }
+    match origin_to_edge {
+        Ok(n) => metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, n),
+        Err(e) => warn!("{o2e_label}: {e}"),
+    }
+}
+
 async fn forward_plain(
     origin: TcpStream,
     proxy: ProxyProtocol,
@@ -589,14 +608,7 @@ async fn forward_plain(
     };
 
     let (r1, r2) = tokio::join!(q2o, o2q);
-    match &r1 {
-        Ok(n) => metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, *n),
-        Err(e) => warn!("edge->origin: {e}"),
-    }
-    match &r2 {
-        Ok(n) => metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, *n),
-        Err(e) => warn!("origin->edge: {e}"),
-    }
+    record_copy_results(metrics, r1, r2, "edge->origin", "origin->edge");
     Ok(())
 }
 
@@ -656,14 +668,7 @@ async fn handle_tcp_stream(
         };
 
         let (r1, r2) = tokio::join!(q2o, o2q);
-        match &r1 {
-            Ok(n) => metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, *n),
-            Err(e) => warn!("edge->tcp-origin: {e}"),
-        }
-        match &r2 {
-            Ok(n) => metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, *n),
-            Err(e) => warn!("tcp-origin->edge: {e}"),
-        }
+        record_copy_results(metrics, r1, r2, "edge->tcp-origin", "tcp-origin->edge");
 
         metrics.streams_completed.inc();
         #[expect(
@@ -824,14 +829,7 @@ async fn forward_tls(
     };
 
     let (r1, r2) = tokio::join!(q2o, o2q);
-    match &r1 {
-        Ok(n) => metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, *n),
-        Err(e) => warn!("edge->origin(tls): {e}"),
-    }
-    match &r2 {
-        Ok(n) => metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, *n),
-        Err(e) => warn!("origin(tls)->edge: {e}"),
-    }
+    record_copy_results(metrics, r1, r2, "edge->origin(tls)", "origin(tls)->edge");
     Ok(())
 }
 

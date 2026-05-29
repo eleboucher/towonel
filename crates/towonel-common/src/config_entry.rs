@@ -188,22 +188,6 @@ impl SignedConfigEntry {
         }
         Ok(payload)
     }
-
-    /// Decode the payload **without** re-checking the ML-DSA signature.
-    /// Only safe to call on entries the hub has already accepted (which means
-    /// the signature was checked at insert time). Used on the read-side of
-    /// hub validators that scan stored entries — re-verifying them is O(N×crypto)
-    /// for no extra safety.
-    pub fn payload_unverified(&self) -> Result<ConfigPayload, ConfigEntryError> {
-        let payload = from_canonical_cbor(&self.payload_cbor)?;
-        if payload.version != 1 {
-            return Err(ConfigEntryError::UnsupportedVersion(payload.version));
-        }
-        if payload.tenant_id != self.tenant_id {
-            return Err(ConfigEntryError::TenantMismatch);
-        }
-        Ok(payload)
-    }
 }
 
 /// CBOR-encode a `ConfigPayload`. Byte-stable given a fixed struct layout,
