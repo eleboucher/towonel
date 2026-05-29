@@ -123,7 +123,7 @@ sea-orm-migration = { version = "1", default-features = false, features = [
   "sqlx-postgres",
   "runtime-tokio-rustls",
 ] }
-sea-query = "0.32"
+sea-query = "1.0"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
