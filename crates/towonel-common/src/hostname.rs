@@ -75,7 +75,8 @@ pub fn wildcard_lookup_ascii_lower<'m, V>(
 /// - labels starting or ending with a hyphen
 /// - bare wildcards like `*` with no dots
 pub fn validate_hostname(hostname: &str) -> Result<(), HostnameError> {
-    let lower = hostname.to_lowercase();
+    // Normalize the same way every consumer (routing / TLS lookup keys) does.
+    let lower = hostname.to_ascii_lowercase();
     if lower.is_empty() {
         return Err(HostnameError::Empty);
     }
@@ -86,6 +87,12 @@ pub fn validate_hostname(hostname: &str) -> Result<(), HostnameError> {
     let labels: Vec<&str> = lower.split('.').collect();
     if labels.len() < 2 {
         return Err(HostnameError::TooFewLabels);
+    }
+
+    // A wildcard must cover a real domain, not a public suffix: `*.example.eu`
+    // is fine, `*.eu` would let one tenant claim an entire TLD.
+    if labels.first() == Some(&"*") && labels.len() < 3 {
+        return Err(HostnameError::WildcardTooBroad);
     }
 
     for (i, label) in labels.iter().enumerate() {
@@ -117,6 +124,8 @@ pub enum HostnameError {
     Empty,
     #[error("hostname must have at least two labels (e.g. app.example.eu)")]
     TooFewLabels,
+    #[error("wildcard must cover a domain, not a public suffix (e.g. *.example.eu, not *.eu)")]
+    WildcardTooBroad,
     #[error("hostname exceeds 253 characters ({0})")]
     TooLong(usize),
     #[error("hostname contains an empty label (double dot or leading/trailing dot)")]
@@ -151,6 +160,12 @@ mod tests {
     fn rejects_single_label() {
         validate_hostname("localhost").unwrap_err();
         validate_hostname("*").unwrap_err();
+    }
+
+    #[test]
+    fn rejects_wildcard_at_public_suffix() {
+        validate_hostname("*.eu").unwrap_err();
+        validate_hostname("*.com").unwrap_err();
     }
 
     #[test]

@@ -69,10 +69,11 @@ impl OwnershipPolicy {
             if pattern == &lower {
                 return true; // exact match
             }
+            // `*.example.eu` matches `<label>.example.eu` but NOT `evilexample.eu`:
+            // the byte preceding the suffix must be the separating dot.
             if let Some(suffix) = pattern.strip_prefix("*.")
-                && lower.ends_with(suffix)
-                && lower.len() > suffix.len() + 1
-                && let Some(prefix) = lower.get(..lower.len() - suffix.len() - 1)
+                && let Some(prefix) = lower.strip_suffix(suffix)
+                && let Some(prefix) = prefix.strip_suffix('.')
                 && !prefix.is_empty()
             {
                 return true;
@@ -143,6 +144,9 @@ mod tests {
         assert!(policy.is_hostname_allowed(&kp.id(), "other.example.eu"));
         // bare domain should not match wildcard
         assert!(!policy.is_hostname_allowed(&kp.id(), "example.eu"));
+        // suffix match without a dot boundary must not be authorized
+        assert!(!policy.is_hostname_allowed(&kp.id(), "evilexample.eu"));
+        assert!(!policy.is_hostname_allowed(&kp.id(), "notexample.eu"));
     }
 
     #[test]
