@@ -444,6 +444,15 @@ pub(super) async fn health(State(state): State<Arc<AppState>>) -> Response {
 /// that has lost its DB connection is taken out of rotation immediately.
 pub(super) async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     use sea_orm::{ConnectionTrait, Statement};
+    // Only the leader holds the edge hub-links and the live_edges snapshot
+    // bootstrap serves; keep standbys out of the Service rotation.
+    if !state.is_leader.load(std::sync::atomic::Ordering::Relaxed) {
+        return error_response(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "not_ready",
+            "not the leader",
+        );
+    }
     let backend = state.db.conn.get_database_backend();
     match state
         .db

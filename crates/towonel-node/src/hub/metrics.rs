@@ -34,6 +34,8 @@ pub struct HubMetrics {
     pub entries_accepted: IntCounter,
     pub entries_rejected: IntCounterVec,
     pub tenants_total: IntGauge,
+    /// `1` on the active leader, `0` on standbys. Should sum to `1` across replicas.
+    pub is_leader: IntGauge,
     pub requests_total: IntCounterVec,
     /// OIDC metadata refresh attempts by provider and outcome
     /// (`success` / `failure`).
@@ -65,6 +67,11 @@ impl HubMetrics {
                 &r,
                 "towonel_hub_tenants_total",
                 "Tenants currently active in the ownership policy",
+            ),
+            is_leader: register_gauge(
+                &r,
+                "towonel_hub_is_leader",
+                "1 if this hub instance is the active leader, else 0",
             ),
             requests_total: register_counter_vec(
                 &r,

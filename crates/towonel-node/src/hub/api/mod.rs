@@ -178,6 +178,10 @@ pub struct AppState {
     pub invite_lock: Mutex<()>,
     /// Prometheus metrics surface exposed on `/metrics`.
     pub metrics: HubMetrics,
+    /// `true` while this hub is the active leader. Standbys report not-ready
+    /// on `/v1/readyz` and skip singleton work. Set by the leader-election
+    /// task; always `true` for `SQLite` or when election is disabled.
+    pub is_leader: Arc<std::sync::atomic::AtomicBool>,
     /// Operator secret used to keyed-hash invite secrets before persistence.
     pub invite_hash_key: Arc<InviteHashKey>,
     /// Replay cache for signed agent → hub requests (`/agent/refresh`),

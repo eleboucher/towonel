@@ -4,6 +4,7 @@ pub mod auth;
 pub mod control;
 pub mod db;
 pub mod edge_link;
+pub mod leader;
 pub mod live_agents;
 pub mod live_edges;
 pub mod mail;
@@ -251,6 +252,11 @@ pub struct HubParams {
     pub tls: Option<crate::config::TlsConfig>,
     pub web_enabled: bool,
     pub ports_require_reservation: bool,
+    /// Enable active/passive leader election (Postgres only).
+    pub leader_election: bool,
+    /// Optional direct-to-primary DSN for the election connection; falls
+    /// back to the main DSN when `None`.
+    pub leader_db_dsn: Option<String>,
     pub oidc: crate::config::OidcConfig,
     pub mailer: Option<mail::SharedMailer>,
     pub webauthn_rp_id: Option<String>,
@@ -368,8 +374,14 @@ impl Hub {
             policy.register_tenant(&tenant.tenant_id, tenant.pq_public_key, tenant.hostnames);
         }
 
+        // Election only applies to Postgres; otherwise this is the sole hub.
+        let elect = self.p.leader_election
+            && matches!(self.p.database.driver, crate::config::DbDriver::Postgres);
+        let is_leader = Arc::new(std::sync::atomic::AtomicBool::new(!elect));
+
         let state = Arc::new(api::AppState {
             db,
+            is_leader: Arc::clone(&is_leader),
             route_tx: self.p.route_tx.clone(),
             policy: arc_swap::ArcSwap::from_pointee(policy),
             identity: HubIdentity {
@@ -420,6 +432,26 @@ impl Hub {
         }
 
         spawn_background_loops(&state);
+
+        let leader_shutdown = tokio_util::sync::CancellationToken::new();
+        let leader_task = if elect {
+            let dsn = self
+                .p
+                .leader_db_dsn
+                .clone()
+                .unwrap_or_else(|| db_url.clone());
+            let elector = leader::PgAdvisoryLockElector::new(dsn);
+            let is_leader = Arc::clone(&is_leader);
+            let gauge = state.metrics.is_leader.clone();
+            let shutdown = leader_shutdown.clone();
+            Some(tokio::spawn(async move {
+                use leader::LeaderElector;
+                elector.run(is_leader, gauge, shutdown).await;
+            }))
+        } else {
+            state.metrics.is_leader.set(1);
+            None
+        };
 
         // Build once and share between the colocated in-process path and the
         // edge_link server so the nonce replay cache is global to the hub.
@@ -512,6 +544,13 @@ impl Hub {
         };
 
         link_shutdown.cancel();
+        leader_shutdown.cancel();
+        if let Some(task) = leader_task {
+            // Await so the lock is released (pool dropped) before exit.
+            if let Err(e) = task.await {
+                tracing::debug!(error = %e, "leader task join error");
+            }
+        }
         if let Some(task) = link_task {
             match task.await {
                 Ok(Ok(())) => {}
@@ -548,6 +587,10 @@ async fn session_prune_loop(state: Arc<api::AppState>) {
     tick.tick().await; // skip immediate first tick
     loop {
         tick.tick().await;
+        // Only the leader prunes.
+        if !state.is_leader.load(std::sync::atomic::Ordering::Relaxed) {
+            continue;
+        }
         let now = i64::try_from(towonel_common::time::now_ms()).unwrap_or(i64::MAX);
         match state.db.prune_expired_sessions(now).await {
             Ok(n) if n > 0 => tracing::debug!(pruned = n, "pruned expired sessions"),

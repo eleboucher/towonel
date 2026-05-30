@@ -687,6 +687,8 @@ async fn build_hub_params(
         }),
         web_enabled: config.hub.web_enabled,
         ports_require_reservation: config.hub.ports_require_reservation,
+        leader_election: config.hub.leader_election,
+        leader_db_dsn: config.hub.leader_db_dsn.clone(),
         oidc: config.hub.oidc.clone(),
         mailer,
         webauthn_rp_id: config.hub.webauthn_rp_id.clone(),

@@ -155,6 +155,12 @@ async fn handle_connection(
         other => anyhow::bail!("first frame was not Hello: {other:?}"),
     };
 
+    // Only the leader holds edge hub-links; make standbys refuse so the edge
+    // reconnects to the leader.
+    if !state.is_leader.load(std::sync::atomic::Ordering::Relaxed) {
+        anyhow::bail!("hub is not the leader");
+    }
+
     info!(
         peer = %peer,
         edge = %hex::encode(edge_id),

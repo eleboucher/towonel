@@ -117,6 +117,7 @@ impl TestHub {
         let mailer = Arc::new(TestMailer::default());
         let state = Arc::new(AppState {
             db: db.clone(),
+            is_leader: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             route_tx,
             policy,
             identity: super::HubIdentity {

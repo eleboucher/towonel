@@ -153,6 +153,10 @@ impl IdentityConfig {
 }
 
 #[derive(Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "config flags map 1:1 to TOWONEL_HUB_* env vars; grouping into sub-structs would obscure the env surface"
+)]
 pub struct HubConfig {
     pub enabled: bool,
     pub database: DatabaseConfig,
@@ -183,6 +187,14 @@ pub struct HubConfig {
     pub web_enabled: bool,
     /// `TOWONEL_HUB_PORTS_REQUIRE_RESERVATION`.
     pub ports_require_reservation: bool,
+    /// Active/passive leader election among hubs sharing one Postgres.
+    /// `TOWONEL_HUB_LEADER_ELECTION` (default `true`). Ignored for `SQLite`
+    /// (single instance is always leader).
+    pub leader_election: bool,
+    /// Optional DSN for the leader-election connection, pointing at the
+    /// Postgres **primary directly** (bypassing any pooler). Falls back to
+    /// the main DSN when unset. `TOWONEL_HUB_LEADER_DB_DSN`.
+    pub leader_db_dsn: Option<String>,
     pub oidc: OidcConfig,
     pub console_url: Option<String>,
     pub mail: Option<MailConfig>,
@@ -344,6 +356,8 @@ struct RawEnv {
     hub_webauthn_rp_id: Option<String>,
     hub_db_driver: Option<DbDriver>,
     hub_db_dsn: Option<String>,
+    hub_leader_election: Option<bool>,
+    hub_leader_db_dsn: Option<String>,
     hub_db_max_open_conns: Option<u32>,
     hub_db_max_idle_conns: Option<u32>,
     hub_link_listen_addr: Option<String>,
@@ -421,6 +435,8 @@ impl NodeConfig {
             hub_webauthn_rp_id,
             hub_db_driver,
             hub_db_dsn,
+            hub_leader_election,
+            hub_leader_db_dsn,
             hub_db_max_open_conns,
             hub_db_max_idle_conns,
             hub_link_listen_addr,
@@ -517,6 +533,8 @@ impl NodeConfig {
             public_url: hub_public_url.clone(),
             db_driver: hub_db_driver,
             db_dsn: hub_db_dsn,
+            leader_election: hub_leader_election,
+            leader_db_dsn: hub_leader_db_dsn,
             db_max_open_conns: hub_db_max_open_conns,
             db_max_idle_conns: hub_db_max_idle_conns,
             invite_hash_key,
@@ -631,6 +649,8 @@ struct HubInputs<'a> {
     public_url: Option<String>,
     db_driver: Option<DbDriver>,
     db_dsn: Option<String>,
+    leader_election: Option<bool>,
+    leader_db_dsn: Option<String>,
     db_max_open_conns: Option<u32>,
     db_max_idle_conns: Option<u32>,
     invite_hash_key: Option<String>,
@@ -663,6 +683,8 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         public_url,
         db_driver,
         db_dsn,
+        leader_election,
+        leader_db_dsn,
         db_max_open_conns,
         db_max_idle_conns,
         invite_hash_key,
@@ -768,6 +790,8 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         tls,
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
+        leader_election: leader_election.unwrap_or(true),
+        leader_db_dsn,
         oidc,
         console_url,
         mail,
