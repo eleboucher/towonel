@@ -7,6 +7,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
 use towonel_common::time::now_ms;
 use tracing::warn;
+use utoipa::ToSchema;
 
 use crate::hub::auth::middleware::{OperatorPrincipal, Principal};
 use crate::hub::db::admin_actions::NewAdminAction;
@@ -17,8 +18,9 @@ const CODE_BYTES: usize = 18;
 const ID_BYTES: usize = 16;
 const ROLES: &[&str] = &["user", "operator"];
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct CreateSignupInviteRequest {
+    /// `user` or `operator`. Defaults to `user`.
     #[serde(default = "default_role")]
     role: String,
     #[serde(default)]
@@ -31,14 +33,14 @@ fn default_role() -> String {
     "user".to_string()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct CreateSignupInviteResponse {
     code: String,
     role: String,
     expires_at_ms: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct SignupInviteEntry {
     code: String,
     role: String,
@@ -48,6 +50,17 @@ struct SignupInviteEntry {
     redeemed_at_ms: Option<i64>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/signup-invites",
+    tag = "signup-invites",
+    request_body = CreateSignupInviteRequest,
+    responses(
+        (status = 200, description = "Signup invite created", body = CreateSignupInviteResponse),
+        (status = 400, description = "Invalid role or recipient email"),
+    ),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn post_signup_invite(
     State(state): State<Arc<AppState>>,
     OperatorPrincipal(actor): OperatorPrincipal,
@@ -130,6 +143,13 @@ pub(super) async fn post_signup_invite(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/signup-invites",
+    tag = "signup-invites",
+    responses((status = 200, description = "All signup invites", body = [SignupInviteEntry])),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn list_signup_invites(
     State(state): State<Arc<AppState>>,
     _operator: OperatorPrincipal,

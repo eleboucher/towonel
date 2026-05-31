@@ -4,6 +4,7 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 use serde::Serialize;
 use tracing::warn;
+use utoipa::ToSchema;
 
 use crate::hub::auth::middleware::{OperatorPrincipal, Principal};
 use crate::hub::db::admin_actions::NewAdminAction;
@@ -11,7 +12,7 @@ use crate::hub::db::admin_actions::NewAdminAction;
 use super::signup_invites::{now_ms_i64, principal_actor, random_code};
 use super::{AppState, internal_error, invalid_request, json_ok};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct UserEntry {
     id: String,
     email: String,
@@ -20,6 +21,13 @@ struct UserEntry {
     created_at_ms: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/users",
+    tag = "users",
+    responses((status = 200, description = "All users", body = [UserEntry])),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn list_users(
     State(state): State<Arc<AppState>>,
     _operator: OperatorPrincipal,
@@ -44,6 +52,17 @@ pub(super) async fn list_users(
     json_ok(entries)
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/users/{id}/disable",
+    tag = "users",
+    params(("id" = String, Path, description = "User id")),
+    responses(
+        (status = 200, description = "User disabled and their sessions revoked"),
+        (status = 400, description = "Cannot disable yourself"),
+    ),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn post_user_disable(
     State(state): State<Arc<AppState>>,
     OperatorPrincipal(actor): OperatorPrincipal,

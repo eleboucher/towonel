@@ -3435,3 +3435,48 @@ async fn api_key_rejected_after_user_disabled() {
     let (status, _) = get_json(&client, &hub.url("/v1/auth/me"), Some(&token)).await;
     assert_eq!(status, 401);
 }
+
+#[tokio::test]
+async fn openapi_specs_and_swagger_ui_served() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    for (path, title) in [
+        ("/api-docs/user.json", "Towonel User API"),
+        ("/api-docs/operator.json", "Towonel Operator API"),
+    ] {
+        let resp = client.get(hub.url(path)).send().await.unwrap();
+        assert_eq!(resp.status(), 200, "GET {path}");
+        let spec: Value = resp.json().await.unwrap();
+        assert!(
+            spec["openapi"]
+                .as_str()
+                .is_some_and(|v| v.starts_with("3."))
+        );
+        assert_eq!(spec["info"]["title"], title);
+        assert!(spec["paths"].as_object().is_some_and(|p| !p.is_empty()));
+    }
+
+    let user: Value = client
+        .get(hub.url("/api-docs/user.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(user["paths"]["/v1/auth/login"].is_object());
+
+    let operator: Value = client
+        .get(hub.url("/api-docs/operator.json"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(operator["paths"]["/v1/invites"].is_object());
+
+    let resp = client.get(hub.url("/swagger-ui")).send().await.unwrap();
+    assert!(resp.status().is_success() || resp.status().is_redirection());
+}

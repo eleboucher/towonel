@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use utoipa::ToSchema;
 
 use crate::hub::auth::backup_codes;
 use crate::hub::auth::middleware::Principal;
@@ -19,29 +20,39 @@ use super::{
     AppState, error_response, internal_error, invalid_request, json_ok, unauthorized, user_required,
 };
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(super) struct StatusResponse {
     enabled: bool,
     pending: bool,
     backup_codes_remaining: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct ConfirmRequest {
     code: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct DisableRequest {
     password: String,
     code: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct RegenerateRequest {
     code: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/2fa/status",
+    tag = "2fa",
+    responses(
+        (status = 200, description = "TOTP enrollment status", body = StatusResponse),
+        (status = 403, description = "Only user accounts have 2FA"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn get_status(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -77,6 +88,17 @@ pub(super) async fn get_status(
     })
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/2fa/setup",
+    tag = "2fa",
+    responses(
+        (status = 200, description = "Pending secret issued; returns `secret_base32` and `otpauth_url`"),
+        (status = 403, description = "Only user accounts have 2FA"),
+        (status = 409, description = "2FA already enabled"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_setup(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -119,6 +141,19 @@ pub(super) async fn post_setup(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/2fa/confirm",
+    tag = "2fa",
+    request_body = ConfirmRequest,
+    responses(
+        (status = 200, description = "2FA enabled; returns one-time `backup_codes`"),
+        (status = 400, description = "No pending setup or invalid code"),
+        (status = 403, description = "Only user accounts have 2FA"),
+        (status = 409, description = "2FA already enabled"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_confirm(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -199,6 +234,19 @@ pub(super) async fn post_confirm(
     json_ok(serde_json::json!({ "backup_codes": codes }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/2fa/disable",
+    tag = "2fa",
+    request_body = DisableRequest,
+    responses(
+        (status = 200, description = "2FA disabled"),
+        (status = 400, description = "2FA not enabled"),
+        (status = 401, description = "Invalid password or code"),
+        (status = 403, description = "Only user accounts have 2FA"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_disable(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -266,6 +314,19 @@ pub(super) async fn post_disable(
     json_ok(serde_json::json!({"ok": true}))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/2fa/backup/regenerate",
+    tag = "2fa",
+    request_body = RegenerateRequest,
+    responses(
+        (status = 200, description = "Fresh one-time `backup_codes` issued (old codes invalidated)"),
+        (status = 400, description = "2FA not enabled"),
+        (status = 401, description = "Invalid code"),
+        (status = 403, description = "Only user accounts have 2FA"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_regenerate(
     State(state): State<Arc<AppState>>,
     principal: Principal,

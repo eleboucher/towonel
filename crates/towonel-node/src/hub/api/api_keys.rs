@@ -5,6 +5,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use utoipa::ToSchema;
 
 use crate::hub::auth::api_key;
 use crate::hub::auth::middleware::Principal;
@@ -23,14 +24,14 @@ const NAME_MAX_LEN: usize = 128;
 const MAX_EXPIRY_DAYS: i64 = 365;
 const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct CreateApiKeyRequest {
     name: String,
     /// Optional lifetime. Omit for a non-expiring key.
     expires_in_days: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ApiKeyInfo {
     id: String,
     name: String,
@@ -51,7 +52,7 @@ impl From<db::api_keys::ApiKeyRow> for ApiKeyInfo {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct CreateApiKeyResponse {
     id: String,
     name: String,
@@ -61,11 +62,23 @@ struct CreateApiKeyResponse {
     token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ListApiKeysResponse {
     keys: Vec<ApiKeyInfo>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/api-keys",
+    tag = "api-keys",
+    request_body = CreateApiKeyRequest,
+    responses(
+        (status = 201, description = "Key created; `token` is shown only once", body = CreateApiKeyResponse),
+        (status = 400, description = "Invalid name/expiry or key limit reached"),
+        (status = 403, description = "Only user accounts may create keys"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_api_key(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -129,6 +142,16 @@ pub(super) async fn post_api_key(
     )
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/api-keys",
+    tag = "api-keys",
+    responses(
+        (status = 200, description = "The caller's API keys (no token material)", body = ListApiKeysResponse),
+        (status = 403, description = "Only user accounts have keys"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn list_api_keys(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -147,6 +170,18 @@ pub(super) async fn list_api_keys(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/auth/api-keys/{id}",
+    tag = "api-keys",
+    params(("id" = String, Path, description = "API key id")),
+    responses(
+        (status = 200, description = "Key revoked"),
+        (status = 403, description = "Only user accounts have keys"),
+        (status = 404, description = "Key not found"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn delete_api_key(
     State(state): State<Arc<AppState>>,
     principal: Principal,

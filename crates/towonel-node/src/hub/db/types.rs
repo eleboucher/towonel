@@ -7,7 +7,7 @@ use towonel_common::invite::INVITE_ID_LEN;
 /// `Claimed` is display-only: the token stays usable, but the UI can tell
 /// "never bootstrapped" (`Pending`) apart from "in use". `Revoked` is the
 /// only terminal state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum InviteStatus {
     Pending,

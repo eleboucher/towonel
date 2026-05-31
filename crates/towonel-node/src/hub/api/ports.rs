@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use towonel_common::identity::TenantId;
 use towonel_common::time::now_ms;
 use tracing::warn;
+use utoipa::ToSchema;
 
 use crate::hub::auth::middleware::Principal;
 use crate::hub::db::app_settings::{DEFAULT_USER_PORT_QUOTA, USER_PORT_QUOTA_KEY};
@@ -24,8 +25,9 @@ const HUB_RESERVED_PORTS: &[u16] = &[4443, 8443, 51820];
 const AUTO_PICK_START: u16 = 10_000;
 const AUTO_PICK_END: u16 = 32_767;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct ReservePortRequest {
+    /// `tcp` or `udp`.
     protocol: String,
     #[serde(default)]
     ip: Option<String>,
@@ -35,13 +37,13 @@ pub(super) struct ReservePortRequest {
     label: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct EdgeInfo {
     node_id: String,
     addresses: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ReservePortResponse {
     status: &'static str,
     port: u16,
@@ -53,7 +55,7 @@ struct ReservePortResponse {
     edge: Option<EdgeInfo>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct PortRow {
     port: u16,
     protocol: String,
@@ -74,7 +76,7 @@ impl From<PortReservationRow> for PortRow {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct PortRowWithTenant {
     tenant_id: String,
     port: u16,
@@ -97,6 +99,20 @@ impl From<PortReservationRow> for PortRowWithTenant {
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/tenants/{id}/ports",
+    tag = "ports",
+    params(("id" = String, Path, description = "Tenant id")),
+    request_body = ReservePortRequest,
+    responses(
+        (status = 201, description = "Port reserved", body = ReservePortResponse),
+        (status = 400, description = "Invalid tenant id, protocol, or port"),
+        (status = 403, description = "Not authorized for this tenant, or quota exceeded"),
+        (status = 409, description = "Port already in use / pool exhausted"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_port(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -181,6 +197,18 @@ pub(super) async fn post_port(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/tenants/{id}/ports",
+    tag = "ports",
+    params(("id" = String, Path, description = "Tenant id")),
+    responses(
+        (status = 200, description = "Port reservations for the tenant"),
+        (status = 400, description = "Invalid tenant id"),
+        (status = 403, description = "Not authorized for this tenant"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn list_ports(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -204,6 +232,13 @@ pub(super) async fn list_ports(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ports",
+    tag = "operator",
+    responses((status = 200, description = "All port reservations across every tenant")),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn list_all_ports(State(state): State<Arc<AppState>>) -> Response {
     match state.db.list_port_reservations(None).await {
         Ok(rows) => json_ok(serde_json::json!({
@@ -216,6 +251,23 @@ pub(super) async fn list_all_ports(State(state): State<Arc<AppState>>) -> Respon
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/tenants/{id}/ports/{proto}/{port}",
+    tag = "ports",
+    params(
+        ("id" = String, Path, description = "Tenant id"),
+        ("proto" = String, Path, description = "`tcp` or `udp`"),
+        ("port" = u16, Path, description = "Reserved port number"),
+    ),
+    responses(
+        (status = 200, description = "Reservation released"),
+        (status = 400, description = "Invalid tenant id or protocol"),
+        (status = 403, description = "Not authorized for this tenant"),
+        (status = 404, description = "Reservation does not exist"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn delete_port(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -320,14 +372,14 @@ async fn enforce_user_port_quota(state: &Arc<AppState>, user_id: &str) -> Result
     Ok(())
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct AvailablePortsQuery {
     protocol: String,
     #[serde(default)]
     count: Option<u16>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AvailablePortsResponse {
     protocol: String,
     range_start: u16,
@@ -335,6 +387,20 @@ struct AvailablePortsResponse {
     ports: Vec<u16>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/ports/available",
+    tag = "ports",
+    params(
+        ("protocol" = String, Query, description = "`tcp` or `udp`"),
+        ("count" = Option<u16>, Query, description = "How many free ports to return (1..=200, default 20)"),
+    ),
+    responses(
+        (status = 200, description = "A page of free ports in the auto-pick range", body = AvailablePortsResponse),
+        (status = 400, description = "Invalid protocol"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn get_available_ports(
     State(state): State<Arc<AppState>>,
     _principal: Principal,

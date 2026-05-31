@@ -353,6 +353,17 @@ pub(super) struct StartParams {
     next: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/oidc/{provider}/start",
+    tag = "oidc",
+    params(
+        ("provider" = String, Path, description = "OIDC provider id (e.g. `codeberg`)"),
+        ("signup_code" = Option<String>, Query, description = "Signup invite code, for first-time OIDC signup"),
+        ("next" = Option<String>, Query, description = "Relative path to return to after login"),
+    ),
+    responses((status = 302, description = "Redirect to the provider's authorization endpoint")),
+)]
 pub(super) async fn start(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
@@ -379,6 +390,17 @@ pub(super) struct LinkParams {
     next: Option<String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/oidc/{provider}/link",
+    tag = "oidc",
+    params(
+        ("provider" = String, Path, description = "OIDC provider id"),
+        ("next" = Option<String>, Query, description = "Relative path to return to afterwards"),
+    ),
+    responses((status = 302, description = "Redirect to the provider to link the identity to the current user")),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn link(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,
@@ -446,6 +468,18 @@ pub(super) struct CallbackParams {
     error: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/oidc/{provider}/callback",
+    tag = "oidc",
+    params(
+        ("provider" = String, Path, description = "OIDC provider id"),
+        ("code" = Option<String>, Query, description = "Authorization code from the provider"),
+        ("state" = Option<String>, Query, description = "CSRF state echoed by the provider"),
+        ("error" = Option<String>, Query, description = "Error code if the provider denied the request"),
+    ),
+    responses((status = 302, description = "Redirect back to the app; sets the session cookie on success")),
+)]
 #[expect(clippy::too_many_lines, reason = "linear OIDC callback")]
 pub(super) async fn callback(
     State(state): State<Arc<AppState>>,
@@ -761,6 +795,12 @@ struct AdvertisedProvider {
     display_name: &'static str,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/providers",
+    tag = "oidc",
+    responses((status = 200, description = "Configured OIDC providers advertised to the login UI")),
+)]
 pub(super) async fn list_providers(State(state): State<Arc<AppState>>) -> Response {
     let mut providers: Vec<AdvertisedProvider> = Vec::new();
     if let Some(r) = state.oidc.codeberg.as_ref() {
@@ -783,6 +823,16 @@ struct ListedIdentity {
     linked_at_ms: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/oidc/identities",
+    tag = "oidc",
+    responses(
+        (status = 200, description = "OIDC identities linked to the current user"),
+        (status = 401, description = "Not authenticated"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn list_identities(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -812,6 +862,19 @@ pub(super) async fn list_identities(
     )
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/oidc/{provider}/unlink",
+    tag = "oidc",
+    params(("provider" = String, Path, description = "OIDC provider id")),
+    responses(
+        (status = 200, description = "Identity unlinked"),
+        (status = 401, description = "Not authenticated"),
+        (status = 403, description = "Refused — would remove the last sign-in method"),
+        (status = 404, description = "No such identity linked"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn unlink(
     State(state): State<Arc<AppState>>,
     Path(provider): Path<String>,

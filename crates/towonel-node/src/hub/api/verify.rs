@@ -12,6 +12,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use towonel_common::time::now_ms;
 use tracing::warn;
+use utoipa::ToSchema;
 
 use crate::hub::db::auth_tokens::NewAuthToken;
 
@@ -19,17 +20,17 @@ use super::{AppState, error_response, internal_error, json_ok};
 
 const VERIFICATION_TTL_MS: i64 = 24 * 60 * 60 * 1000;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct ResendRequest {
     email: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct VerifyTokenQuery {
     token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct VerifyPostRequest {
     token: String,
 }
@@ -73,6 +74,13 @@ pub(super) async fn issue_and_send_verification(
 
 /// Always 200 to avoid revealing whether the email exists. Shares the
 /// login limiter so brute-force lookups trip the same lockout.
+#[utoipa::path(
+    post,
+    path = "/v1/auth/verify/resend",
+    tag = "auth",
+    request_body = ResendRequest,
+    responses((status = 200, description = "Always 200 — does not reveal whether the email exists")),
+)]
 pub(super) async fn post_resend(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<ResendRequest>,
@@ -99,6 +107,16 @@ pub(super) async fn post_resend(
     generic_ok()
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/verify",
+    tag = "auth",
+    params(("token" = String, Query, description = "Verification token from the emailed link")),
+    responses(
+        (status = 200, description = "HTML confirmation page", content_type = "text/html"),
+        (status = 400, description = "Invalid or already-used link (HTML)", content_type = "text/html"),
+    ),
+)]
 pub(super) async fn get_verify(
     State(state): State<Arc<AppState>>,
     Query(q): Query<VerifyTokenQuery>,
@@ -122,6 +140,16 @@ pub(super) async fn get_verify(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/verify",
+    tag = "auth",
+    request_body = VerifyPostRequest,
+    responses(
+        (status = 200, description = "Email verified"),
+        (status = 400, description = "Invalid or expired token"),
+    ),
+)]
 pub(super) async fn post_verify(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<VerifyPostRequest>,

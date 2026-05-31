@@ -472,6 +472,13 @@ pub(super) async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/edges",
+    tag = "operator",
+    responses((status = 200, description = "Edge nodes (iroh endpoint topology) known to the hub")),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
     #[derive(Serialize)]
     struct EdgeEntry {
@@ -511,6 +518,17 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
 /// surfacing them because the tenant is dropped from the in-memory
 /// `OwnershipPolicy`. The removal is recorded in `tenant_removals` so hub
 /// restart still skips the tenant when rebuilding the policy.
+#[utoipa::path(
+    delete,
+    path = "/v1/tenants/{id}",
+    tag = "operator",
+    params(("id" = String, Path, description = "Tenant id")),
+    responses(
+        (status = 200, description = "Tenant removed from the active routing policy"),
+        (status = 400, description = "Invalid tenant id"),
+    ),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn delete_tenant(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

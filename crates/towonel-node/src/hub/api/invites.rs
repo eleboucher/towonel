@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use towonel_common::identity::{TenantId, TenantKeypair};
 use towonel_common::invite::{InviteToken, hash_invite_secret};
 use tracing::warn;
+use utoipa::ToSchema;
 
 use towonel_common::time::now_ms;
 
@@ -19,7 +20,7 @@ use super::{
     AppState, conflict, internal_error, invalid_request, json_ok, not_found, parse_invite_id,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct CreateInviteRequest {
     /// Optional human-readable label. A random name is generated when absent.
     name: Option<String>,
@@ -39,7 +40,7 @@ pub(super) struct CreateInviteRequest {
     failover_regions: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(super) struct CreateInviteResponse {
     status: &'static str,
     token: String,
@@ -118,6 +119,19 @@ async fn check_hostname_conflicts(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invites",
+    tag = "invites",
+    request_body = CreateInviteRequest,
+    responses(
+        (status = 200, description = "Invite created", body = CreateInviteResponse),
+        (status = 400, description = "Invalid hostname or expiry"),
+        (status = 404, description = "owner_email refers to no known user"),
+        (status = 409, description = "A hostname is already owned or reserved"),
+    ),
+    security(("operator_key" = [])),
+)]
 #[expect(
     clippy::too_many_lines,
     reason = "linear happy path with explicit rollback branches; splitting hides the ordering"
@@ -257,7 +271,7 @@ pub(super) async fn post_invite(
     })
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(super) struct InviteSummary {
     invite_id: String,
     name: String,
@@ -290,6 +304,17 @@ pub(super) struct ListInvitesQuery {
     scope: Option<String>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/invites",
+    tag = "invites",
+    params(
+        ("scope" = Option<String>, Query,
+         description = "Operators may pass `all` to list every invite; otherwise the list is ownership-scoped"),
+    ),
+    responses((status = 200, description = "List of invites visible to the caller")),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn list_invites(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -327,17 +352,31 @@ pub(super) async fn list_invites(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct AddHostnamesRequest {
     hostnames: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(super) struct AddHostnamesResponse {
     status: &'static str,
     hostnames: Vec<String>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invites/{id}/hostnames",
+    tag = "invites",
+    params(("id" = String, Path, description = "Base64url invite id")),
+    request_body = AddHostnamesRequest,
+    responses(
+        (status = 200, description = "Hostnames added", body = AddHostnamesResponse),
+        (status = 400, description = "Invalid invite id or hostname"),
+        (status = 404, description = "Invite does not exist"),
+        (status = 409, description = "A hostname is already claimed"),
+    ),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn post_invite_hostnames(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -412,13 +451,28 @@ pub(super) async fn post_invite_hostnames(
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub(super) struct RemoveHostnameResponse {
     status: &'static str,
     hostname: String,
     remaining_hostnames: Vec<String>,
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/invites/{id}/hostnames/{hostname}",
+    tag = "invites",
+    params(
+        ("id" = String, Path, description = "Base64url invite id"),
+        ("hostname" = String, Path, description = "Hostname to remove"),
+    ),
+    responses(
+        (status = 200, description = "Hostname removed", body = RemoveHostnameResponse),
+        (status = 400, description = "Invalid id/hostname, or last hostname cannot be removed"),
+        (status = 404, description = "Invite or hostname not found"),
+    ),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn delete_invite_hostname(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -489,6 +543,18 @@ pub(super) async fn delete_invite_hostname(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/invites/{id}",
+    tag = "invites",
+    params(("id" = String, Path, description = "Base64url invite id")),
+    responses(
+        (status = 200, description = "Invite revoked and tenant removed"),
+        (status = 400, description = "Invalid invite id"),
+        (status = 404, description = "Invite already revoked or does not exist"),
+    ),
+    security(("operator_key" = [])),
+)]
 pub(super) async fn delete_invite(
     State(state): State<Arc<AppState>>,
     principal: Principal,

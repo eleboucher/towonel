@@ -6,6 +6,7 @@ use axum::response::Response;
 use serde::Deserialize;
 use towonel_common::time::now_ms;
 use tracing::warn;
+use utoipa::ToSchema;
 
 use crate::hub::auth::password;
 use crate::hub::db::auth_tokens::NewAuthToken;
@@ -19,17 +20,24 @@ const RESET_TTL_MS: i64 = 60 * 60 * 1000;
 const PASSWORD_MIN_LEN: usize = 8;
 const PASSWORD_MAX_LEN: usize = 128;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct RequestRequest {
     email: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct ConfirmRequest {
     token: String,
     new_password: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/password/reset",
+    tag = "auth",
+    request_body = RequestRequest,
+    responses((status = 200, description = "Always 200 — does not reveal whether the email exists")),
+)]
 pub(super) async fn post_request(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<RequestRequest>,
@@ -90,6 +98,16 @@ async fn issue_and_send_reset(
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/password/reset/confirm",
+    tag = "auth",
+    request_body = ConfirmRequest,
+    responses(
+        (status = 200, description = "Password updated"),
+        (status = 400, description = "Invalid token or password"),
+    ),
+)]
 pub(super) async fn post_confirm(
     State(state): State<Arc<AppState>>,
     axum::Json(body): axum::Json<ConfirmRequest>,

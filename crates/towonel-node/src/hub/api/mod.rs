@@ -8,6 +8,7 @@ mod entries;
 mod invites;
 mod metrics_handler;
 mod oidc;
+mod openapi;
 mod passkey;
 mod password_reset;
 mod ports;
@@ -429,6 +430,8 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         .merge(invites_routes)
         .merge(web_admin)
         .merge(tenant_member)
+        // Schema only, no secrets: mounted unconditionally, outside auth.
+        .merge(openapi::swagger_ui())
         .layer(middleware::from_fn_with_state(
             state.clone(),
             record_request_metric,

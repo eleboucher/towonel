@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+use utoipa::ToSchema;
 use uuid::Uuid;
 use webauthn_rs::prelude::{
     Passkey, PublicKeyCredential, RegisterPublicKeyCredential, WebauthnError,
@@ -30,13 +31,23 @@ fn user_uuid(user_id: &str) -> Uuid {
     Uuid::new_v5(&PASSKEY_NS, user_id.as_bytes())
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct PasskeyItem {
     id: String,
     name: String,
     created_at_ms: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/passkeys",
+    tag = "passkeys",
+    responses(
+        (status = 200, description = "The caller's registered passkeys"),
+        (status = 403, description = "User session required"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn list_passkeys(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -62,6 +73,16 @@ pub(super) async fn list_passkeys(
     json_ok(serde_json::json!({ "passkeys": items }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/passkeys/register/begin",
+    tag = "passkeys",
+    responses(
+        (status = 200, description = "WebAuthn creation options; returns `challenge_id` and `options`"),
+        (status = 403, description = "User session required"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_register_begin(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -105,14 +126,29 @@ pub(super) async fn post_register_begin(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct RegisterFinishRequest {
     challenge_id: String,
     name: String,
     password: String,
+    /// `WebAuthn` credential from `navigator.credentials.create()`.
+    #[schema(value_type = Object)]
     credential: RegisterPublicKeyCredential,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/passkeys/register/finish",
+    tag = "passkeys",
+    request_body = RegisterFinishRequest,
+    responses(
+        (status = 200, description = "Passkey registered; returns its `id`"),
+        (status = 400, description = "Invalid name, challenge, or credential"),
+        (status = 401, description = "Invalid password"),
+        (status = 403, description = "User session required"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_register_finish(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -186,13 +222,28 @@ pub(super) async fn post_register_finish(
     json_ok(serde_json::json!({ "id": passkey_id }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct DeletePasskeyRequest {
     password: String,
+    /// TOTP/backup code, required when the account also has TOTP enabled.
     #[serde(default)]
     code: Option<String>,
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/auth/passkeys/{id}",
+    tag = "passkeys",
+    params(("id" = String, Path, description = "Passkey id")),
+    request_body = DeletePasskeyRequest,
+    responses(
+        (status = 200, description = "Passkey removed"),
+        (status = 401, description = "Invalid password or code"),
+        (status = 403, description = "User session required"),
+        (status = 404, description = "Passkey not found"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn delete_passkey(
     State(state): State<Arc<AppState>>,
     principal: Principal,
@@ -246,11 +297,24 @@ pub(super) async fn delete_passkey(
     json_ok(serde_json::json!({}))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct AuthenticateBeginRequest {
+    /// The `challenge_token` from `POST /v1/auth/login`.
     challenge_token: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/passkeys/authenticate/begin",
+    tag = "passkeys",
+    request_body = AuthenticateBeginRequest,
+    responses(
+        (status = 200, description = "WebAuthn request options; returns `passkey_challenge_id` and `options`"),
+        (status = 400, description = "No passkeys registered"),
+        (status = 401, description = "Invalid or expired challenge"),
+        (status = 429, description = "Too many failed attempts from this IP"),
+    ),
+)]
 pub(super) async fn post_authenticate_begin(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -328,13 +392,26 @@ pub(super) async fn post_authenticate_begin(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct AuthenticateFinishRequest {
     challenge_token: String,
     passkey_challenge_id: String,
+    /// `WebAuthn` credential from `navigator.credentials.get()`.
+    #[schema(value_type = Object)]
     credential: PublicKeyCredential,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/passkeys/authenticate/finish",
+    tag = "passkeys",
+    request_body = AuthenticateFinishRequest,
+    responses(
+        (status = 200, description = "Passkey accepted; session issued (sets the session cookie)"),
+        (status = 401, description = "Authentication failed or challenge expired"),
+        (status = 429, description = "Too many failed attempts from this IP"),
+    ),
+)]
 #[expect(
     clippy::too_many_lines,
     reason = "linear 2FA verify with branch per failure mode"

@@ -7,6 +7,7 @@ use axum::response::Response;
 use serde::{Deserialize, Serialize};
 use towonel_common::time::now_ms;
 use tracing::warn;
+use utoipa::ToSchema;
 
 use crate::hub::auth::middleware::Principal;
 use crate::hub::auth::{password, session};
@@ -26,27 +27,28 @@ const LOGIN_CHALLENGE_TTL_MS: i64 = 5 * 60 * 1000;
 const PASSWORD_MIN_LEN: usize = 8;
 const PASSWORD_MAX_LEN: usize = 128;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct SignupRequest {
+    /// Single-use signup invite code.
     code: String,
     email: String,
     password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct LoginRequest {
     email: String,
     password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AuthUser {
     id: String,
     email: String,
     role: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct MeResponse {
     id: String,
     email: Option<String>,
@@ -55,11 +57,23 @@ struct MeResponse {
     passkeys_enabled: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AuthResponse {
     user: AuthUser,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/signup",
+    tag = "auth",
+    request_body = SignupRequest,
+    responses(
+        (status = 200, description = "Account created; email verification required"),
+        (status = 400, description = "Invalid email/password or missing code"),
+        (status = 403, description = "Invite bound to a different email"),
+        (status = 409, description = "Email already in use"),
+    ),
+)]
 #[expect(clippy::too_many_lines, reason = "linear signup with rollback arms")]
 pub(super) async fn post_signup(
     State(state): State<Arc<AppState>>,
@@ -184,6 +198,19 @@ pub(super) async fn post_signup(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/login",
+    tag = "auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Session issued (sets the session cookie), \
+                                      or a 2FA challenge when a second factor is enrolled", body = AuthResponse),
+        (status = 401, description = "Invalid credentials"),
+        (status = 403, description = "Email not verified"),
+        (status = 429, description = "Too many failed attempts from this IP"),
+    ),
+)]
 pub(super) async fn post_login(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -293,12 +320,25 @@ pub(super) async fn post_login(
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub(super) struct TwoFaVerifyRequest {
+    /// The `challenge_token` returned by `POST /v1/auth/login`.
     challenge_token: String,
+    /// TOTP code or a single-use backup code.
     code: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/2fa/verify",
+    tag = "auth",
+    request_body = TwoFaVerifyRequest,
+    responses(
+        (status = 200, description = "Second factor accepted; session issued", body = AuthResponse),
+        (status = 401, description = "Invalid code or expired challenge"),
+        (status = 429, description = "Too many failed attempts from this IP"),
+    ),
+)]
 pub(super) async fn post_twofa_verify(
     State(state): State<Arc<AppState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -453,6 +493,13 @@ pub(super) async fn record_login_failure(state: &Arc<AppState>, email_key: &str,
     ip_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/logout",
+    tag = "auth",
+    responses((status = 200, description = "Session cleared")),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn post_logout(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -474,6 +521,16 @@ pub(super) async fn post_logout(
     resp
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/auth/me",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Current authenticated principal", body = MeResponse),
+        (status = 401, description = "Not authenticated"),
+    ),
+    security(("session_cookie" = []), ("api_key" = [])),
+)]
 pub(super) async fn get_me(State(state): State<Arc<AppState>>, principal: Principal) -> Response {
     match principal {
         Principal::User(u) => {
