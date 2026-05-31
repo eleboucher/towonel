@@ -578,7 +578,7 @@ fn now_ms_i64() -> i64 {
     i64::try_from(now_ms()).unwrap_or(i64::MAX)
 }
 
-fn new_id(byte_len: usize) -> String {
+pub(super) fn new_id(byte_len: usize) -> String {
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
     let mut buf = vec![0u8; byte_len];

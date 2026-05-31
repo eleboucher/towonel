@@ -1,5 +1,6 @@
 mod acme_account;
 mod agent_refresh;
+mod api_keys;
 mod app_settings;
 mod auth;
 mod bootstrap;
@@ -490,6 +491,11 @@ fn rate_limited_routes(web_enabled: bool) -> Router<Arc<AppState>> {
             .route("/v1/auth/login", post(auth::post_login))
             .route("/v1/auth/logout", post(auth::post_logout))
             .route("/v1/auth/me", get(auth::get_me))
+            .route(
+                "/v1/auth/api-keys",
+                post(api_keys::post_api_key).get(api_keys::list_api_keys),
+            )
+            .route("/v1/auth/api-keys/{id}", delete(api_keys::delete_api_key))
             .route(
                 "/v1/auth/verify",
                 post(verify::post_verify).get(verify::get_verify),

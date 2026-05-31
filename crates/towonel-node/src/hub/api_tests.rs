@@ -3159,3 +3159,238 @@ async fn operator_without_twofa_blocked_from_privileged_routes() {
         .unwrap();
     assert_eq!(r5.status(), 200);
 }
+
+// POST/GET/DELETE /v1/auth/api-keys (personal API keys)
+
+async fn create_api_key(
+    hub: &TestHub,
+    client: &reqwest::Client,
+    cookie: &str,
+    body: Value,
+) -> (reqwest::StatusCode, Value) {
+    let resp = client
+        .post(hub.url("/v1/auth/api-keys"))
+        .header(reqwest::header::COOKIE, cookie)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json: Value = resp.json().await.unwrap();
+    (status, json)
+}
+
+#[tokio::test]
+async fn api_key_authenticates_as_owning_user() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+
+    let me_via_cookie = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let user_id = me_via_cookie["id"].as_str().unwrap().to_string();
+
+    let (status, body) = create_api_key(&hub, &client, &cookie, json!({"name": "ci"})).await;
+    assert_eq!(status, 201);
+    let token = body["token"].as_str().unwrap();
+    assert!(token.starts_with("twk_"), "token shape: {token}");
+
+    // The minted key authenticates as the same user via Bearer.
+    let (status, me_via_key) = get_json(&client, &hub.url("/v1/auth/me"), Some(token)).await;
+    assert_eq!(status, 200);
+    assert_eq!(me_via_key["id"].as_str().unwrap(), user_id);
+    assert_eq!(me_via_key["email"].as_str().unwrap(), "alice@example.test");
+}
+
+#[tokio::test]
+async fn api_key_create_rejected_for_operator_key() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    // Operator-key principal is not a user account.
+    let (status, body) = post_json(
+        &client,
+        &hub.url("/v1/auth/api-keys"),
+        json!({"name": "nope"}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 403);
+    assert_eq!(body["error"]["code"].as_str().unwrap(), "user_required");
+}
+
+#[tokio::test]
+async fn api_key_listed_then_revoked_stops_working() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+
+    let (status, created) = create_api_key(&hub, &client, &cookie, json!({"name": "laptop"})).await;
+    assert_eq!(status, 201);
+    let token = created["token"].as_str().unwrap().to_string();
+    let key_id = created["id"].as_str().unwrap().to_string();
+
+    // Listing exposes metadata but never the secret.
+    let (status, listed) = get_json(&client, &hub.url("/v1/auth/api-keys"), Some(&token)).await;
+    assert_eq!(status, 200);
+    let keys = listed["keys"].as_array().unwrap();
+    assert_eq!(keys.len(), 1);
+    assert_eq!(keys[0]["id"].as_str().unwrap(), key_id);
+    assert_eq!(keys[0]["name"].as_str().unwrap(), "laptop");
+    assert!(keys[0].get("token").is_none(), "secret must not be listed");
+
+    // Revoke, then the same token is rejected.
+    let (status, _) = delete_json(
+        &client,
+        &hub.url(&format!("/v1/auth/api-keys/{key_id}")),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, _) = get_json(&client, &hub.url("/v1/auth/me"), Some(&token)).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn api_key_unknown_token_unauthorized() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let (status, _) = get_json(
+        &client,
+        &hub.url("/v1/auth/me"),
+        Some("twk_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+    )
+    .await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn api_key_revoke_scoped_to_owner() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let alice = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let bob = signup_and_login_user(&hub, &client, "bob@example.test", "hunter22!").await;
+
+    let (_, alice_created) =
+        create_api_key(&hub, &client, &alice, json!({"name": "alice-key"})).await;
+    let alice_key_id = alice_created["id"].as_str().unwrap();
+
+    let (_, bob_created) = create_api_key(&hub, &client, &bob, json!({"name": "bob-key"})).await;
+    let bob_token = bob_created["token"].as_str().unwrap();
+
+    // Bob cannot delete Alice's key — it's invisible to him.
+    let (status, _) = delete_json(
+        &client,
+        &hub.url(&format!("/v1/auth/api-keys/{alice_key_id}")),
+        Some(bob_token),
+    )
+    .await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn api_key_with_expiry_is_accepted_and_set() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+
+    let (status, created) = create_api_key(
+        &hub,
+        &client,
+        &cookie,
+        json!({"name": "ci", "expires_in_days": 30}),
+    )
+    .await;
+    assert_eq!(status, 201);
+    assert!(
+        created["expires_at_ms"].as_i64().is_some(),
+        "expiry should be set"
+    );
+    let token = created["token"].as_str().unwrap();
+    let (status, _) = get_json(&client, &hub.url("/v1/auth/me"), Some(token)).await;
+    assert_eq!(status, 200);
+
+    // Out-of-range lifetimes are rejected.
+    let (status, _) = create_api_key(
+        &hub,
+        &client,
+        &cookie,
+        json!({"name": "bad", "expires_in_days": 9999}),
+    )
+    .await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn api_key_expired_is_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let me: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me["id"].as_str().unwrap().to_string();
+
+    // Insert a key whose expiry is already in the past — it must not authenticate.
+    let expired = crate::hub::auth::api_key::mint();
+    hub.state
+        .db
+        .insert_api_key(crate::hub::db::api_keys::NewApiKey {
+            id: "expired-key",
+            user_id: &user_id,
+            key_hash: &expired.key_hash,
+            name: "expired",
+            expires_at_ms: Some(1),
+            now_ms: 1,
+        })
+        .await
+        .unwrap();
+
+    let (status, _) = get_json(&client, &hub.url("/v1/auth/me"), Some(&expired.token)).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn api_key_rejected_after_user_disabled() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let me: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let user_id = me["id"].as_str().unwrap().to_string();
+    let (_, created) = create_api_key(&hub, &client, &cookie, json!({"name": "ci"})).await;
+    let token = created["token"].as_str().unwrap().to_string();
+
+    // Operator disables the account; the key must stop working.
+    let (status, _) = post_json(
+        &client,
+        &hub.url(&format!("/v1/users/{user_id}/disable")),
+        json!({}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, _) = get_json(&client, &hub.url("/v1/auth/me"), Some(&token)).await;
+    assert_eq!(status, 401);
+}

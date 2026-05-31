@@ -2,6 +2,7 @@
 //! requests; [`password`] + [`session`] are the user-account primitives the
 //! web routes use when `TOWONEL_HUB_WEB_ENABLED` is on.
 
+pub mod api_key;
 pub mod backup_codes;
 pub mod middleware;
 pub mod password;
