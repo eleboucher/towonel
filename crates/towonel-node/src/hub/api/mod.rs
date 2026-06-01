@@ -464,6 +464,9 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
                 otel.kind = "server",
                 method = %req.method(),
                 uri = %req.uri(),
+                // Filled in by `record_request_metric` once the route is matched
+                // — the low-cardinality template, e.g. /v1/tenants/{id}/entries.
+                http.route = tracing::field::Empty,
                 request_id = %request_id,
             );
             towonel_common::telemetry::set_parent_from_headers(&span, req.headers());
@@ -671,6 +674,7 @@ async fn record_request_metric(
     let endpoint = matched
         .as_ref()
         .map_or("unmatched", axum::extract::MatchedPath::as_str);
+    tracing::Span::current().record("http.route", endpoint);
     state
         .metrics
         .record_request(endpoint, resp.status().as_u16());
