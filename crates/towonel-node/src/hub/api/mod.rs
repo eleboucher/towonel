@@ -237,7 +237,7 @@ pub struct AppState {
     pub tls: Option<crate::config::TlsConfig>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct PortIndex {
     pub tcp:
         std::collections::BTreeMap<u16, (towonel_common::identity::TenantId, std::string::String)>,
@@ -263,10 +263,11 @@ fn build_port_index(
         std::collections::HashMap<String, u16>,
     > = std::collections::HashMap::new();
     for entry in entries {
-        let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
+        if policy.pq_public_key(&entry.tenant_id).is_none() {
             continue;
-        };
-        let Ok(payload) = entry.verify(pq_pubkey) else {
+        }
+        // Trusted DB replay: verified at the `/v1/entries` boundary already.
+        let Ok(payload) = entry.decode_trusted() else {
             continue;
         };
         match payload.op {
@@ -335,8 +336,9 @@ pub fn trigger_route_rebuild(state: &AppState) {
     state.route_rebuild_notify.notify_one();
 }
 
-/// Synchronous because the next `find_port_conflict` after an insert must
-/// see the new claim; the coalesced route rebuild can't satisfy that.
+/// Full rebuild of the port index from the DB. Seeds the index at startup;
+/// thereafter it's maintained incrementally on the write path (see
+/// [`apply_port_index_delta`]) so `find_port_conflict` never costs a full scan.
 pub async fn refresh_port_index(state: &Arc<AppState>) -> anyhow::Result<()> {
     let policy_snapshot = state.policy.load_full();
     let entries = state.db.get_all_entries().await?;
@@ -345,17 +347,67 @@ pub async fn refresh_port_index(state: &Arc<AppState>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build the table from policy + entries + live agents and broadcast.
-/// Driven by the coalescer in `hub::Hub::run`; everything else funnels
-/// through [`trigger_route_rebuild`].
+/// Apply one already-verified service op to the cached port index in place,
+/// avoiding a full-table replay on the write path. `rcu` retries on a
+/// concurrent store so a racing TCP and UDP claim — separate locks, shared
+/// `ArcSwap` — can't clobber each other's map.
+pub fn apply_port_index_delta(
+    state: &AppState,
+    tenant: towonel_common::identity::TenantId,
+    op: &towonel_common::config_entry::ConfigOp,
+) {
+    use towonel_common::config_entry::ConfigOp;
+    state.port_index.rcu(|cur| {
+        let mut idx = (**cur).clone();
+        match op {
+            ConfigOp::UpsertTcpService {
+                service,
+                listen_port,
+            } => {
+                idx.tcp.retain(|_, (t, s)| !(*t == tenant && s == service));
+                idx.tcp.insert(*listen_port, (tenant, service.clone()));
+            }
+            ConfigOp::DeleteTcpService { service } => {
+                idx.tcp.retain(|_, (t, s)| !(*t == tenant && s == service));
+            }
+            ConfigOp::UpsertUdpService {
+                service,
+                listen_port,
+            } => {
+                idx.udp.retain(|_, (t, s)| !(*t == tenant && s == service));
+                idx.udp.insert(*listen_port, (tenant, service.clone()));
+            }
+            ConfigOp::DeleteUdpService { service } => {
+                idx.udp.retain(|_, (t, s)| !(*t == tenant && s == service));
+            }
+            _ => {}
+        }
+        Arc::new(idx)
+    });
+}
+
+/// Drop every port claim owned by `tenant` from the cached index. Used when an
+/// operator removes a tenant, without a full rescan.
+pub fn remove_tenant_from_port_index(
+    state: &AppState,
+    tenant: &towonel_common::identity::TenantId,
+) {
+    state.port_index.rcu(|cur| {
+        let mut idx = (**cur).clone();
+        idx.tcp.retain(|_, (t, _)| t != tenant);
+        idx.udp.retain(|_, (t, _)| t != tenant);
+        Arc::new(idx)
+    });
+}
+
+/// Build the route table from policy + entries + live agents and broadcast.
+/// Driven by the coalescer in `hub::Hub::run`; everything else funnels through
+/// [`trigger_route_rebuild`]. The port index is maintained incrementally on
+/// the write path, not here, so it has a single writer.
 pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Result<()> {
     let policy_snapshot = state.policy.load_full();
     let entries = state.db.get_all_entries().await?;
     let live = state.live_agents.snapshot();
-    // Port index ignores liveness and tenant-has-agents so a crashed pod
-    // doesn't free its port for another tenant to race-claim.
-    let idx = build_port_index(&entries, &policy_snapshot);
-    state.port_index.store(Arc::new(idx));
 
     let table = RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live));
     if state.route_tx.send(table).is_err() {

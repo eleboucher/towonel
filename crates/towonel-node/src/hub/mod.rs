@@ -424,11 +424,15 @@ impl Hub {
             tls: self.p.tls.clone(),
         });
 
-        // Seed the port index from the DB before serving any upsert; the
-        // first call to `find_port_conflict` would otherwise see an empty
-        // index and let a tenant re-claim someone else's port.
+        // Seed the port index from the DB before serving any upsert; the first
+        // call to `find_port_conflict` would otherwise see an empty index and
+        // let a tenant re-claim someone else's port. After this seed the index
+        // is maintained incrementally on the write path.
+        if let Err(e) = api::refresh_port_index(&state).await {
+            tracing::warn!(error = %e, "initial port_index seed failed");
+        }
         if let Err(e) = api::rebuild_and_broadcast_routes(&state).await {
-            tracing::warn!(error = %e, "initial route + port_index seed failed");
+            tracing::warn!(error = %e, "initial route broadcast failed");
         }
 
         spawn_background_loops(&state);

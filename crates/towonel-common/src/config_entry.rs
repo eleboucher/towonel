@@ -188,6 +188,24 @@ impl SignedConfigEntry {
         }
         Ok(payload)
     }
+
+    /// Decode the payload **without** re-checking the ML-DSA-65 signature, for
+    /// entries replayed from the hub's own DB that were already verified at the
+    /// `/v1/entries` boundary before being persisted. Re-verifying a lattice
+    /// signature on every internal replay is CPU cost with no security gain.
+    /// The structural checks (version, inner/outer tenant match) still apply.
+    ///
+    /// Never call this on entries arriving over the wire — use [`Self::verify`].
+    pub fn decode_trusted(&self) -> Result<ConfigPayload, ConfigEntryError> {
+        let payload = from_canonical_cbor(&self.payload_cbor)?;
+        if payload.version != 1 {
+            return Err(ConfigEntryError::UnsupportedVersion(payload.version));
+        }
+        if payload.tenant_id != self.tenant_id {
+            return Err(ConfigEntryError::TenantMismatch);
+        }
+        Ok(payload)
+    }
 }
 
 /// CBOR-encode a `ConfigPayload`. Byte-stable given a fixed struct layout,

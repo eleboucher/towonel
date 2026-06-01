@@ -58,10 +58,12 @@ pub type UdpListenerBinding = TcpListenerBinding;
 impl RouteTable {
     /// Materialize a route table by replaying signed config entries in order.
     ///
-    /// Entries must be pre-sorted by (`tenant_id`, sequence). Each entry is
-    /// verified before being applied -- entries with invalid signatures are
-    /// logged and skipped. The `policy` enforces which tenants and hostnames
-    /// are allowed.
+    /// Entries must be pre-sorted by (`tenant_id`, sequence). They are assumed
+    /// already signature-verified at the trust boundary before persistence, so
+    /// they're decoded without re-checking the signature (see
+    /// [`SignedConfigEntry::decode_trusted`]). The `policy` enforces which
+    /// tenants and hostnames are allowed; entries for tenants absent from it
+    /// are skipped.
     #[must_use]
     pub fn from_entries(entries: &[SignedConfigEntry], policy: &OwnershipPolicy) -> Self {
         Self::from_entries_with_liveness(entries, policy, None)
@@ -80,21 +82,21 @@ impl RouteTable {
         let mut tenant_state: HashMap<TenantId, TenantState> = HashMap::new();
 
         for entry in entries {
-            let Some(pq_pubkey) = policy.pq_public_key(&entry.tenant_id) else {
+            if policy.pq_public_key(&entry.tenant_id).is_none() {
                 tracing::debug!(
                     tenant = %entry.tenant_id,
                     "skipping entry for tenant not in ownership policy"
                 );
                 continue;
-            };
+            }
 
-            let payload = match entry.verify(pq_pubkey) {
+            let payload = match entry.decode_trusted() {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(
                         tenant = %entry.tenant_id,
                         error = %e,
-                        "skipping entry with invalid signature"
+                        "skipping entry that failed to decode"
                     );
                     continue;
                 }

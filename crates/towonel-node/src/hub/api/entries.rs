@@ -13,9 +13,10 @@ use towonel_common::time::now_ms;
 use super::super::db::port_reservations::PortProtocol;
 use super::super::metrics::reject_reason;
 use super::{
-    AppState, PROTOCOL_VERSION, cbor_response, error_response, hostname_not_owned, internal_error,
-    invalid_request, invalid_signature, json_ok, refresh_port_index, sequence_conflict,
-    tenant_not_allowed, trigger_route_rebuild, unsupported_op, unsupported_version,
+    AppState, PROTOCOL_VERSION, apply_port_index_delta, cbor_response, error_response,
+    hostname_not_owned, internal_error, invalid_request, invalid_signature, json_ok,
+    remove_tenant_from_port_index, sequence_conflict, tenant_not_allowed, trigger_route_rebuild,
+    unsupported_op, unsupported_version,
 };
 
 #[derive(Serialize)]
@@ -391,8 +392,17 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
 
     state.metrics.entries_accepted.inc();
 
-    if let Err(e) = refresh_port_index(&state).await {
-        warn!(error = %e, "port index refresh after insert failed");
+    // Only service ops touch the port index; update it incrementally so the
+    // next find_port_conflict sees this claim without a full rescan. Still
+    // under `_port_guard`, so this is serialized against same-protocol claims.
+    match &payload.op {
+        ConfigOp::UpsertTcpService { .. }
+        | ConfigOp::DeleteTcpService { .. }
+        | ConfigOp::UpsertUdpService { .. }
+        | ConfigOp::DeleteUdpService { .. } => {
+            apply_port_index_delta(&state, payload.tenant_id, &payload.op);
+        }
+        _ => {}
     }
     trigger_route_rebuild(&state);
 
@@ -549,9 +559,7 @@ pub(super) async fn delete_tenant(
 
     state.policy_update(|p| p.remove(&tenant_id));
 
-    if let Err(e) = refresh_port_index(&state).await {
-        warn!(error = %e, "port index refresh after tenant removal failed");
-    }
+    remove_tenant_from_port_index(&state, &tenant_id);
     trigger_route_rebuild(&state);
 
     json_ok(serde_json::json!({

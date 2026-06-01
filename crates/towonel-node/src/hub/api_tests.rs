@@ -1275,6 +1275,24 @@ async fn upsert_tcp_service_same_tenant_can_update_port() {
     )
     .await;
     assert_eq!(status, 200, "got body: {body}");
+
+    // Re-publishing must free the old port 2222 so another service can claim
+    // it — guards the incremental index against leaving the stale entry behind.
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        3,
+        ConfigOp::UpsertTcpService {
+            service: "metrics".into(),
+            listen_port: 2222,
+        },
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "old port 2222 should be claimable; got body: {body}"
+    );
 }
 
 #[tokio::test]
