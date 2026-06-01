@@ -3484,6 +3484,8 @@ async fn openapi_specs_and_swagger_ui_served() {
         .await
         .unwrap();
     assert!(user["paths"]["/v1/auth/login"].is_object());
+    // Invites are user-manageable, so they appear in the user spec too.
+    assert!(user["paths"]["/v1/invites"].is_object());
 
     let operator: Value = client
         .get(hub.url("/api-docs/operator.json"))

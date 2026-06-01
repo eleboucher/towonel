@@ -92,6 +92,11 @@ impl Modify for OperatorSecurity {
         super::ports::list_ports,
         super::ports::delete_port,
         super::ports::get_available_ports,
+        super::invites::post_invite,
+        super::invites::list_invites,
+        super::invites::delete_invite,
+        super::invites::post_invite_hostnames,
+        super::invites::delete_invite_hostname,
     ),
 )]
 pub struct UserApiDoc;
@@ -109,6 +114,10 @@ pub struct UserApiDoc;
         super::entries::delete_tenant,
         super::entries::list_edges,
         super::ports::list_all_ports,
+        super::ports::post_port,
+        super::ports::list_ports,
+        super::ports::delete_port,
+        super::ports::get_available_ports,
         super::app_settings::get_user_port_quota,
         super::app_settings::put_user_port_quota,
         super::signup_invites::post_signup_invite,

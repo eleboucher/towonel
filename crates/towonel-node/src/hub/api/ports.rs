@@ -111,7 +111,7 @@ impl From<PortReservationRow> for PortRowWithTenant {
         (status = 403, description = "Not authorized for this tenant, or quota exceeded"),
         (status = 409, description = "Port already in use / pool exhausted"),
     ),
-    security(("session_cookie" = []), ("api_key" = [])),
+    security(("session_cookie" = []), ("api_key" = []), ("operator_key" = [])),
 )]
 pub(super) async fn post_port(
     State(state): State<Arc<AppState>>,
@@ -207,7 +207,7 @@ pub(super) async fn post_port(
         (status = 400, description = "Invalid tenant id"),
         (status = 403, description = "Not authorized for this tenant"),
     ),
-    security(("session_cookie" = []), ("api_key" = [])),
+    security(("session_cookie" = []), ("api_key" = []), ("operator_key" = [])),
 )]
 pub(super) async fn list_ports(
     State(state): State<Arc<AppState>>,
@@ -266,7 +266,7 @@ pub(super) async fn list_all_ports(State(state): State<Arc<AppState>>) -> Respon
         (status = 403, description = "Not authorized for this tenant"),
         (status = 404, description = "Reservation does not exist"),
     ),
-    security(("session_cookie" = []), ("api_key" = [])),
+    security(("session_cookie" = []), ("api_key" = []), ("operator_key" = [])),
 )]
 pub(super) async fn delete_port(
     State(state): State<Arc<AppState>>,
@@ -399,7 +399,7 @@ struct AvailablePortsResponse {
         (status = 200, description = "A page of free ports in the auto-pick range", body = AvailablePortsResponse),
         (status = 400, description = "Invalid protocol"),
     ),
-    security(("session_cookie" = []), ("api_key" = [])),
+    security(("session_cookie" = []), ("api_key" = []), ("operator_key" = [])),
 )]
 pub(super) async fn get_available_ports(
     State(state): State<Arc<AppState>>,

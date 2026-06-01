@@ -130,7 +130,7 @@ async fn check_hostname_conflicts(
         (status = 404, description = "owner_email refers to no known user"),
         (status = 409, description = "A hostname is already owned or reserved"),
     ),
-    security(("operator_key" = [])),
+    security(("operator_key" = []), ("session_cookie" = []), ("api_key" = [])),
 )]
 #[expect(
     clippy::too_many_lines,
@@ -313,7 +313,7 @@ pub(super) struct ListInvitesQuery {
          description = "Operators may pass `all` to list every invite; otherwise the list is ownership-scoped"),
     ),
     responses((status = 200, description = "List of invites visible to the caller")),
-    security(("operator_key" = [])),
+    security(("operator_key" = []), ("session_cookie" = []), ("api_key" = [])),
 )]
 pub(super) async fn list_invites(
     State(state): State<Arc<AppState>>,
@@ -375,7 +375,7 @@ pub(super) struct AddHostnamesResponse {
         (status = 404, description = "Invite does not exist"),
         (status = 409, description = "A hostname is already claimed"),
     ),
-    security(("operator_key" = [])),
+    security(("operator_key" = []), ("session_cookie" = []), ("api_key" = [])),
 )]
 pub(super) async fn post_invite_hostnames(
     State(state): State<Arc<AppState>>,
@@ -471,7 +471,7 @@ pub(super) struct RemoveHostnameResponse {
         (status = 400, description = "Invalid id/hostname, or last hostname cannot be removed"),
         (status = 404, description = "Invite or hostname not found"),
     ),
-    security(("operator_key" = [])),
+    security(("operator_key" = []), ("session_cookie" = []), ("api_key" = [])),
 )]
 pub(super) async fn delete_invite_hostname(
     State(state): State<Arc<AppState>>,
@@ -553,7 +553,7 @@ pub(super) async fn delete_invite_hostname(
         (status = 400, description = "Invalid invite id"),
         (status = 404, description = "Invite already revoked or does not exist"),
     ),
-    security(("operator_key" = [])),
+    security(("operator_key" = []), ("session_cookie" = []), ("api_key" = [])),
 )]
 pub(super) async fn delete_invite(
     State(state): State<Arc<AppState>>,
