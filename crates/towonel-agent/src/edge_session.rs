@@ -41,7 +41,7 @@ pub struct SupervisorPool {
     service_map: Arc<ServiceMap>,
     metrics: Arc<AgentMetrics>,
     edge_cred: Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
-    relay_url: Option<RelayUrl>,
+    relay_urls: Arc<Vec<RelayUrl>>,
     shutdown: CancellationToken,
     active: std::collections::HashMap<iroh::EndpointId, ActiveSupervisor>,
     tasks: JoinSet<()>,
@@ -53,7 +53,7 @@ impl SupervisorPool {
         service_map: &Arc<ServiceMap>,
         metrics: &Arc<AgentMetrics>,
         edge_cred: &Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
-        relay_url: Option<&RelayUrl>,
+        relay_urls: Vec<RelayUrl>,
         shutdown: &CancellationToken,
     ) -> Self {
         Self {
@@ -61,7 +61,7 @@ impl SupervisorPool {
             service_map: Arc::clone(service_map),
             metrics: Arc::clone(metrics),
             edge_cred: Arc::clone(edge_cred),
-            relay_url: relay_url.cloned(),
+            relay_urls: Arc::new(relay_urls),
             shutdown: shutdown.clone(),
             active: std::collections::HashMap::new(),
             tasks: JoinSet::new(),
@@ -102,7 +102,7 @@ impl SupervisorPool {
             if self.active.contains_key(&contact.id) {
                 continue;
             }
-            if contact.addrs.is_empty() && self.relay_url.is_none() {
+            if contact.addrs.is_empty() && self.relay_urls.is_empty() {
                 warn!(
                     edge = %contact.id.fmt_short(),
                     "skipping edge with no advertised socket addresses and no relay configured"
@@ -119,7 +119,7 @@ impl SupervisorPool {
                 Arc::clone(&self.metrics),
                 token.clone(),
                 Arc::clone(&self.edge_cred),
-                self.relay_url.clone(),
+                Arc::clone(&self.relay_urls),
             ));
             self.active.insert(
                 id,
@@ -147,7 +147,7 @@ async fn supervise(
     metrics: Arc<AgentMetrics>,
     shutdown: CancellationToken,
     edge_cred: Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
-    relay_url: Option<RelayUrl>,
+    relay_urls: Arc<Vec<RelayUrl>>,
 ) {
     let edge_label = contact.id.fmt_short().to_string();
     let span = info_span!("edge_supervisor", edge = %edge_label);
@@ -166,7 +166,7 @@ async fn supervise(
                     info!("supervisor cancelled mid-dial");
                     return;
                 }
-                r = dial_and_serve(&endpoint, &contact, &service_map, &metrics, &edge_cred, relay_url.as_ref()) => r,
+                r = dial_and_serve(&endpoint, &contact, &service_map, &metrics, &edge_cred, &relay_urls) => r,
             };
 
             match outcome {
@@ -202,10 +202,10 @@ async fn dial_and_serve(
     service_map: &Arc<ServiceMap>,
     metrics: &Arc<AgentMetrics>,
     edge_cred: &Arc<arc_swap::ArcSwapOption<CachedEdgeCred>>,
-    relay_url: Option<&RelayUrl>,
+    relay_urls: &[RelayUrl],
 ) -> anyhow::Result<Duration> {
     let resolved = resolve_addrs(&contact.addrs).await;
-    if resolved.is_empty() && relay_url.is_none() {
+    if resolved.is_empty() && relay_urls.is_empty() {
         anyhow::bail!("no addresses resolved for edge {}", contact.id.fmt_short());
     }
     // Offer both: iroh prefers the direct path, falls back to relay.
@@ -213,7 +213,7 @@ async fn dial_and_serve(
     for sock in resolved {
         addr = addr.with_ip_addr(sock);
     }
-    if let Some(relay) = relay_url {
+    for relay in relay_urls {
         addr = addr.with_relay_url(relay.clone());
     }
     let conn = tokio::time::timeout(CONNECT_TIMEOUT, endpoint.connect(addr, ALPN_TUNNEL))

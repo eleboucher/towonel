@@ -100,7 +100,8 @@ pub(super) struct BootstrapResponse {
     edge_addresses: Vec<String>,
     iroh_endpoints: Vec<IrohEndpoint>,
 
-    /// Operator-configured iroh relay so agents don't need it in their env.
+    /// Operator-configured iroh relay(s), comma-separated, so agents don't need
+    /// them in their env.
     #[serde(skip_serializing_if = "Option::is_none")]
     relay_url: Option<String>,
 

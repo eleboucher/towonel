@@ -767,8 +767,8 @@ struct BuiltEdge {
 /// construct the Edge.
 ///
 /// The endpoint registers `ALPN_TUNNEL` for inbound agent connections.
-/// Pkarr discovery is disabled; a relay can be opted into via
-/// `TOWONEL_EDGE_RELAY_URL`.
+/// Pkarr discovery is disabled; one or more relays (comma-separated) can be
+/// opted into via `TOWONEL_EDGE_RELAY_URL`.
 async fn build_edge(
     secret_key: iroh::SecretKey,
     tenants: &[config::TenantEntry],

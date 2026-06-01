@@ -14,37 +14,42 @@ pub fn relay_mode_from_env(var_name: &str) -> RelayMode {
         })
 }
 
-/// `source` is a label used in the warning log on parse failure.
+/// Accepts a comma-separated list of relay URLs. `source` is a label used in
+/// the warning log on parse failure.
 #[must_use]
 pub fn relay_mode_from_url(url: &str, source: &str) -> RelayMode {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
+    let entries: Vec<&str> = url
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if entries.is_empty() {
         return RelayMode::Disabled;
     }
-    match RelayMap::try_from_iter([trimmed]) {
+    match RelayMap::try_from_iter(entries) {
         Ok(map) => RelayMode::Custom(map),
         Err(e) => {
-            warn!(source = source, url = trimmed, error = %e, "invalid relay URL; running without relay");
+            warn!(source = source, url = url, error = %e, "invalid relay URL(s); running without relay");
             RelayMode::Disabled
         }
     }
 }
 
-/// Parses a single relay URL, warning and returning `None` on failure.
-/// `source` is a label used in the warning log on parse failure.
+/// Parses a comma-separated list of relay URLs, warning and skipping any entry
+/// that fails to parse. `source` is a label used in the warning log.
 #[must_use]
-pub fn relay_url_from_str(url: &str, source: &str) -> Option<RelayUrl> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    match trimmed.parse::<RelayUrl>() {
-        Ok(relay) => Some(relay),
-        Err(e) => {
-            warn!(source = source, url = trimmed, error = %e, "invalid relay URL");
-            None
-        }
-    }
+pub fn relay_urls_from_str(url: &str, source: &str) -> Vec<RelayUrl> {
+    url.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.parse::<RelayUrl>() {
+            Ok(relay) => Some(relay),
+            Err(e) => {
+                warn!(source = source, url = s, error = %e, "invalid relay URL");
+                None
+            }
+        })
+        .collect()
 }
 
 // Unparsable entries are warned and skipped rather than failing startup.

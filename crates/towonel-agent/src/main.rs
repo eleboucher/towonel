@@ -241,12 +241,13 @@ async fn try_bring_up(
     let relay_mode = relay_url_str.as_deref().map_or(RelayMode::Disabled, |url| {
         towonel_common::relay::relay_mode_from_url(url, relay_source)
     });
-    // Attached to each edge's EndpointAddr as a relay fallback path.
-    let relay_url = relay_url_str
+    // Attached to each edge's EndpointAddr as relay fallback paths.
+    let relay_urls = relay_url_str
         .as_deref()
-        .and_then(|url| towonel_common::relay::relay_url_from_str(url, relay_source));
+        .map(|url| towonel_common::relay::relay_urls_from_str(url, relay_source))
+        .unwrap_or_default();
 
-    if relay_url.is_none() && ctx.edge_contacts.iter().all(|c| c.addrs.is_empty()) {
+    if relay_urls.is_empty() && ctx.edge_contacts.iter().all(|c| c.addrs.is_empty()) {
         warn!(
             "no edge advertised an iroh address and no relay is configured; waiting for \
              an edge to come online. Set TOWONEL_EDGE_IROH_PORT on the hub so it can \
@@ -352,7 +353,7 @@ async fn try_bring_up(
         service_map,
         metrics,
         &ctx.edge_cred,
-        relay_url.as_ref(),
+        relay_urls,
         shutdown,
     );
     info!(edges = ctx.edge_contacts.len(), "starting edge supervisors");
