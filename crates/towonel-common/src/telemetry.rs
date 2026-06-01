@@ -74,10 +74,12 @@ fn try_build_providers(
         return None;
     }
 
-    let resource = Resource::builder()
-        .with_service_name(service_name.to_owned())
-        .with_attribute(KeyValue::new("service.version", version.to_owned()))
-        .build();
+    let mut resource =
+        Resource::builder().with_attribute(KeyValue::new("service.version", version.to_owned()));
+    if std::env::var("OTEL_SERVICE_NAME").is_err() {
+        resource = resource.with_service_name(service_name.to_owned());
+    }
+    let resource = resource.build();
 
     let span_exporter = match opentelemetry_otlp::SpanExporter::builder()
         .with_http()
