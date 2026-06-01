@@ -30,6 +30,7 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
 opentelemetry-appender-tracing = { workspace = true }
+opentelemetry-http = { workspace = true }
 zeroize = { workspace = true }
 prometheus = { workspace = true }
 petname = { workspace = true }

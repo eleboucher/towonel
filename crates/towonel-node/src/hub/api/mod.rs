@@ -459,12 +459,15 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
                 .get("x-request-id")
                 .and_then(|v| v.to_str().ok())
                 .map_or_else(|| "-".to_string(), ToString::to_string);
-            tracing::info_span!(
+            let span = tracing::info_span!(
                 "http",
+                otel.kind = "server",
                 method = %req.method(),
                 uri = %req.uri(),
                 request_id = %request_id,
-            )
+            );
+            towonel_common::telemetry::set_parent_from_headers(&span, req.headers());
+            span
         })
         .on_response(DefaultOnResponse::new().level(Level::DEBUG));
     let correlated = tower::ServiceBuilder::new()

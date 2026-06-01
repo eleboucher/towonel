@@ -222,7 +222,10 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = [
   "http-proto",
   "reqwest-blocking-client",
 ] }
-opentelemetry-appender-tracing = { version = "0.32", default-features = false }
+opentelemetry-appender-tracing = { version = "0.32", default-features = false, features = [
+  "experimental_span_attributes",
+] }
+opentelemetry-http = { version = "0.32", default-features = false }
 tracing-opentelemetry = "0.33"
 webauthn-rs = { version = "0.5" }
 uuid = { version = "1", features = ["v5"] }

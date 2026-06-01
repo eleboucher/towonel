@@ -35,6 +35,7 @@ pub async fn check_response(resp: reqwest::Response) -> anyhow::Result<Vec<u8>> 
 }
 
 /// Sign `payload` with `kp` and POST it to `/v1/entries` as CBOR.
+#[tracing::instrument(skip_all, fields(otel.kind = "client"))]
 pub async fn submit_entry(
     client: &reqwest::Client,
     hub_url: &str,
@@ -49,6 +50,7 @@ pub async fn submit_entry(
     let resp = client
         .post(&url)
         .header(reqwest::header::CONTENT_TYPE, CBOR_CONTENT_TYPE)
+        .headers(towonel_common::telemetry::trace_headers())
         .body(body)
         .send()
         .await
@@ -113,6 +115,7 @@ pub fn is_unsupported_op(err: &anyhow::Error) -> bool {
 
 /// Fetch all signed entries for `tenant_id` and return the largest
 /// `sequence` number. Returns 0 when the tenant has no entries yet.
+#[tracing::instrument(skip_all, fields(otel.kind = "client"))]
 pub async fn fetch_latest_sequence(
     client: &reqwest::Client,
     hub_url: &str,
@@ -125,6 +128,7 @@ pub async fn fetch_latest_sequence(
     );
     let resp = client
         .get(&url)
+        .headers(towonel_common::telemetry::trace_headers())
         .send()
         .await
         .with_context(|| format!("failed to GET {url}"))?;

@@ -1,7 +1,11 @@
 use opentelemetry::KeyValue;
-use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
-use opentelemetry_sdk::{Resource, logs::SdkLoggerProvider, trace::SdkTracerProvider};
-use tracing_opentelemetry::OpenTelemetryLayer;
+use opentelemetry_appender_tracing::layer::{OpenTelemetryTracingBridge, TracingSpanAttributes};
+use opentelemetry_http::{HeaderExtractor, HeaderInjector};
+use opentelemetry_sdk::{
+    Resource, logs::SdkLoggerProvider, propagation::TraceContextPropagator,
+    trace::SdkTracerProvider,
+};
+use tracing_opentelemetry::{OpenTelemetryLayer, OpenTelemetrySpanExt};
 use tracing_subscriber::{EnvFilter, prelude::*};
 
 /// Holds active `OTel` providers and shuts them down on drop.
@@ -36,15 +40,22 @@ pub fn init(service_name: &str, version: &str) -> Option<TelemetryGuard> {
 
     if let Some((tracer_provider, logger_provider)) = providers {
         opentelemetry::global::set_tracer_provider(tracer_provider.clone());
+        // W3C propagator so traces cross HTTP boundaries via traceparent.
+        opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
 
         let tracer = opentelemetry::global::tracer(service_name.to_owned());
         let otel_trace_layer = OpenTelemetryLayer::new(tracer);
-        let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider).with_filter(
-            "info,opentelemetry=off,opentelemetry_sdk=off,opentelemetry_otlp=off,\
+        // Attach `request_id` from ancestor spans to each log record; trace_id
+        // and span_id are added automatically.
+        let otel_log_layer = OpenTelemetryTracingBridge::builder(&logger_provider)
+            .with_tracing_span_attributes(TracingSpanAttributes::allowlist(["request_id"]))
+            .build()
+            .with_filter(
+                "info,opentelemetry=off,opentelemetry_sdk=off,opentelemetry_otlp=off,\
              opentelemetry_appender_tracing=off,hyper=off,h2=off,reqwest=off,tonic=off"
-                .parse::<EnvFilter>()
-                .unwrap_or_else(|_| EnvFilter::new("info")),
-        );
+                    .parse::<EnvFilter>()
+                    .unwrap_or_else(|_| EnvFilter::new("info")),
+            );
 
         tracing_subscriber::registry()
             .with(filter)
@@ -114,4 +125,29 @@ fn try_build_providers(
         .build();
 
     Some((tracer_provider, logger_provider))
+}
+
+/// Build the W3C `traceparent` headers for the current span's trace context.
+///
+/// Returns an empty map when telemetry is disabled or no span is active.
+#[must_use]
+pub fn trace_headers() -> http::HeaderMap {
+    let cx = tracing::Span::current().context();
+    let mut headers = http::HeaderMap::new();
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut HeaderInjector(&mut headers));
+    });
+    headers
+}
+
+/// Set the remote trace context from an inbound request's `traceparent` as the
+/// parent of `span`. A no-op when no `traceparent` is present.
+pub fn set_parent_from_headers(span: &tracing::Span, headers: &http::HeaderMap) {
+    let parent = opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.extract(&HeaderExtractor(headers))
+    });
+    // Errors only when the span has no OpenTelemetry data (telemetry disabled).
+    if let Err(error) = span.set_parent(parent) {
+        tracing::trace!(?error, "no OpenTelemetry context to attach to span");
+    }
 }

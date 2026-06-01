@@ -733,6 +733,7 @@ pub async fn refresh_edge_contacts(
     Ok(contacts)
 }
 
+#[tracing::instrument(skip_all, fields(otel.kind = "client"))]
 async fn post_bootstrap(
     client: &reqwest::Client,
     token: &InviteToken,
@@ -754,6 +755,7 @@ async fn post_bootstrap(
     let resp = client
         .post(&url)
         .json(&req)
+        .headers(towonel_common::telemetry::trace_headers())
         .send()
         .await
         .with_context(|| format!("failed to POST {url}"))?;
