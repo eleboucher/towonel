@@ -137,7 +137,7 @@ tokio = { version = "1", features = [
 ] }
 clap = { version = "4", features = ["derive", "env"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 thiserror = "2"
 hex = "0.4"
 clienthello = "0.1"

@@ -59,7 +59,7 @@ pub fn init(service_name: &str, version: &str) -> Option<TelemetryGuard> {
 
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().json())
             .with(otel_trace_layer)
             .with(otel_log_layer)
             .init();
@@ -71,7 +71,7 @@ pub fn init(service_name: &str, version: &str) -> Option<TelemetryGuard> {
     } else {
         tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().json())
             .init();
         None
     }
