@@ -25,6 +25,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const DNS_TIMEOUT: Duration = Duration::from_secs(5);
 
 const REDIAL_DELAY: Duration = Duration::from_secs(5);
+/// Cap on the redial backoff when an edge keeps failing to connect.
+const REDIAL_MAX_DELAY: Duration = Duration::from_mins(1);
 
 struct ActiveSupervisor {
     token: CancellationToken,
@@ -151,46 +153,36 @@ async fn supervise(
 ) {
     let edge_label = contact.id.fmt_short().to_string();
     let span = info_span!("edge_supervisor", edge = %edge_label);
-    async move {
-        // Retry forever: a permanently-gone edge is cancelled by reconcile, so a
-        // transiently-down one is just re-dialed until it returns.
-        loop {
-            if shutdown.is_cancelled() {
-                info!("supervisor shutting down");
-                return;
-            }
-
-            let dial_started = Instant::now();
-            let outcome = tokio::select! {
-                () = shutdown.cancelled() => {
-                    info!("supervisor cancelled mid-dial");
-                    return;
-                }
-                r = dial_and_serve(&endpoint, &contact, &service_map, &metrics, &edge_cred, &relay_urls) => r,
-            };
-
-            match outcome {
-                Ok(session_duration) => {
-                    debug!(
-                        session_secs = session_duration.as_secs(),
-                        "session ended; redialing"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        dial_secs = dial_started.elapsed().as_secs(),
-                        error = %e,
-                        "edge dial failed"
-                    );
-                }
-            }
-
-            tokio::select! {
-                () = shutdown.cancelled() => return,
-                () = tokio::time::sleep(REDIAL_DELAY) => {}
-            }
-        }
-    }
+    // A permanently-gone edge is cancelled by reconcile, so this just redials a
+    // transiently-down one until it returns. Backoff escalates while dials keep
+    // failing fast and resets once a session has held for a while.
+    let (endpoint, contact, service_map, metrics, edge_cred, relay_urls) = (
+        &endpoint,
+        &contact,
+        &service_map,
+        &metrics,
+        &edge_cred,
+        &relay_urls,
+    );
+    crate::retry::supervise(
+        &format!("edge:{edge_label}"),
+        &shutdown,
+        REDIAL_DELAY,
+        REDIAL_MAX_DELAY,
+        || async move {
+            let session = dial_and_serve(
+                endpoint,
+                contact,
+                service_map,
+                metrics,
+                edge_cred,
+                relay_urls,
+            )
+            .await?;
+            debug!(session_secs = session.as_secs(), "session ended; redialing");
+            Ok(())
+        },
+    )
     .instrument(span)
     .await;
 }

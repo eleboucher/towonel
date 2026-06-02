@@ -4,15 +4,16 @@ mod hub_client;
 mod k8s_autodiscover;
 mod metrics;
 mod publish_tls;
+mod retry;
 mod stateless;
 mod tunnel;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use axum::Router;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
@@ -80,8 +81,16 @@ async fn main() -> anyhow::Result<()> {
 
 /// How often the agent re-queries the hub for the current trusted-edge set.
 const TOPOLOGY_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
-/// Delay between bring-up attempts while the hub is unreachable at startup.
-const BRING_UP_RETRY_DELAY: Duration = Duration::from_secs(10);
+/// Base delay between agent-lifecycle attempts (bring-up + serve). A hub that
+/// stays unreachable escalates this up to [`LIFECYCLE_MAX_DELAY`].
+const LIFECYCLE_BASE_DELAY: Duration = Duration::from_secs(10);
+/// Cap on the lifecycle restart backoff under a sustained outage.
+const LIFECYCLE_MAX_DELAY: Duration = Duration::from_mins(1);
+/// After the agent has been connected, losing all edge sessions for this long
+/// means the iroh endpoint is likely wedged (a prolonged WAN outage can leave
+/// magicsock unable to recover on the same endpoint). Serve returns so the
+/// lifecycle supervisor rebuilds with a fresh endpoint.
+const NO_SESSION_REBUILD_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// A live agent: stable endpoint + supervisor pool, built once and kept for the
 /// process lifetime (no identity churn after the first successful bring-up).
@@ -137,70 +146,126 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         }
     });
 
-    // Bring the agent up, retrying until the hub is reachable or we're stopped.
+    // The whole lifecycle — bring up a fresh endpoint, serve, tear down — is one
+    // supervised activity: serve returning (wedged endpoint) or bring-up failing
+    // (hub unreachable) both restart it, rebuilding from scratch.
+    retry::supervise(
+        "agent-lifecycle",
+        &shutdown,
+        LIFECYCLE_BASE_DELAY,
+        LIFECYCLE_MAX_DELAY,
+        || {
+            run_lifecycle(
+                &cli,
+                &token,
+                &agent_config,
+                &service_map,
+                &metrics,
+                &desired_tcp_bindings,
+                &desired_udp_bindings,
+                &shutdown,
+            )
+        },
+    )
+    .await;
+
+    health_handle.abort();
+    info!("towonel-agent stopped");
+    Ok(())
+}
+
+/// One full pass of the agent lifecycle: bring up a fresh iroh endpoint, serve
+/// until shutdown or the endpoint goes dark, then tear everything down. Returns
+/// `Ok(())` on graceful shutdown and `Err` when the caller should rebuild (hub
+/// unreachable at bring-up, or no edge sessions for too long).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "process-wide state passed by ref to the supervised lifecycle"
+)]
+#[expect(
+    clippy::large_futures,
+    reason = "lifecycle future is large; boxing it provides no benefit"
+)]
+async fn run_lifecycle(
+    cli: &Cli,
+    token: &str,
+    agent_config: &config::AgentConfig,
+    service_map: &Arc<tunnel::ServiceMap>,
+    metrics: &Arc<AgentMetrics>,
+    desired_tcp_bindings: &[(String, u16)],
+    desired_udp_bindings: &[(String, u16)],
+    shutdown: &CancellationToken,
+) -> anyhow::Result<()> {
     let BroughtUp {
         ctx,
         endpoint,
         cred_refresh,
         mut pool,
-    } = loop {
-        if shutdown.is_cancelled() {
-            health_handle.abort();
-            info!("towonel-agent stopped before bring-up");
-            return Ok(());
-        }
-        match try_bring_up(
-            &cli,
-            &token,
-            &agent_config,
-            &service_map,
-            &metrics,
-            &desired_tcp_bindings,
-            &desired_udp_bindings,
-            &shutdown,
-        )
-        .await
-        {
-            Ok(brought) => break brought,
-            Err(e) => {
-                error!(error = %e, delay_secs = BRING_UP_RETRY_DELAY.as_secs(),
-                       "agent bring-up failed; retrying");
-                tokio::select! {
-                    () = shutdown.cancelled() => {
-                        health_handle.abort();
-                        info!("towonel-agent stopped");
-                        return Ok(());
-                    }
-                    () = tokio::time::sleep(BRING_UP_RETRY_DELAY) => {}
-                }
-            }
-        }
-    };
+    } = try_bring_up(
+        cli,
+        token,
+        agent_config,
+        service_map,
+        metrics,
+        desired_tcp_bindings,
+        desired_udp_bindings,
+        shutdown,
+    )
+    .await?;
 
-    // Steady state: poll the hub and reconcile the pool — new edges dialed,
-    // departed ones stopped, healthy connections untouched.
     info!(
         interval_secs = TOPOLOGY_REFRESH_INTERVAL.as_secs(),
-        "agent up; entering topology-refresh loop"
+        "agent up; serving"
     );
+    let outcome = serve(token, &ctx, &mut pool, metrics, shutdown).await;
+
+    // Always tear down before returning: the next lifecycle attempt binds a new
+    // endpoint, and a fixed iroh port would clash with a leaked one.
+    pool.shutdown().await;
+    cred_refresh.abort();
+    endpoint.close().await;
+    outcome
+}
+
+/// Steady state: poll the hub and reconcile the supervisor pool, and watch for
+/// the agent going dark. Returns `Ok(())` on shutdown, or `Err` once the agent
+/// has had zero edge sessions for [`NO_SESSION_REBUILD_TIMEOUT`] after having
+/// been connected — the signal that the endpoint is wedged and must be rebuilt.
+async fn serve(
+    token: &str,
+    ctx: &stateless::BootstrapContext,
+    pool: &mut edge_session::SupervisorPool,
+    metrics: &AgentMetrics,
+    shutdown: &CancellationToken,
+) -> anyhow::Result<()> {
+    // Arms only after the first session, so an agent still waiting for edges to
+    // come online is never torn down — only a regression from connected to dark.
+    let mut armed = false;
+    let mut dark_since: Option<Instant> = None;
     loop {
         tokio::select! {
-            () = shutdown.cancelled() => break,
+            () = shutdown.cancelled() => return Ok(()),
             () = tokio::time::sleep(TOPOLOGY_REFRESH_INTERVAL) => {
-                match stateless::refresh_edge_contacts(&token, &ctx).await {
+                match stateless::refresh_edge_contacts(token, ctx).await {
                     Ok(contacts) => pool.reconcile(&contacts),
                     Err(e) => warn!(error = %e, "topology refresh failed; keeping current edge set"),
+                }
+
+                if metrics.active_edge_sessions() > 0 {
+                    armed = true;
+                    dark_since = None;
+                } else if armed {
+                    let since = *dark_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() >= NO_SESSION_REBUILD_TIMEOUT {
+                        return Err(anyhow!(
+                            "no edge sessions for {}s after being connected; rebuilding endpoint",
+                            since.elapsed().as_secs()
+                        ));
+                    }
                 }
             }
         }
     }
-
-    pool.shutdown().await;
-    cred_refresh.abort();
-    endpoint.close().await;
-    health_handle.abort();
-    info!("towonel-agent stopped");
-    Ok(())
 }
 
 /// Bootstrap, bind the iroh endpoint, register, publish, and start a supervisor

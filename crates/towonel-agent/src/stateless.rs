@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use backon::{BackoffBuilder, ExponentialBuilder, Retryable};
+use backon::BackoffBuilder;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use iroh::EndpointId;
@@ -33,19 +33,6 @@ pub const INVITE_TOKEN_ENV: &str = "TOWONEL_INVITE_TOKEN";
 /// Overrides the hub-returned allowlist. Escape hatch for local testing
 /// or pinning a specific edge during an incident.
 pub const TRUSTED_EDGES_ENV: &str = "TOWONEL_AGENT_TRUSTED_EDGES";
-
-/// Register retries to tolerate sequence conflicts from sibling replicas.
-const REGISTER_MAX_ATTEMPTS: usize = 10;
-
-/// Backoff policy for sequence-conflict retries. Jittered so N replicas
-/// booting simultaneously don't re-collide on every retry.
-pub fn retry_policy() -> ExponentialBuilder {
-    ExponentialBuilder::default()
-        .with_min_delay(Duration::from_millis(50))
-        .with_max_delay(Duration::from_secs(2))
-        .with_max_times(REGISTER_MAX_ATTEMPTS - 1)
-        .with_jitter()
-}
 
 /// One trusted edge. `addrs` are resolved at dial time so DNS changes
 /// don't require a restart. Empty = no advertised iroh endpoint.
@@ -161,32 +148,31 @@ pub async fn bootstrap(token_str: &str) -> anyhow::Result<BootstrapContext> {
 }
 
 /// Submit an `UpsertAgent` config entry authorizing the ephemeral iroh key
-/// under the tenant identity. Retries on `sequence_conflict` up to
-/// [`REGISTER_MAX_ATTEMPTS`] times with jittered backoff, so N replicas
-/// racing at startup all eventually succeed.
+/// under the tenant identity. Retries on `sequence_conflict` (and rate limits)
+/// with jittered backoff, so N replicas racing at startup all eventually
+/// succeed.
 pub async fn register(ctx: &BootstrapContext) -> anyhow::Result<()> {
     let agent_id = ctx.agent_id();
-    (|| async {
-        let latest = fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await?;
-        let sequence = latest + 1;
-        let payload = ConfigPayload {
-            version: 1,
-            tenant_id: ctx.tenant_id,
-            sequence,
-            timestamp: towonel_common::time::now_ms(),
-            op: ConfigOp::UpsertAgent {
-                agent_id: agent_id.clone(),
-            },
-        };
-        submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await?;
-        info!(%agent_id, sequence, "registered agent");
-        Ok(())
-    })
-    .retry(retry_policy())
-    .when(|e| is_sequence_conflict(e) || is_rate_limited(e))
-    .notify(|e, dur| {
-        info!(error = %e, backoff_ms = u64::try_from(dur.as_millis()).unwrap_or(u64::MAX), "retrying UpsertAgent after sequence conflict");
-    })
+    crate::retry::operation(
+        "UpsertAgent",
+        |e| is_sequence_conflict(e) || is_rate_limited(e),
+        || async {
+            let sequence =
+                fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp).await? + 1;
+            let payload = ConfigPayload {
+                version: 1,
+                tenant_id: ctx.tenant_id,
+                sequence,
+                timestamp: towonel_common::time::now_ms(),
+                op: ConfigOp::UpsertAgent {
+                    agent_id: agent_id.clone(),
+                },
+            };
+            submit_entry(&ctx.client, &ctx.hub_url, &ctx.tenant_kp, payload).await?;
+            info!(%agent_id, sequence, "registered agent");
+            Ok(())
+        },
+    )
     .await
 }
 
@@ -250,10 +236,7 @@ async fn submit_with_retry(
     op: ConfigOp,
     label: &str,
 ) -> anyhow::Result<()> {
-    // Independent budgets: a 429 storm shouldn't burn the conflict-retry
-    // quota and vice versa.
-    let mut conflict_backoff = retry_policy().build();
-    let mut rate_limit_backoff = retry_policy().build();
+    let mut backoff = crate::retry::operation_backoff().build();
     loop {
         let payload = ConfigPayload {
             version: 1,
@@ -267,34 +250,27 @@ async fn submit_with_retry(
                 *next_seq += 1;
                 return Ok(());
             }
-            Err(e) if is_sequence_conflict(&e) => {
-                let Some(delay) = conflict_backoff.next() else {
+            Err(e) if is_sequence_conflict(&e) || is_rate_limited(&e) => {
+                let Some(delay) = backoff.next() else {
                     return Err(e);
                 };
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "backoff delay is bounded well under u64::MAX millis"
-                )]
-                let backoff_ms = delay.as_millis() as u64;
-                warn!(backoff_ms, op = label, "sequence conflict, retrying");
+                let conflict = is_sequence_conflict(&e);
+                warn!(
+                    backoff_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+                    op = label,
+                    conflict,
+                    "hub rejected entry; retrying"
+                );
                 tokio::time::sleep(delay).await;
-                *next_seq = retry_on_rate_limit(label, || {
-                    fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp)
-                })
-                .await?
-                    + 1;
-            }
-            Err(e) if is_rate_limited(&e) => {
-                let Some(delay) = rate_limit_backoff.next() else {
-                    return Err(e);
-                };
-                #[expect(
-                    clippy::cast_possible_truncation,
-                    reason = "backoff delay is bounded well under u64::MAX millis"
-                )]
-                let backoff_ms = delay.as_millis() as u64;
-                warn!(backoff_ms, op = label, "hub rate-limited, retrying");
-                tokio::time::sleep(delay).await;
+                // On a conflict a sibling claimed this slot; re-read the latest
+                // sequence before retrying. A rate limit just needs the wait.
+                if conflict {
+                    *next_seq = retry_on_rate_limit(label, || {
+                        fetch_latest_sequence(&ctx.client, &ctx.hub_url, &ctx.tenant_kp)
+                    })
+                    .await?
+                        + 1;
+                }
             }
             Err(e) => return Err(e),
         }

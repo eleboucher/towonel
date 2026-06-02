@@ -1,14 +1,10 @@
 use anyhow::{Context, anyhow};
-use backon::BackoffBuilder;
-use tracing::warn;
 
 use towonel_common::CBOR_CONTENT_TYPE;
 use towonel_common::config_entry::{ConfigPayload, SignedConfigEntry};
 use towonel_common::hub_error;
 pub use towonel_common::hub_error::HubApiError;
 use towonel_common::identity::TenantKeypair;
-
-use crate::stateless::retry_policy;
 
 /// Check an HTTP response and return the body bytes on success. On failure,
 /// parses the hub's standard error envelope (`{"error":{"code","message"}}`)
@@ -75,26 +71,12 @@ pub fn is_rate_limited(err: &anyhow::Error) -> bool {
         .is_some_and(|e| e.status == 429)
 }
 
-pub async fn retry_on_rate_limit<T, F, Fut>(label: &str, mut f: F) -> anyhow::Result<T>
+pub async fn retry_on_rate_limit<T, F, Fut>(label: &str, f: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
-    let mut backoff = retry_policy().build();
-    loop {
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(e) if is_rate_limited(&e) => {
-                let Some(delay) = backoff.next() else {
-                    return Err(e);
-                };
-                let backoff_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
-                warn!(backoff_ms, op = label, "hub rate-limited, retrying");
-                tokio::time::sleep(delay).await;
-            }
-            Err(e) => return Err(e),
-        }
-    }
+    crate::retry::operation(label, is_rate_limited, f).await
 }
 
 /// `true` if the hub rejected the entry because it doesn't recognize the
