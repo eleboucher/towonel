@@ -279,6 +279,21 @@ async fn list_invites_returns_all() {
 }
 
 #[tokio::test]
+async fn list_invites_includes_region() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    create_invite_with_region(&hub, &client, "regional", &["r.test"], Some("ca"), &["EU"]).await;
+
+    let (status, body) = get_json(&client, &hub.url("/v1/invites"), Some(OPERATOR_KEY)).await;
+    assert_eq!(status, 200);
+    let invites = body["invites"].as_array().unwrap();
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0]["region"], "CA");
+    assert_eq!(invites[0]["failover_regions"], json!(["EU"]));
+}
+
+#[tokio::test]
 async fn list_invites_requires_operator_auth() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();

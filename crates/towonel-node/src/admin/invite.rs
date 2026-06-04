@@ -119,6 +119,10 @@ struct InviteItem {
     name: String,
     status: String,
     expires_at_ms: Option<u64>,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    failover_regions: Vec<String>,
 }
 
 #[derive(Tabled)]
@@ -129,6 +133,8 @@ struct InviteRow<'a> {
     name: &'a str,
     #[tabled(rename = "STATUS")]
     status: &'a str,
+    #[tabled(rename = "REGION")]
+    region: String,
     #[tabled(rename = "EXPIRES_AT_MS")]
     expires: String,
 }
@@ -161,6 +167,11 @@ pub async fn cmd_invite_list(
             id: &i.invite_id,
             name: &i.name,
             status: &i.status,
+            region: match (i.region.as_deref(), i.failover_regions.as_slice()) {
+                (None, _) => "-".to_string(),
+                (Some(r), []) => r.to_string(),
+                (Some(r), failover) => format!("{r} (+{})", failover.join(",")),
+            },
             expires: i
                 .expires_at_ms
                 .map_or_else(|| "never".to_string(), |ts| ts.to_string()),

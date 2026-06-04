@@ -280,6 +280,8 @@ pub(super) struct InviteSummary {
     expires_at_ms: Option<u64>,
     tenant_id: String,
     created_at_ms: u64,
+    region: Option<String>,
+    failover_regions: Vec<String>,
 }
 
 impl From<InviteRow> for InviteSummary {
@@ -292,6 +294,8 @@ impl From<InviteRow> for InviteSummary {
             expires_at_ms: row.expires_at_ms,
             tenant_id: row.tenant_id.to_string(),
             created_at_ms: row.created_at_ms,
+            region: row.region,
+            failover_regions: row.failover_regions,
         }
     }
 }
