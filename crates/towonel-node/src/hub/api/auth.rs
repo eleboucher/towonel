@@ -455,14 +455,9 @@ pub(super) async fn issue_login_challenge_response(
     }))
 }
 
-/// Resolve the client IP used for the lockout counter. When the hub sits
-/// behind a reverse proxy (the typical `hub-caddy` deployment terminates
-/// TLS in Caddy and forwards on loopback), the socket peer is `127.0.0.1`
-/// or `::1`; in that case the right-most entry of `X-Forwarded-For` is the
-/// actual client IP that Caddy observed. For direct deployments we trust
-/// only the socket peer.
+/// Resolve the client IP used for the lockout counter.
 pub(super) fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) -> String {
-    if !peer.ip().is_loopback() {
+    if !peer_is_trusted_proxy(peer.ip()) {
         return peer.ip().to_string();
     }
     if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
@@ -474,6 +469,13 @@ pub(super) fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) 
         }
     }
     peer.ip().to_string()
+}
+
+const fn peer_is_trusted_proxy(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
+    }
 }
 
 pub(super) async fn record_login_failure(state: &Arc<AppState>, email_key: &str, ip_key: &str) {
@@ -684,6 +686,12 @@ mod tests {
     fn ip_key_falls_back_to_peer_when_xff_missing() {
         let h = HeaderMap::new();
         assert_eq!(client_ip_key(&peer("127.0.0.1"), &h), "127.0.0.1");
+    }
+
+    #[test]
+    fn ip_key_uses_xff_when_peer_is_private() {
+        let h = headers_with_xff("203.0.113.5");
+        assert_eq!(client_ip_key(&peer("10.42.0.7"), &h), "203.0.113.5");
     }
 
     #[test]

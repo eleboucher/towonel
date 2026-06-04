@@ -629,6 +629,25 @@ fn signed_public_routes() -> Router<Arc<AppState>> {
         .route("/v1/agent/refresh", post(agent_refresh::post_refresh))
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ProxyAwareIpKeyExtractor;
+
+impl tower_governor::key_extractor::KeyExtractor for ProxyAwareIpKeyExtractor {
+    type Key = String;
+
+    fn extract<T>(
+        &self,
+        req: &axum::http::Request<T>,
+    ) -> Result<Self::Key, tower_governor::GovernorError> {
+        let peer = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0)
+            .ok_or(tower_governor::GovernorError::UnableToExtractKey)?;
+        Ok(auth::client_ip_key(&peer, req.headers()))
+    }
+}
+
 fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<Arc<AppState>> {
     if !rate_limit {
         return router;
@@ -639,8 +658,9 @@ fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<A
             reason = "config builder values are constants; failure is a programmer error caught at startup"
         )]
         tower_governor::governor::GovernorConfigBuilder::default()
-            .per_second(2)
-            .burst_size(20)
+            .key_extractor(ProxyAwareIpKeyExtractor)
+            .per_second(5)
+            .burst_size(30)
             .finish()
             .expect("tower_governor config is valid"),
     );
