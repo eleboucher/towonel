@@ -15,11 +15,24 @@
         "hide": 0
       },
       {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {
+          "query": "label_values(process_resident_memory_bytes{job=~\"towonel-(hub|edge).*\"}, cluster)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      },
+      {
         "name": "instance",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "query": {
-          "query": "label_values(process_resident_memory_bytes, instance)",
+          "query": "label_values(process_resident_memory_bytes{job=~\"towonel-(hub|edge).*\", cluster=~\"$cluster\"}, instance)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -62,7 +75,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(towonel_edge_active_connections{instance=~\"$instance\"})",
+          "expr": "sum(towonel_edge_active_connections{cluster=~\"$cluster\", instance=~\"$instance\"})",
           "legendFormat": "active"
         }
       ]
@@ -91,7 +104,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_edge_connections_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_edge_connections_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "conns/s"
         }
       ]
@@ -120,7 +133,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_edge_bytes_in_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_edge_bytes_in_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "in"
         }
       ]
@@ -149,7 +162,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_edge_bytes_out_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_edge_bytes_out_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "out"
         }
       ]
@@ -174,7 +187,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "towonel_edge_active_connections{instance=~\"$instance\"}",
+          "expr": "towonel_edge_active_connections{cluster=~\"$cluster\", instance=~\"$instance\"}",
           "legendFormat": "{{instance}}"
         }
       ]
@@ -199,7 +212,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "rate(towonel_edge_connections_total{instance=~\"$instance\"}[5m])",
+          "expr": "rate(towonel_edge_connections_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m])",
           "legendFormat": "{{instance}}"
         }
       ]
@@ -229,12 +242,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (instance) (rate(towonel_edge_bytes_in_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (instance) (rate(towonel_edge_bytes_in_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{instance}} in"
         },
         {
           "refId": "B",
-          "expr": "sum by (instance) (rate(towonel_edge_bytes_out_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (instance) (rate(towonel_edge_bytes_out_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{instance}} out"
         }
       ]
@@ -271,7 +284,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(towonel_edge_active_sessions{instance=~\"$instance\"})",
+          "expr": "sum(towonel_edge_active_sessions{cluster=~\"$cluster\", instance=~\"$instance\"})",
           "legendFormat": "sessions"
         }
       ]
@@ -300,7 +313,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_edge_sessions_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_edge_sessions_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "registered"
         }
       ]
@@ -337,7 +350,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_edge_sessions_rejected_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_edge_sessions_rejected_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "rejected"
         }
       ]
@@ -374,7 +387,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_edge_route_no_session_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_edge_route_no_session_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "no session"
         }
       ]
@@ -399,7 +412,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "towonel_edge_active_sessions{instance=~\"$instance\"}",
+          "expr": "towonel_edge_active_sessions{cluster=~\"$cluster\", instance=~\"$instance\"}",
           "legendFormat": "{{instance}}"
         }
       ]
@@ -425,7 +438,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (reason) (rate(towonel_edge_sessions_rejected_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (reason) (rate(towonel_edge_sessions_rejected_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{reason}}"
         }
       ]
@@ -456,12 +469,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (instance) (rate(towonel_edge_connections_rejected_overload_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (instance) (rate(towonel_edge_connections_rejected_overload_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{instance}} overload"
         },
         {
           "refId": "B",
-          "expr": "sum by (instance) (rate(towonel_edge_route_no_session_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (instance) (rate(towonel_edge_route_no_session_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{instance}} route miss"
         }
       ]
@@ -490,7 +503,7 @@
         "defaults": {"unit": "short", "decimals": 0, "color": {"mode": "fixed", "fixedColor": "blue"}},
         "overrides": []
       },
-      "targets": [{"refId": "A", "expr": "max(towonel_hub_tenants_total)", "legendFormat": "tenants"}]
+      "targets": [{"refId": "A", "expr": "max(towonel_hub_tenants_total{cluster=~\"$cluster\"})", "legendFormat": "tenants"}]
     },
     {
       "id": 23,
@@ -508,7 +521,7 @@
         "defaults": {"unit": "ops", "decimals": 2, "color": {"mode": "fixed", "fixedColor": "green"}},
         "overrides": []
       },
-      "targets": [{"refId": "A", "expr": "sum(rate(towonel_hub_entries_accepted_total[5m]))", "legendFormat": "accepted"}]
+      "targets": [{"refId": "A", "expr": "sum(rate(towonel_hub_entries_accepted_total{cluster=~\"$cluster\"}[5m]))", "legendFormat": "accepted"}]
     },
     {
       "id": 24,
@@ -538,7 +551,7 @@
         },
         "overrides": []
       },
-      "targets": [{"refId": "A", "expr": "sum(rate(towonel_hub_entries_rejected_total[5m]))", "legendFormat": "rejected"}]
+      "targets": [{"refId": "A", "expr": "sum(rate(towonel_hub_entries_rejected_total{cluster=~\"$cluster\"}[5m]))", "legendFormat": "rejected"}]
     },
     {
       "id": 22,
@@ -574,7 +587,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_hub_entries_rejected_total[5m])) / clamp_min(sum(rate(towonel_hub_entries_accepted_total[5m])) + sum(rate(towonel_hub_entries_rejected_total[5m])), 1)",
+          "expr": "sum(rate(towonel_hub_entries_rejected_total{cluster=~\"$cluster\"}[5m])) / clamp_min(sum(rate(towonel_hub_entries_accepted_total{cluster=~\"$cluster\"}[5m])) + sum(rate(towonel_hub_entries_rejected_total{cluster=~\"$cluster\"}[5m])), 1)",
           "legendFormat": "reject ratio"
         }
       ]
@@ -597,8 +610,8 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "sum(rate(towonel_hub_entries_accepted_total[5m]))", "legendFormat": "accepted"},
-        {"refId": "B", "expr": "sum(rate(towonel_hub_entries_rejected_total[5m]))", "legendFormat": "rejected"}
+        {"refId": "A", "expr": "sum(rate(towonel_hub_entries_accepted_total{cluster=~\"$cluster\"}[5m]))", "legendFormat": "accepted"},
+        {"refId": "B", "expr": "sum(rate(towonel_hub_entries_rejected_total{cluster=~\"$cluster\"}[5m]))", "legendFormat": "rejected"}
       ]
     },
     {
@@ -619,7 +632,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "sum by (reason) (rate(towonel_hub_entries_rejected_total[5m]))", "legendFormat": "{{reason}}"}
+        {"refId": "A", "expr": "sum by (reason) (rate(towonel_hub_entries_rejected_total{cluster=~\"$cluster\"}[5m]))", "legendFormat": "{{reason}}"}
       ]
     },
 
@@ -648,7 +661,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "sum by (endpoint) (rate(towonel_hub_requests_total[5m]))", "legendFormat": "{{endpoint}}"}
+        {"refId": "A", "expr": "sum by (endpoint) (rate(towonel_hub_requests_total{cluster=~\"$cluster\"}[5m]))", "legendFormat": "{{endpoint}}"}
       ]
     },
     {
@@ -669,7 +682,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "sum by (status) (rate(towonel_hub_requests_total[5m]))", "legendFormat": "{{status}}"}
+        {"refId": "A", "expr": "sum by (status) (rate(towonel_hub_requests_total{cluster=~\"$cluster\"}[5m]))", "legendFormat": "{{status}}"}
       ]
     },
     {
@@ -694,12 +707,12 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_hub_requests_total{status=~\"5..\"}[5m])) / clamp_min(sum(rate(towonel_hub_requests_total[5m])), 1)",
+          "expr": "sum(rate(towonel_hub_requests_total{status=~\"5..\", cluster=~\"$cluster\"}[5m])) / clamp_min(sum(rate(towonel_hub_requests_total{cluster=~\"$cluster\"}[5m])), 1)",
           "legendFormat": "5xx ratio"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(towonel_hub_requests_total{status=~\"4..\"}[5m])) / clamp_min(sum(rate(towonel_hub_requests_total[5m])), 1)",
+          "expr": "sum(rate(towonel_hub_requests_total{status=~\"4..\", cluster=~\"$cluster\"}[5m])) / clamp_min(sum(rate(towonel_hub_requests_total{cluster=~\"$cluster\"}[5m])), 1)",
           "legendFormat": "4xx ratio"
         }
       ]
@@ -737,7 +750,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (provider, outcome) (rate(towonel_hub_oidc_jwks_refresh_total[5m]))",
+          "expr": "sum by (provider, outcome) (rate(towonel_hub_oidc_jwks_refresh_total{cluster=~\"$cluster\"}[5m]))",
           "legendFormat": "{{provider}} {{outcome}}"
         }
       ]
@@ -772,7 +785,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "time() - towonel_hub_oidc_jwks_last_refresh_success_timestamp_seconds",
+          "expr": "time() - towonel_hub_oidc_jwks_last_refresh_success_timestamp_seconds{cluster=~\"$cluster\"}",
           "legendFormat": "{{provider}}"
         }
       ]
@@ -803,7 +816,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "process_resident_memory_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "process_resident_memory_bytes{job=~\"towonel-(hub|edge).*\", cluster=~\"$cluster\", instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
       ]
     },
     {
@@ -824,7 +837,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "rate(process_cpu_seconds_total{job=~\"towonel-(hub|edge).*\", cluster=~\"$cluster\", instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}"}
       ]
     },
     {
@@ -846,8 +859,8 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "process_open_fds{instance=~\"$instance\"}", "legendFormat": "{{instance}} open"},
-        {"refId": "B", "expr": "process_max_fds{instance=~\"$instance\"}", "legendFormat": "{{instance}} max"}
+        {"refId": "A", "expr": "process_open_fds{job=~\"towonel-(hub|edge).*\", cluster=~\"$cluster\", instance=~\"$instance\"}", "legendFormat": "{{instance}} open"},
+        {"refId": "B", "expr": "process_max_fds{job=~\"towonel-(hub|edge).*\", cluster=~\"$cluster\", instance=~\"$instance\"}", "legendFormat": "{{instance}} max"}
       ]
     },
     {
@@ -868,7 +881,7 @@
         "textMode": "auto"
       },
       "targets": [
-        {"refId": "A", "expr": "time() - process_start_time_seconds{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "time() - process_start_time_seconds{job=~\"towonel-(hub|edge).*\", cluster=~\"$cluster\", instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
       ]
     }
   ]

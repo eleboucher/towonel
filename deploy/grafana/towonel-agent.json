@@ -15,11 +15,24 @@
         "hide": 0
       },
       {
+        "name": "cluster",
+        "type": "query",
+        "datasource": {"type": "prometheus", "uid": "${datasource}"},
+        "query": {
+          "query": "label_values(towonel_agent_streams_active, cluster)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {"text": "All", "value": "$__all"}
+      },
+      {
         "name": "instance",
         "type": "query",
         "datasource": {"type": "prometheus", "uid": "${datasource}"},
         "query": {
-          "query": "label_values(towonel_agent_streams_active, instance)",
+          "query": "label_values(towonel_agent_streams_active{cluster=~\"$cluster\"}, instance)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -62,7 +75,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(towonel_agent_streams_active{instance=~\"$instance\"})",
+          "expr": "sum(towonel_agent_streams_active{cluster=~\"$cluster\", instance=~\"$instance\"})",
           "legendFormat": "active"
         }
       ]
@@ -90,7 +103,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_agent_streams_accepted_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_agent_streams_accepted_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "accepted"
         }
       ]
@@ -127,7 +140,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m])) / sum(rate(towonel_agent_streams_accepted_total{instance=~\"$instance\"}[5m]))) or on() vector(0)",
+          "expr": "(sum(rate(towonel_agent_stream_errors_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m])) / sum(rate(towonel_agent_streams_accepted_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))) or on() vector(0)",
           "legendFormat": "err ratio"
         }
       ]
@@ -163,7 +176,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(towonel_agent_edge_session_state{instance=~\"$instance\"})",
+          "expr": "sum(towonel_agent_edge_session_state{cluster=~\"$cluster\", instance=~\"$instance\"})",
           "legendFormat": "edges up"
         }
       ]
@@ -199,7 +212,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "towonel_agent_edge_session_state{instance=~\"$instance\"}",
+          "expr": "towonel_agent_edge_session_state{cluster=~\"$cluster\", instance=~\"$instance\"}",
           "legendFormat": "{{instance}} {{edge}}"
         }
       ]
@@ -232,7 +245,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "towonel_agent_edge_path{instance=~\"$instance\"} == 1",
+          "expr": "towonel_agent_edge_path{cluster=~\"$cluster\", instance=~\"$instance\"} == 1",
           "legendFormat": "{{edge}} {{path}}"
         }
       ]
@@ -257,7 +270,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "towonel_agent_streams_active{instance=~\"$instance\"}",
+          "expr": "towonel_agent_streams_active{cluster=~\"$cluster\", instance=~\"$instance\"}",
           "legendFormat": "{{instance}}"
         }
       ]
@@ -288,17 +301,17 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(rate(towonel_agent_streams_accepted_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_agent_streams_accepted_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "accepted"
         },
         {
           "refId": "B",
-          "expr": "sum(rate(towonel_agent_streams_completed_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_agent_streams_completed_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "completed"
         },
         {
           "refId": "C",
-          "expr": "sum(rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum(rate(towonel_agent_stream_errors_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "errors"
         }
       ]
@@ -332,7 +345,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (reason) (rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (reason) (rate(towonel_agent_stream_errors_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{reason}}"
         }
       ]
@@ -357,7 +370,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (instance, reason) (rate(towonel_agent_stream_errors_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (instance, reason) (rate(towonel_agent_stream_errors_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{instance}} {{reason}}"
         }
       ]
@@ -396,7 +409,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (instance, direction) (rate(towonel_agent_bytes_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (instance, direction) (rate(towonel_agent_bytes_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{instance}} {{direction}}"
         }
       ]
@@ -430,7 +443,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (edge) (rate(towonel_agent_edge_session_reconnects_total{instance=~\"$instance\"}[5m]))",
+          "expr": "sum by (edge) (rate(towonel_agent_edge_session_reconnects_total{cluster=~\"$cluster\", instance=~\"$instance\"}[5m]))",
           "legendFormat": "{{edge}}"
         }
       ]
@@ -459,7 +472,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "towonel_agent_info{instance=~\"$instance\"}",
+          "expr": "towonel_agent_info{cluster=~\"$cluster\", instance=~\"$instance\"}",
           "legendFormat": "__auto",
           "instant": true,
           "format": "table"
@@ -491,7 +504,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "process_resident_memory_bytes{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "process_resident_memory_bytes{job=\"towonel-agent\", cluster=~\"$cluster\", instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
       ]
     },
     {
@@ -512,7 +525,7 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "rate(process_cpu_seconds_total{instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "rate(process_cpu_seconds_total{job=\"towonel-agent\", cluster=~\"$cluster\", instance=~\"$instance\"}[5m])", "legendFormat": "{{instance}}"}
       ]
     },
     {
@@ -534,8 +547,8 @@
         "tooltip": {"mode": "multi", "sort": "desc"}
       },
       "targets": [
-        {"refId": "A", "expr": "process_open_fds{instance=~\"$instance\"}", "legendFormat": "{{instance}} open"},
-        {"refId": "B", "expr": "process_max_fds{instance=~\"$instance\"}", "legendFormat": "{{instance}} max"}
+        {"refId": "A", "expr": "process_open_fds{job=\"towonel-agent\", cluster=~\"$cluster\", instance=~\"$instance\"}", "legendFormat": "{{instance}} open"},
+        {"refId": "B", "expr": "process_max_fds{job=\"towonel-agent\", cluster=~\"$cluster\", instance=~\"$instance\"}", "legendFormat": "{{instance}} max"}
       ]
     },
     {
@@ -556,7 +569,7 @@
         "textMode": "auto"
       },
       "targets": [
-        {"refId": "A", "expr": "time() - process_start_time_seconds{instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
+        {"refId": "A", "expr": "time() - process_start_time_seconds{job=\"towonel-agent\", cluster=~\"$cluster\", instance=~\"$instance\"}", "legendFormat": "{{instance}}"}
       ]
     }
   ]
