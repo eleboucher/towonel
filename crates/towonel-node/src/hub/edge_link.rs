@@ -172,6 +172,7 @@ async fn handle_connection(
         "edge_link authenticated"
     );
 
+    let public_ips = canonical_ips(&public_ips);
     let edge_public_ips = public_ips.clone();
 
     let signing_keys = current_signing_keys(&state)?;
@@ -386,6 +387,11 @@ async fn push_routes(
             Err(broadcast::error::RecvError::Closed) => return Ok(()),
         }
     }
+}
+
+/// Covers edges that predate config-side IP normalization.
+fn canonical_ips(ips: &[String]) -> Vec<String> {
+    ips.iter().map(|s| crate::config::canonical_ip(s)).collect()
 }
 
 async fn filter_listeners_for_edge(

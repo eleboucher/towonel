@@ -119,8 +119,10 @@ pub(super) async fn post_port(
     State(state): State<Arc<AppState>>,
     principal: Principal,
     Path(id): Path<String>,
-    axum::Json(req): axum::Json<ReservePortRequest>,
+    axum::Json(mut req): axum::Json<ReservePortRequest>,
 ) -> Response {
+    // Stored ip_address must string-match edge public_ips.
+    req.ip = req.ip.map(|s| crate::config::canonical_ip(&s));
     let tenant_id: TenantId = match id.parse() {
         Ok(t) => t,
         Err(e) => return invalid_request(format!("invalid tenant_id: {e}")),

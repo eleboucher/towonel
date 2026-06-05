@@ -1033,10 +1033,17 @@ fn resolve_public_ips(raw: Vec<String>) -> Vec<String> {
                 .strip_prefix('[')
                 .and_then(|s| s.strip_suffix(']'))
                 .unwrap_or(trimmed);
-            out.push(ip.to_string());
+            out.push(canonical_ip(ip));
         }
     }
     out
+}
+
+/// Canonical text form of an IP (compresses/lowercases IPv6) so string
+/// comparisons can't miss on formatting; non-IP input passes through.
+pub fn canonical_ip(s: &str) -> String {
+    s.parse::<std::net::IpAddr>()
+        .map_or_else(|_| s.to_string(), |ip| ip.to_string())
 }
 
 fn parse_json_opt<T: serde::de::DeserializeOwned>(
@@ -1050,6 +1057,26 @@ fn parse_json_opt<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_ip_normalizes_ipv6_forms() {
+        assert_eq!(
+            canonical_ip("2001:41D0:20A:900::14D0"),
+            "2001:41d0:20a:900::14d0"
+        );
+        assert_eq!(
+            canonical_ip("2001:41d0:020a:0900::14d0"),
+            "2001:41d0:20a:900::14d0"
+        );
+        assert_eq!(canonical_ip("54.36.18.175"), "54.36.18.175");
+        assert_eq!(canonical_ip("edge-eu.towonel.dev"), "edge-eu.towonel.dev");
+    }
+
+    #[test]
+    fn resolve_public_ips_canonicalizes_entries() {
+        let out = resolve_public_ips(vec!["54.36.18.175, [2001:41D0:20A:900::14D0]".to_string()]);
+        assert_eq!(out, vec!["54.36.18.175", "2001:41d0:20a:900::14d0"]);
+    }
 
     #[test]
     fn proxy_protocol_disabled_is_never_trusted() {
