@@ -815,6 +815,7 @@ async fn build_edge(
         edge_config.max_connections_per_tenant,
     )
     .with_listen_workers(edge_config.listen_workers)
+    .with_http_listen_addr(edge_config.http_listen_addr.clone())
     .with_proxy_protocol(edge_config.proxy_protocol.clone())
     .with_tcp_services(edge_config.tcp_services)
     .with_udp_services(edge_config.udp_services);

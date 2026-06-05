@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::edge_cred::{AuthFrame, EdgeCred};
+use towonel_common::http_host::extract_host_header;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
@@ -87,12 +88,14 @@ fn max_inflight_connections_from_env() -> usize {
 }
 
 /// The edge: listens on one TCP port, peeks the SNI, and forwards raw TLS
-/// bytes to the agent. Agent/origin handles TLS termination.
+/// bytes to the agent. Agent/origin handles TLS termination. An optional
+/// plain-HTTP listener routes by Host header.
 pub struct Edge {
     router: Arc<Router>,
     endpoint: Arc<Endpoint>,
     sessions: Arc<SessionRegistry>,
     listen_addr: String,
+    http_listen_addr: Option<String>,
     health_listen_addr: String,
     listen_workers: usize,
     proxy_protocol: Arc<ProxyProtocolConfig>,
@@ -120,6 +123,7 @@ impl Edge {
             endpoint,
             sessions,
             listen_addr,
+            http_listen_addr: None,
             health_listen_addr,
             listen_workers: 1,
             proxy_protocol: Arc::default(),
@@ -150,6 +154,12 @@ impl Edge {
     #[must_use]
     pub fn with_listen_workers(mut self, n: usize) -> Self {
         self.listen_workers = n.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_http_listen_addr(mut self, addr: Option<String>) -> Self {
+        self.http_listen_addr = addr;
         self
     }
 
@@ -195,7 +205,20 @@ impl Edge {
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(listeners.len() + 3);
         for listener in listeners {
             let ctx = Arc::clone(&ctx);
-            tasks.push(tokio::spawn(accept_loop(listener, ctx)));
+            tasks.push(tokio::spawn(accept_loop(listener, ctx, ListenerKind::Tls)));
+        }
+
+        if let Some(http_addr) = self.http_listen_addr.as_deref() {
+            let http_listeners = bind_listeners(http_addr, self.listen_workers).await?;
+            info!(
+                listen = %http_addr,
+                workers = http_listeners.len(),
+                "edge http listening"
+            );
+            for listener in http_listeners {
+                let ctx = Arc::clone(&ctx);
+                tasks.push(tokio::spawn(accept_loop(listener, ctx, ListenerKind::Http)));
+            }
         }
 
         if self.tcp_services {
@@ -494,8 +517,16 @@ async fn run_control_stream(
     }
 }
 
+/// Routing path for accepted connections: TLS routes by SNI, HTTP by Host
+/// header.
+#[derive(Clone, Copy)]
+enum ListenerKind {
+    Tls,
+    Http,
+}
+
 /// One accept loop — shared by all reuseport workers.
-async fn accept_loop(listener: TcpListener, ctx: Arc<ConnCtx>) {
+async fn accept_loop(listener: TcpListener, ctx: Arc<ConnCtx>, kind: ListenerKind) {
     loop {
         let (tcp_stream, peer_addr) = match listener.accept().await {
             Ok(conn) => conn,
@@ -525,7 +556,11 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<ConnCtx>) {
         )]
         tokio::spawn(async move {
             let _permit = permit; // released when this task exits
-            if let Err(e) = handle_connection(tcp_stream, peer_addr, &ctx).await {
+            let result = match kind {
+                ListenerKind::Tls => handle_connection(tcp_stream, peer_addr, &ctx).await,
+                ListenerKind::Http => handle_http_connection(tcp_stream, peer_addr, &ctx).await,
+            };
+            if let Err(e) = result {
                 debug!(%peer_addr, error = %e, "connection handling failed");
             }
         });
@@ -847,6 +882,134 @@ async fn prepare_connection(tcp_stream: &TcpStream, ctx: &ConnCtx) -> anyhow::Re
         send_stream,
         recv_stream,
     })
+}
+
+#[expect(
+    clippy::large_futures,
+    reason = "spawned via tokio::spawn which already boxes"
+)]
+async fn handle_http_connection(
+    tcp_stream: TcpStream,
+    peer_addr: std::net::SocketAddr,
+    ctx: &ConnCtx,
+) -> anyhow::Result<()> {
+    ctx.metrics.total_connections.inc();
+    ctx.metrics.active_connections.inc();
+    let result = handle_http_connection_inner(tcp_stream, peer_addr, ctx).await;
+    ctx.metrics.active_connections.dec();
+    if let Err(ref e) = result {
+        debug!(%peer_addr, error = %e, "HTTP connection ended with error");
+    }
+    result
+}
+
+#[expect(
+    clippy::large_futures,
+    reason = "spawned via tokio::spawn which already boxes"
+)]
+async fn handle_http_connection_inner(
+    mut tcp_stream: TcpStream,
+    immediate_peer: std::net::SocketAddr,
+    ctx: &ConnCtx,
+) -> anyhow::Result<()> {
+    let peer_addr = match resolve_peer_addr(&mut tcp_stream, immediate_peer, ctx).await {
+        Ok(a) => a,
+        Err(e) => {
+            drop(tcp_stream.shutdown().await);
+            return Err(e);
+        }
+    };
+
+    let span = info_span!("http_conn", peer = %peer_addr);
+    async move {
+        let start = Instant::now();
+
+        let hostname = match peek_http_hostname(&tcp_stream).await {
+            Ok(h) => h,
+            Err(e) => {
+                drop(tcp_stream.shutdown().await);
+                return Err(e);
+            }
+        };
+
+        let (candidates, _policy) = ctx
+            .router
+            .route(&hostname)
+            .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
+        debug!(%hostname, candidates = candidates.len(), "http route matched");
+
+        let (agent_addr, send_stream, recv_stream) =
+            pick_agent_and_open_stream(ctx, candidates, || {
+                ctx.router.route(&hostname).map(|(c, _)| c)
+            })
+            .await?;
+        let agent_short = agent_addr.id.fmt_short();
+
+        // The agent keys its cleartext origin-`:80` dial off
+        // `dst.port() == 80`; the listener may be bound elsewhere (tests).
+        let mut dst = tcp_stream.local_addr()?;
+        dst.set_port(80);
+        let client_addrs = ClientAddrs {
+            src: peer_addr,
+            dst,
+        };
+        let (bytes_in, bytes_out) = pipe_tcp(
+            tcp_stream,
+            &hostname,
+            client_addrs,
+            send_stream,
+            recv_stream,
+        )
+        .await?;
+
+        ctx.metrics.total_bytes_in.inc_by(bytes_in);
+        ctx.metrics.total_bytes_out.inc_by(bytes_out);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "connection won't last 584 million years"
+        )]
+        let duration_ms = start.elapsed().as_millis() as u64;
+        debug!(
+            %hostname,
+            agent = %agent_short,
+            bytes_in,
+            bytes_out,
+            duration_ms,
+            "http connection closed"
+        );
+        Ok(())
+    }
+    .instrument(span)
+    .await
+}
+
+/// [`peek_client_hello`] for plain HTTP: peek until the full request head
+/// (`\r\n\r\n`) is visible.
+async fn peek_http_request(tcp: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    for attempt in 0..PEEK_MAX_ATTEMPTS {
+        let n = tcp.peek(buf).await?;
+        let peeked = buf.get(..n).unwrap_or(buf);
+        if peeked.windows(4).any(|w| w == b"\r\n\r\n") || n >= buf.len() {
+            return Ok(n);
+        }
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "client closed before sending HTTP request",
+            ));
+        }
+        if attempt + 1 < PEEK_MAX_ATTEMPTS {
+            tokio::time::sleep(PEEK_RETRY_DELAY).await;
+        }
+    }
+    tcp.peek(buf).await
+}
+
+async fn peek_http_hostname(tcp: &TcpStream) -> anyhow::Result<String> {
+    let mut peek_buf = [0u8; PEEK_BUF_SIZE];
+    let n = peek_http_request(tcp, &mut peek_buf).await?;
+    let peeked = peek_buf.get(..n).unwrap_or(&peek_buf);
+    extract_host_header(peeked).ok_or_else(|| anyhow::anyhow!("no Host header in HTTP request"))
 }
 
 /// Open a bi-stream on the agent's registered session. Returns an error
@@ -1429,4 +1592,84 @@ async fn udp_session_pump(
     }
     .instrument(span)
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn server_side_with(payload: &[u8]) -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        client.write_all(payload).await.unwrap();
+        client.flush().await.unwrap();
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn peek_http_hostname_extracts_host() {
+        let req = b"GET /.well-known/acme-challenge/tok HTTP/1.1\r\nHost: app.alice.test\r\n\r\n";
+        let (server, _client) = server_side_with(req).await;
+        let hostname = Box::pin(peek_http_hostname(&server)).await.unwrap();
+        assert_eq!(hostname, "app.alice.test");
+    }
+
+    #[tokio::test]
+    async fn peek_http_hostname_waits_for_split_request_head() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: app.al")
+            .await
+            .unwrap();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            client.write_all(b"ice.test\r\n\r\n").await.unwrap();
+            client
+        });
+
+        let hostname = Box::pin(peek_http_hostname(&server)).await.unwrap();
+        assert_eq!(hostname, "app.alice.test");
+        drop(writer.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn peek_http_hostname_rejects_missing_host_header() {
+        let req = b"GET / HTTP/1.0\r\nUser-Agent: probe\r\n\r\n";
+        let (server, _client) = server_side_with(req).await;
+        let err = Box::pin(peek_http_hostname(&server)).await.unwrap_err();
+        assert!(err.to_string().contains("no Host header"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn peek_http_request_errors_on_close_without_data() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        drop(client);
+        // Wait for the FIN to land so peek observes EOF.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut buf = [0u8; PEEK_BUF_SIZE];
+        let err = peek_http_request(&server, &mut buf).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test]
+    async fn peek_http_request_returns_partial_head_after_budget() {
+        // Bytes received before a FIN stay peekable; the loop returns them
+        // after its budget and Host extraction fails upstream.
+        let (server, client) = server_side_with(b"GET / HTTP/1.1\r\n").await;
+        drop(client);
+        let mut buf = [0u8; PEEK_BUF_SIZE];
+        let n = peek_http_request(&server, &mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"GET / HTTP/1.1\r\n");
+        assert!(extract_host_header(&buf[..n]).is_none());
+    }
 }
