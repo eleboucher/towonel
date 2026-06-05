@@ -32,7 +32,9 @@ const STREAM_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// compromised edge can open bi-streams in a tight loop; without a bound the
 /// agent would spawn an unbounded number of buffer-holding tasks and OOM.
 /// Reaching the cap applies QUIC backpressure rather than dropping streams.
-const MAX_CONCURRENT_STREAMS: usize = 1024;
+/// 256 bounds worst-case copy buffers to ~16 MiB (64 KiB each) so a traffic
+/// burst fits in a small container; 1024 allowed more than a 64 Mi pod.
+const MAX_CONCURRENT_STREAMS: usize = 256;
 
 /// Bound on each TCP/UDP `connect` to the configured origin. A tarpitting
 /// or firewall-dropped origin must not pin an agent task indefinitely.
