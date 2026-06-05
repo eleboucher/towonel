@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +20,7 @@ use towonel_common::tunnel::CONTROL_STATUS_INTERNAL_ERROR;
 use crate::edge::hub_client::ControlFrameHandler;
 
 use super::api::{AppState, trigger_route_rebuild};
+use super::db::port_reservations::PortProtocol;
 use super::live_agents::SourceKey;
 use super::live_edges::EdgeId;
 
@@ -170,6 +172,8 @@ async fn handle_connection(
         "edge_link authenticated"
     );
 
+    let edge_public_ips = public_ips.clone();
+
     let signing_keys = current_signing_keys(&state)?;
     let welcome = HubToEdge::Welcome {
         hub_id,
@@ -199,6 +203,7 @@ async fn handle_connection(
         writer_tx.clone(),
         state.clone(),
         Arc::clone(&snapshot_received),
+        edge_public_ips,
     ));
     let control_semaphore = Arc::new(Semaphore::new(MAX_INFLIGHT_CONTROL));
     let result = read_loop(
@@ -343,24 +348,28 @@ async fn push_routes(
     writer_tx: mpsc::Sender<HubToEdge>,
     state: Arc<AppState>,
     snapshot_received: Arc<tokio::sync::Notify>,
+    public_ips: Vec<String>,
 ) -> anyhow::Result<()> {
     // Wait for SessionsSnapshot before shipping the first table — see
     // the snapshot_received comment in handle_link.
     snapshot_received.notified().await;
     // Initial snapshot so a fresh edge converges before the next mutation.
-    if let Ok(initial) = build_current_route_table(&state).await
-        && writer_tx
+    if let Ok(mut initial) = build_current_route_table(&state).await {
+        filter_listeners_for_edge(&mut initial, &state, &public_ips).await;
+        if writer_tx
             .send(HubToEdge::RouteSnapshot {
                 table: Box::new(initial),
             })
             .await
             .is_err()
-    {
-        return Ok(());
+        {
+            return Ok(());
+        }
     }
     loop {
         match route_rx.recv().await {
-            Ok(table) => {
+            Ok(mut table) => {
+                filter_listeners_for_edge(&mut table, &state, &public_ips).await;
                 if writer_tx
                     .send(HubToEdge::RouteSnapshot {
                         table: Box::new(table),
@@ -377,6 +386,46 @@ async fn push_routes(
             Err(broadcast::error::RecvError::Closed) => return Ok(()),
         }
     }
+}
+
+async fn filter_listeners_for_edge(
+    table: &mut RouteTable,
+    state: &Arc<AppState>,
+    public_ips: &[String],
+) {
+    let reservations = match state.db.list_port_reservations(None).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "failed to load port reservations for edge filtering");
+            return;
+        }
+    };
+
+    table.retain_tcp_listeners(|port, _binding| {
+        let assigned_ips: HashSet<&str> = reservations
+            .iter()
+            .filter(|r| r.protocol == PortProtocol::Tcp && r.port == *port)
+            .filter_map(|r| r.ip_address.as_deref())
+            .collect();
+
+        assigned_ips.is_empty()
+            || assigned_ips
+                .iter()
+                .any(|ip| public_ips.iter().any(|p| p == ip))
+    });
+
+    table.retain_udp_listeners(|port, _binding| {
+        let assigned_ips: HashSet<&str> = reservations
+            .iter()
+            .filter(|r| r.protocol == PortProtocol::Udp && r.port == *port)
+            .filter_map(|r| r.ip_address.as_deref())
+            .collect();
+
+        assigned_ips.is_empty()
+            || assigned_ips
+                .iter()
+                .any(|ip| public_ips.iter().any(|p| p == ip))
+    });
 }
 
 async fn build_current_route_table(state: &Arc<AppState>) -> anyhow::Result<RouteTable> {

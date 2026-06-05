@@ -59,6 +59,22 @@ impl Db {
         Ok(Some(model_to_invite_row(model)?))
     }
 
+    /// Look up an invite by the tenant it created. Returns `None` when the
+    /// `tenant_id` has no matching invite (v1 data or manual DB edit).
+    pub async fn find_invite_by_tenant(
+        &self,
+        tenant_id: &TenantId,
+    ) -> anyhow::Result<Option<InviteRow>> {
+        let Some(model) = invites::Entity::find()
+            .filter(invites::Column::TenantId.eq(Some(tenant_id_bytes(tenant_id))))
+            .one(&self.conn)
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(model_to_invite_row(model)?))
+    }
+
     pub async fn list_invites(&self) -> anyhow::Result<Vec<InviteRow>> {
         let rows = invites::Entity::find()
             .order_by_desc(invites::Column::CreatedAtMs)

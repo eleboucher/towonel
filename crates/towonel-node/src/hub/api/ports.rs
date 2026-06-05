@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use towonel_common::DEFAULT_REGION;
 use towonel_common::identity::TenantId;
 use towonel_common::time::now_ms;
 use tracing::warn;
@@ -157,7 +159,11 @@ pub(super) async fn post_port(
         return resp;
     }
 
-    let (selected_ip, port) = match select_ip_and_port(&state, &req, protocol).await {
+    let allowed = match allowed_regions_for_tenant(&state, &tenant_id).await {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
+    let (selected_ip, port) = match select_ip_and_port(&state, &req, protocol, &allowed).await {
         Ok(result) => result,
         Err(resp) => return resp,
     };
@@ -463,16 +469,67 @@ fn validate_port_allowed(port: u16) -> Result<(), String> {
     Ok(())
 }
 
-fn available_ips(state: &Arc<AppState>) -> Vec<String> {
-    let mut ips = state.identity.edge_public_ips.clone();
-    for (_, _, _, public_ips, _) in state.live_edges.snapshot() {
+async fn allowed_regions_for_tenant(
+    state: &Arc<AppState>,
+    tenant_id: &TenantId,
+) -> Result<HashSet<String>, Response> {
+    let invite = match state.db.find_invite_by_tenant(tenant_id).await {
+        Ok(Some(inv)) => inv,
+        Ok(None) => {
+            warn!(%tenant_id, "no invite found for tenant; using default region");
+            return Ok(HashSet::from_iter([DEFAULT_REGION.to_string()]));
+        }
+        Err(e) => {
+            warn!(error = %e, %tenant_id, "find_invite_by_tenant failed");
+            return Err(internal_error());
+        }
+    };
+    let mut regions = HashSet::new();
+    regions.insert(invite.region.unwrap_or_else(|| DEFAULT_REGION.to_string()));
+    for r in invite.failover_regions {
+        regions.insert(r);
+    }
+    Ok(regions)
+}
+
+/// Build a map from each public IP to the region of the edge that
+/// advertises it (or `None` for the hub's own edge IPs).
+fn ip_region_map(state: &Arc<AppState>) -> Vec<(String, Option<String>)> {
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    let mut seen = HashSet::new();
+    for ip in &state.identity.edge_public_ips {
+        seen.insert(ip.clone());
+        out.push((ip.clone(), state.identity.edge_region.clone()));
+    }
+    for (_, _, _, public_ips, region) in state.live_edges.snapshot() {
         for ip in public_ips {
-            if !ips.contains(&ip) {
-                ips.push(ip);
+            if seen.insert(ip.clone()) {
+                out.push((ip, region.clone()));
             }
         }
     }
+    out
+}
+
+fn available_ips(state: &Arc<AppState>) -> Vec<String> {
+    let mut ips: Vec<String> = Vec::new();
+    for (ip, _) in &ip_region_map(state) {
+        ips.push(ip.clone());
+    }
     ips
+}
+
+/// Like [`available_ips`] but keeps only IPs whose edge region is in
+/// `allowed_regions`.
+fn available_ips_in_regions(state: &Arc<AppState>, allowed: &HashSet<String>) -> Vec<String> {
+    ip_region_map(state)
+        .into_iter()
+        .filter(|(_, region)| {
+            let r = region.as_deref().unwrap_or(DEFAULT_REGION);
+            allowed.contains(r)
+        })
+        .map(|(ip, _)| ip)
+        .collect()
 }
 
 fn find_edge_for_ip(state: &Arc<AppState>, ip: Option<&str>) -> Option<EdgeInfo> {
@@ -503,27 +560,41 @@ async fn select_ip_and_port(
     state: &Arc<AppState>,
     req: &ReservePortRequest,
     protocol: PortProtocol,
+    allowed_regions: &HashSet<String>,
 ) -> Result<(Option<String>, u16), Response> {
+    let region_ips = available_ips_in_regions(state, allowed_regions);
+
     if let Some(ref ip) = req.ip {
-        let ips = available_ips(state);
-        if !ips.is_empty() && !ips.iter().any(|i| i == ip) {
+        if !region_ips.is_empty() && !region_ips.iter().any(|i| i == ip) {
+            let available = if region_ips.len() < available_ips(state).len() {
+                format!(
+                    "{} (tenant's regions: {})",
+                    region_ips.join(", "),
+                    allowed_regions
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+            } else {
+                region_ips.join(", ")
+            };
             return Err(invalid_request(format!(
-                "ip {ip} is not served by any connected edge; available: {}",
-                ips.join(", ")
+                "ip {ip} is not served by any edge in the tenant's region; available: {available}",
             )));
         }
         let p = match req.preferred {
             Some(p) => p,
-            None => pick_free_port_for_ip(state, protocol, Some(ip)).await?,
+            None => pick_free_port_for_ip(state, protocol, Some(ip), allowed_regions).await?,
         };
         return Ok((Some(ip.clone()), p));
     }
     match req.preferred {
         Some(p) => {
-            let ip = pick_ip_for_port(state, protocol, p).await?;
+            let ip = pick_ip_for_port(state, protocol, p, allowed_regions).await?;
             Ok((Some(ip), p))
         }
-        None => pick_ip_and_port(state, protocol).await,
+        None => pick_ip_and_port(state, protocol, allowed_regions).await,
     }
 }
 
@@ -560,8 +631,9 @@ fn first_free_port(used: &std::collections::HashSet<u16>) -> Option<u16> {
 async fn pick_ip_and_port(
     state: &Arc<AppState>,
     protocol: PortProtocol,
+    allowed_regions: &HashSet<String>,
 ) -> Result<(Option<String>, u16), Response> {
-    let ips = available_ips(state);
+    let ips = available_ips_in_regions(state, allowed_regions);
     let existing = load_reservations(state, "auto-pick").await?;
 
     if ips.is_empty() {
@@ -599,8 +671,9 @@ async fn pick_ip_for_port(
     state: &Arc<AppState>,
     protocol: PortProtocol,
     port: u16,
+    allowed_regions: &HashSet<String>,
 ) -> Result<String, Response> {
-    let ips = available_ips(state);
+    let ips = available_ips_in_regions(state, allowed_regions);
     if ips.is_empty() {
         return Err(error_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -626,7 +699,7 @@ async fn pick_ip_for_port(
     Err(conflict(
         "port_in_use",
         format!(
-            "{} port {port} is already reserved on all available IPs",
+            "{} port {port} is already reserved on all available IPs in the tenant's region",
             protocol.as_str()
         ),
     ))
@@ -636,7 +709,17 @@ async fn pick_free_port_for_ip(
     state: &Arc<AppState>,
     protocol: PortProtocol,
     ip: Option<&str>,
+    allowed_regions: &HashSet<String>,
 ) -> Result<u16, Response> {
+    // Validate that the IP (if specified) is in an allowed region.
+    if let Some(ip) = ip {
+        let region_ips = available_ips_in_regions(state, allowed_regions);
+        if !region_ips.is_empty() && !region_ips.iter().any(|i| i == ip) {
+            return Err(invalid_request(format!(
+                "ip {ip} is not served by any edge in the tenant's region"
+            )));
+        }
+    }
     let existing = load_reservations(state, "auto-pick for ip").await?;
     first_free_port(&used_ports(&existing, protocol, ip)).ok_or_else(|| {
         let ip_label = ip.unwrap_or("shared");

@@ -264,6 +264,16 @@ impl RouteTable {
             .collect()
     }
 
+    /// Remove TCP listeners whose port does not satisfy `f`.
+    pub fn retain_tcp_listeners(&mut self, f: impl FnMut(&u16, &mut TcpListenerBinding) -> bool) {
+        self.tcp_listeners.retain(f);
+    }
+
+    /// Remove UDP listeners whose port does not satisfy `f`.
+    pub fn retain_udp_listeners(&mut self, f: impl FnMut(&u16, &mut UdpListenerBinding) -> bool) {
+        self.udp_listeners.retain(f);
+    }
+
     /// Every unique agent that serves at least one hostname or TCP/UDP service.
     #[must_use]
     pub fn unique_agents(&self) -> HashSet<&AgentId> {
