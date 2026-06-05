@@ -1,4 +1,4 @@
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -55,8 +55,11 @@ impl MigrationTrait for Migration {
     }
 }
 
-async fn rebuild_sqlite(db: &impl ConnectionTrait) -> Result<(), DbErr> {
+async fn rebuild_sqlite(db: &(impl ConnectionTrait + TransactionTrait)) -> Result<(), DbErr> {
     let sql = [
+        // A previously failed run can leave this behind (statements outside
+        // the transaction below); the original table is untouched then.
+        "DROP TABLE IF EXISTS invites_new",
         "CREATE TABLE invites_new (
             invite_id BLOB NOT NULL PRIMARY KEY,
             name TEXT NOT NULL,
@@ -86,9 +89,12 @@ async fn rebuild_sqlite(db: &impl ConnectionTrait) -> Result<(), DbErr> {
                 DELETE FROM tenant_ownership WHERE tenant_id = OLD.tenant_id;
             END",
     ];
+    // One transaction so a crash mid-rebuild can't strand a half-renamed
+    // table or drop the cascade triggers without their replacements.
+    let txn = db.begin().await?;
     for stmt in sql {
-        db.execute(Statement::from_string(DatabaseBackend::Sqlite, stmt))
+        txn.execute(Statement::from_string(DatabaseBackend::Sqlite, stmt))
             .await?;
     }
-    Ok(())
+    txn.commit().await
 }
