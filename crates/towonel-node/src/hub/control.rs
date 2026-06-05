@@ -1,12 +1,10 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use tracing::warn;
 
 use towonel_common::edge_cred::{
-    AuthFrame, CONTROL_OPCODE_AUTHENTICATE, EDGE_CRED_NONCE_LEN, EDGE_CRED_VERSION, EdgeCred,
-    verify_edge_cred,
+    AuthFrame, CONTROL_OPCODE_AUTHENTICATE, EDGE_CRED_VERSION, EdgeCred, verify_edge_cred,
 };
 use towonel_common::identity::PqPublicKey;
 use towonel_common::time::now_ms;
@@ -15,27 +13,15 @@ use towonel_common::tunnel::{
 };
 
 use crate::edge::hub_client::{ControlFrameHandler, ControlResponse};
-use crate::hub::api::{AppState, MAX_NONCE_ENTRIES};
-
-type AuthNonceCache = moka::future::Cache<([u8; 32], [u8; EDGE_CRED_NONCE_LEN]), ()>;
-
-/// Matches the issued cred TTL so a replay can't outlive its origin.
-const AUTH_NONCE_TTL: Duration = Duration::from_hours(1);
+use crate::hub::api::AppState;
 
 pub struct HubControlHandler {
     state: Arc<AppState>,
-    auth_nonces: AuthNonceCache,
 }
 
 impl HubControlHandler {
-    pub fn new(state: Arc<AppState>) -> Self {
-        Self {
-            state,
-            auth_nonces: moka::future::Cache::builder()
-                .max_capacity(MAX_NONCE_ENTRIES)
-                .time_to_live(AUTH_NONCE_TTL)
-                .build(),
-        }
+    pub const fn new(state: Arc<AppState>) -> Self {
+        Self { state }
     }
 }
 
@@ -46,26 +32,26 @@ impl ControlFrameHandler for HubControlHandler {
             return Ok((CONTROL_STATUS_INVALID, Vec::new()));
         };
         match opcode {
-            CONTROL_OPCODE_AUTHENTICATE => self.handle_authenticate(&frame).await,
+            CONTROL_OPCODE_AUTHENTICATE => Ok(self.handle_authenticate(&frame)),
             _ => Ok((CONTROL_STATUS_NOT_IMPLEMENTED, Vec::new())),
         }
     }
 }
 
 impl HubControlHandler {
-    async fn handle_authenticate(&self, frame: &[u8]) -> anyhow::Result<ControlResponse> {
+    fn handle_authenticate(&self, frame: &[u8]) -> ControlResponse {
         let auth = match AuthFrame::decode(frame) {
             Ok(a) => a,
             Err(e) => {
                 warn!(error = %e, "auth frame decode failed");
-                return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+                return (CONTROL_STATUS_INVALID, Vec::new());
             }
         };
         let cred = match EdgeCred::from_cbor(&auth.cred_cbor) {
             Ok(c) => c,
             Err(e) => {
                 warn!(error = %e, "EdgeCred CBOR decode failed");
-                return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+                return (CONTROL_STATUS_INVALID, Vec::new());
             }
         };
         if cred.version != EDGE_CRED_VERSION {
@@ -74,7 +60,7 @@ impl HubControlHandler {
                 expected = EDGE_CRED_VERSION,
                 "EdgeCred version mismatch"
             );
-            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+            return (CONTROL_STATUS_INVALID, Vec::new());
         }
         if cred.kid != auth.kid {
             warn!(
@@ -82,7 +68,7 @@ impl HubControlHandler {
                 cred_kid = cred.kid,
                 "auth frame kid mismatch"
             );
-            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+            return (CONTROL_STATUS_INVALID, Vec::new());
         }
         if cred.not_after_ms <= now_ms() {
             warn!(
@@ -90,15 +76,15 @@ impl HubControlHandler {
                 not_after_ms = cred.not_after_ms,
                 "EdgeCred expired"
             );
-            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+            return (CONTROL_STATUS_INVALID, Vec::new());
         }
         let Some(pubkey) = self.lookup_signing_pubkey(auth.kid) else {
             warn!(kid = auth.kid, "unknown signing kid");
-            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+            return (CONTROL_STATUS_INVALID, Vec::new());
         };
         if !verify_edge_cred(&pubkey, &auth.cred_cbor, &auth.sig) {
             warn!(agent = %cred.agent_id, "EdgeCred signature invalid");
-            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+            return (CONTROL_STATUS_INVALID, Vec::new());
         }
         // A removed tenant is dropped from the in-memory policy; its still-valid
         // creds (TTL up to 1h) must not keep authenticating after revocation.
@@ -108,20 +94,13 @@ impl HubControlHandler {
                 tenant = %cred.tenant_id,
                 "EdgeCred for unknown or removed tenant"
             );
-            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
+            return (CONTROL_STATUS_INVALID, Vec::new());
         }
-        let key = (*cred.agent_id.as_bytes(), cred.nonce);
-        let fresh = self
-            .auth_nonces
-            .entry(key)
-            .or_insert_with(async {})
-            .await
-            .is_fresh();
-        if !fresh {
-            warn!(agent = %cred.agent_id, "EdgeCred nonce replayed");
-            return Ok((CONTROL_STATUS_INVALID, Vec::new()));
-        }
-        Ok((CONTROL_STATUS_OK, Vec::new()))
+        // No nonce-replay rejection: agents cache a cred for its TTL and
+        // re-present it on every edge dial, so repeats are legitimate. A
+        // stolen cred is useless anyway — the edge checks `cred.agent_id`
+        // against the iroh-authenticated connection before honoring it.
+        (CONTROL_STATUS_OK, Vec::new())
     }
 
     /// Only the active kid is supported today; retired-kid lookup against the
@@ -135,6 +114,7 @@ impl HubControlHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use towonel_common::edge_cred::EDGE_CRED_NONCE_LEN;
     use towonel_common::identity::{AgentKeypair, TenantId, TenantKeypair};
 
     use crate::hub::test_helpers::TestHub;
@@ -183,7 +163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_replayed_cred() {
+    async fn accepts_represented_cred() {
         let hub = TestHub::start().await;
         let handler = HubControlHandler::new(Arc::clone(&hub.state));
         let agent = AgentKeypair::generate();
@@ -192,11 +172,8 @@ mod tests {
             handler.handle(frame.clone()).await.unwrap().0,
             CONTROL_STATUS_OK
         );
-        // Same nonce again — must be rejected.
-        assert_eq!(
-            handler.handle(frame).await.unwrap().0,
-            CONTROL_STATUS_INVALID
-        );
+        // The same cached cred must keep authenticating for its whole TTL.
+        assert_eq!(handler.handle(frame).await.unwrap().0, CONTROL_STATUS_OK);
     }
 
     #[tokio::test]

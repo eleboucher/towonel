@@ -563,9 +563,12 @@ async fn select_ip_and_port(
     allowed_regions: &HashSet<String>,
 ) -> Result<(Option<String>, u16), Response> {
     let region_ips = available_ips_in_regions(state, allowed_regions);
+    // Empty only when no edge anywhere advertises a public IP (single-node
+    // setups); a down region must not degrade into out-of-region IPs.
+    let any_ips = !available_ips(state).is_empty();
 
     if let Some(ref ip) = req.ip {
-        if !region_ips.is_empty() && !region_ips.iter().any(|i| i == ip) {
+        if any_ips && !region_ips.iter().any(|i| i == ip) {
             let available = if region_ips.len() < available_ips(state).len() {
                 format!(
                     "{} (tenant's regions: {})",
@@ -637,6 +640,20 @@ async fn pick_ip_and_port(
     let existing = load_reservations(state, "auto-pick").await?;
 
     if ips.is_empty() {
+        // The IP-less pool is for single-node setups with no public IPs
+        // anywhere. With IPs elsewhere but none in-region, fail instead —
+        // an IP-less reservation would be served by every region's edges.
+        if !available_ips(state).is_empty() {
+            return Err(error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no_assignable_ip",
+                format!(
+                    "no edge in the tenant's region currently advertises a public IP \
+                     to assign for {}; retry once the region's edge is back",
+                    protocol.as_str()
+                ),
+            ));
+        }
         let port = first_free_port(&used_ports(&existing, protocol, None)).ok_or_else(|| {
             conflict(
                 "port_pool_exhausted",

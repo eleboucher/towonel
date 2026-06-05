@@ -224,8 +224,14 @@ async fn dial_and_serve(
         .with_label_values(&[&edge_label])
         .set(1);
 
-    if let Some(cred) = edge_cred.load_full() {
-        present_edge_cred(&conn, &edge_label, &cred).await;
+    if let Some(cred) = edge_cred.load_full()
+        && let Err(e) = present_edge_cred(&conn, &edge_label, &cred).await
+    {
+        metrics
+            .edge_session_state
+            .with_label_values(&[&edge_label])
+            .set(0);
+        return Err(e);
     }
 
     // iroh usually opens on the relay and upgrades to direct once holepunched.
@@ -253,26 +259,30 @@ async fn dial_and_serve(
     Ok(started.elapsed())
 }
 
-/// Best-effort. Logs the outcome but never errors — the data path keeps
-/// running whether the edge accepted the cred or not.
+/// A rejected cred means the session is never reported live and no routes
+/// will point at it — fail so the supervisor redials with a refreshed cred.
 async fn present_edge_cred(
     conn: &iroh::endpoint::Connection,
     edge_label: &str,
     cred: &CachedEdgeCred,
-) {
+) -> anyhow::Result<()> {
     let result = tokio::time::timeout(PRESENT_CRED_TIMEOUT, do_present_edge_cred(conn, cred)).await;
     match result {
         Ok(Ok(status)) if status == CONTROL_STATUS_OK => {
             info!(edge = %edge_label, "EdgeCred accepted");
+            Ok(())
         }
         Ok(Ok(status)) => {
             warn!(edge = %edge_label, status, "EdgeCred rejected by edge");
+            anyhow::bail!("edge {edge_label} rejected EdgeCred (status {status})")
         }
         Ok(Err(e)) => {
             warn!(edge = %edge_label, error = %e, "presenting EdgeCred failed");
+            Err(e.context("presenting EdgeCred"))
         }
         Err(_) => {
             warn!(edge = %edge_label, "EdgeCred presentation timed out");
+            anyhow::bail!("EdgeCred presentation to edge {edge_label} timed out")
         }
     }
 }

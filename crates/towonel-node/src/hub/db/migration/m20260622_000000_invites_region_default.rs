@@ -65,15 +65,26 @@ async fn rebuild_sqlite(db: &impl ConnectionTrait) -> Result<(), DbErr> {
             status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'claimed', 'revoked')),
             tenant_id BLOB,
             tenant_pq_public_key BLOB,
-            redeemed_at_ms INTEGER,
             created_at_ms INTEGER NOT NULL,
             hostnames TEXT NOT NULL DEFAULT '[]',
             region TEXT DEFAULT 'EU',
             failover_regions TEXT NOT NULL DEFAULT '[]'
         )",
-        "INSERT INTO invites_new SELECT invite_id, name, secret_hash, expires_at_ms, status, tenant_id, tenant_pq_public_key, redeemed_at_ms, created_at_ms, hostnames, COALESCE(region, 'EU'), failover_regions FROM invites",
+        "INSERT INTO invites_new SELECT invite_id, name, secret_hash, expires_at_ms, status, tenant_id, tenant_pq_public_key, created_at_ms, hostnames, COALESCE(region, 'EU'), failover_regions FROM invites",
         "DROP TABLE invites",
         "ALTER TABLE invites_new RENAME TO invites",
+        // DROP TABLE removed the cascade triggers from
+        // m20260527_000000_tenants_table_with_fk; recreate them.
+        "CREATE TRIGGER IF NOT EXISTS delete_port_reservations_on_invite_delete
+            AFTER DELETE ON invites
+            BEGIN
+                DELETE FROM port_reservations WHERE tenant_id = OLD.tenant_id;
+            END",
+        "CREATE TRIGGER IF NOT EXISTS delete_tenant_ownership_on_invite_delete
+            AFTER DELETE ON invites
+            BEGIN
+                DELETE FROM tenant_ownership WHERE tenant_id = OLD.tenant_id;
+            END",
     ];
     for stmt in sql {
         db.execute(Statement::from_string(DatabaseBackend::Sqlite, stmt))
