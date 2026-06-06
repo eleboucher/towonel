@@ -67,6 +67,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARG
     if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats || true; fi && \
     cp "target/${RUST_TARGET}/release/towonel-agent" /towonel-agent
 
+FROM scratch AS artifact
+COPY --from=builder /towonel-agent /towonel-agent
+
 FROM debian:bookworm-slim AS runtime-prep
 RUN groupadd -g 10001 nonroot \
     && useradd -u 10001 -g 10001 -M -s /sbin/nologin nonroot \
