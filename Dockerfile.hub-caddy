@@ -9,7 +9,7 @@
 # Global ARGs (visible to every stage's FROM line; each stage re-declares
 # the ones it actually uses).
 # renovate: datasource=docker depName=caddy
-ARG CADDY_VERSION=2.11.3
+ARG CADDY_VERSION=2.11.4
 # renovate: datasource=github-releases depName=mholt/caddy-l4
 ARG CADDY_L4_VERSION=v0.1.1
 
