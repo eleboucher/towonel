@@ -111,6 +111,10 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/azure/setup-helm@v5
+        with:
+          # Stay on Helm 3: Helm 4 mandates plugin provenance verification,
+          # which helm-unittest's git source does not support.
+          version: v3.21.0
       - name: Install helm-unittest
         run: helm plugin install https://github.com/helm-unittest/helm-unittest.git --version "v${HELM_UNITTEST_VERSION}"
       - name: Install helm-docs and helm-schema

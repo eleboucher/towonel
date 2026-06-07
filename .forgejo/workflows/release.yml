@@ -328,6 +328,10 @@ jobs:
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
       - uses: https://github.com/azure/setup-helm@v5
+        with:
+          # Pin Helm 3 so `helm push` keeps emitting the "Digest:" line the
+          # chart-signing step parses; Helm 4 changed plugin/OCI behaviour.
+          version: v3.21.0
       - name: Login to codeberg.org
         env:
           CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
