@@ -118,6 +118,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
       - name: Build and push towonel-node
+        id: build-node
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
           context: .
@@ -160,6 +161,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
       - name: Build and push towonel-agent
+        id: build-agent
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
           context: .
@@ -202,6 +204,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
       - name: Build and push towonel-hub-caddy
+        id: build-hub-caddy
         uses: https://data.forgejo.org/docker/build-push-action@v7
         with:
           context: .
@@ -234,6 +237,23 @@ jobs:
           grep "[[:space:]]${COSIGN_BIN}\$" checksums.txt | sha256sum -c -
           install -m 0755 "${COSIGN_BIN}" /usr/local/bin/cosign
           rm -f "${COSIGN_BIN}" checksums.txt
+      - name: Cosign sign images
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          NODE_DIGEST: ${{ steps.build-node.outputs.digest }}
+          AGENT_DIGEST: ${{ steps.build-agent.outputs.digest }}
+          HUB_CADDY_DIGEST: ${{ steps.build-hub-caddy.outputs.digest }}
+          USERNAME: ${{ vars.USERNAME }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes --key env://COSIGN_KEY \
+            "codeberg.org/towonel/towonel-node@${NODE_DIGEST}" \
+            "registry.erwanleboucher.dev/${USERNAME}/towonel-node@${NODE_DIGEST}" \
+            "codeberg.org/towonel/towonel-agent@${AGENT_DIGEST}" \
+            "registry.erwanleboucher.dev/${USERNAME}/towonel-agent@${AGENT_DIGEST}" \
+            "codeberg.org/towonel/towonel-hub-caddy@${HUB_CADDY_DIGEST}" \
+            "registry.erwanleboucher.dev/${USERNAME}/towonel-hub-caddy@${HUB_CADDY_DIGEST}"
       - name: Stage and archive
         env:
           TAG: ${{ needs.release.outputs.tag }}
