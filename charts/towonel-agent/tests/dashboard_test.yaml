@@ -1,0 +1,59 @@
+suite: dashboard
+templates:
+  - dashboard.yaml
+  - grafanadashboard.yaml
+tests:
+  - it: should not render by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render a sidecar ConfigMap when enabled
+    set:
+      monitoring.dashboards.enabled: true
+    template: dashboard.yaml
+    asserts:
+      - isKind:
+          of: ConfigMap
+      - equal:
+          path: metadata.labels.grafana_dashboard
+          value: "1"
+      - exists:
+          path: data["towonel-agent.json"]
+
+  - it: should render a GrafanaDashboard for the grafana operator
+    set:
+      monitoring.dashboards.enabled: true
+      monitoring.dashboards.grafanaOperator.enabled: true
+      monitoring.dashboards.grafanaOperator.matchLabels:
+        dashboards: grafana
+    template: grafanadashboard.yaml
+    asserts:
+      - isKind:
+          of: GrafanaDashboard
+      - equal:
+          path: spec.instanceSelector.matchLabels.dashboards
+          value: grafana
+      - equal:
+          path: spec.configMapRef.key
+          value: towonel-agent.json
+
+  - it: should drop the sidecar label when the grafana operator is used
+    set:
+      monitoring.dashboards.enabled: true
+      monitoring.dashboards.grafanaOperator.enabled: true
+      monitoring.dashboards.grafanaOperator.matchLabels:
+        dashboards: grafana
+    template: dashboard.yaml
+    asserts:
+      - notExists:
+          path: metadata.labels.grafana_dashboard
+
+  - it: should fail when grafana operator is enabled without matchLabels
+    set:
+      monitoring.dashboards.enabled: true
+      monitoring.dashboards.grafanaOperator.enabled: true
+    template: grafanadashboard.yaml
+    asserts:
+      - failedTemplate:
+          errorPattern: matchLabels must be set

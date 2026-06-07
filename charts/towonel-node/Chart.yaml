@@ -1,0 +1,22 @@
+---
+apiVersion: v2
+name: towonel-node
+description: A Helm chart for the towonel node - hub control plane and/or public edge for towonel tunnels
+type: application
+# Floor matching the chart's surface: restricted Pod Security (seccompProfile)
+# and the optional monitoring CRDs (ServiceMonitor, PrometheusRule, GrafanaDashboard).
+kubeVersion: ">=1.25.0-0"
+version: 0.0.0
+appVersion: "0.0.0"
+home: https://codeberg.org/towonel/towonel
+sources:
+  - https://codeberg.org/towonel/towonel
+maintainers:
+  - name: towonel
+keywords:
+  - towonel
+  - tunnel
+  - hub
+  - edge
+annotations:
+  category: Networking

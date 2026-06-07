@@ -1,0 +1,12 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as {{ include "towonel-node.kind" . }} {{ include "towonel-node.fullname" . }}.
+
+Enabled roles:
+{{- if .Values.hub.enabled }}
+  - hub: API on :{{ .Values.hub.apiPort }}, edge link on :{{ .Values.hub.linkPort }}, metrics on :{{ .Values.hub.metricsPort }}
+{{- end }}
+{{- if .Values.edge.enabled }}
+  - edge: TLS on {{ .Values.edge.bindAddress }}:{{ .Values.edge.httpsPort }}, HTTP on :{{ .Values.edge.httpPort }}, metrics on :{{ .Values.edge.metricsPort }} (hostNetwork)
+{{- end }}
+
+Values reference:
+https://codeberg.org/towonel/towonel/src/branch/main/charts/towonel-node/README.md

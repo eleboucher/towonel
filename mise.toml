@@ -1,6 +1,9 @@
 [tools]
 rust = "1.96.0"
 lefthook = "latest"
+helm = "latest"
+helm-docs = "1.14.2"
+"aqua:dadav/helm-schema" = "0.23.4"
 
 "cargo:cargo-nextest" = "latest"
 "cargo:cargo-deny" = "latest"
@@ -36,6 +39,30 @@ run = "cargo nextest run --workspace --all-features --no-fail-fast"
 [tasks.audit]
 description = "Run cargo-deny checks"
 run = "cargo deny --all-features check"
+
+[tasks.helm-test]
+description = "Lint and unit-test Helm charts (needs the helm-unittest plugin)"
+run = ["helm lint charts/*", "helm unittest charts/*"]
+
+[tasks.helm-docs]
+description = "Sync dashboards into the charts and generate the chart READMEs + values.schema.json"
+run = """
+# deploy/grafana holds the canonical, directly-usable dashboards; the chart
+# copies are generated artifacts synced from them.
+cp deploy/grafana/towonel-hub.json charts/towonel-node/dashboards/towonel-node.json
+cp deploy/grafana/towonel-agent.json charts/towonel-agent/dashboards/towonel-agent.json
+helm-docs --chart-search-root=charts --log-level=warn
+# required/additionalProperties are skipped so the schemas stay permissive:
+# values.yaml supplies every default and the free-form maps stay open.
+helm-schema --chart-search-root charts --skip-auto-generation required,additionalProperties --append-newline
+"""
+
+[tasks.helm-docs-check]
+description = "Fail if the generated chart READMEs/schemas/dashboards are stale (CI gate)"
+run = """
+mise run helm-docs
+git diff --exit-code charts/*/README.md charts/*/values.schema.json charts/*/dashboards
+"""
 
 [tasks.doc]
 description = "Build docs with warnings as errors"

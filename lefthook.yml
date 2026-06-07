@@ -15,6 +15,12 @@ pre-commit:
       run: taplo fmt --check {staged_files}
     typos:
       run: typos {staged_files}
+    # Regenerate the charts' committed README + values.schema.json + synced
+    # dashboards whenever their inputs change, and stage them. CI's
+    # helm-docs-check is the backstop.
+    helm-docs:
+      glob: "{charts/*/{Chart.yaml,values.yaml,README.md.gotmpl},deploy/grafana/*.json}"
+      run: mise run helm-docs && git add charts/*/README.md charts/*/values.schema.json charts/*/dashboards
 pre-push:
   parallel: true
   commands:

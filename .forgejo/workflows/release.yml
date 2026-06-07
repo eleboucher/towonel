@@ -80,6 +80,9 @@ jobs:
     permissions:
       contents: write
     runs-on: multiarch
+    outputs:
+      node-digest: ${{ steps.build-node.outputs.digest }}
+      agent-digest: ${{ steps.build-agent.outputs.digest }}
     env:
       # renovate: datasource=github-releases depName=sigstore/cosign
       COSIGN_VERSION: "3.0.5"
@@ -316,3 +319,80 @@ jobs:
             upload "${ARCHIVE}.sha256"
             upload "${ARCHIVE}.cosign.bundle"
           done
+  helm:
+    needs: [release, container]
+    runs-on: docker
+    env:
+      # renovate: datasource=github-releases depName=sigstore/cosign
+      COSIGN_VERSION: "3.0.5"
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/azure/setup-helm@v5
+      - name: Login to codeberg.org
+        env:
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          USERNAME: ${{ vars.USERNAME }}
+        run: |
+          set -euo pipefail
+          echo "${CODEBERG_TOKEN}" | helm registry login codeberg.org --username "${USERNAME}" --password-stdin
+      # Released charts reference immutable images; fail closed rather than
+      # fall back to a floating tag.
+      - name: Pin the released image digests into the charts
+        env:
+          NODE_DIGEST: ${{ needs.container.outputs.node-digest }}
+          AGENT_DIGEST: ${{ needs.container.outputs.agent-digest }}
+        run: |
+          set -euo pipefail
+          [ -n "${NODE_DIGEST}" ] && [ -n "${AGENT_DIGEST}" ] || { echo "build produced no digest" >&2; exit 1; }
+          pin() {
+            sed -i "s|^  digest: \"\"\$|  digest: \"$2\"|" "charts/$1/values.yaml"
+            grep -q "^  digest: \"$2\"\$" "charts/$1/values.yaml"
+          }
+          pin towonel-node "${NODE_DIGEST}"
+          pin towonel-agent "${AGENT_DIGEST}"
+      - name: Package and push charts
+        env:
+          TAG: ${{ needs.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          : > chart-digests.txt
+          for chart in charts/*/; do
+            NAME="$(basename "$chart")"
+            helm package "$chart" --version "${VERSION}" --app-version "${VERSION}"
+            OUTPUT="$(helm push "${NAME}-${VERSION}.tgz" "oci://codeberg.org/towonel/charts" 2>&1)"
+            echo "$OUTPUT"
+            DIGEST="$(echo "$OUTPUT" | sed -n 's/^Digest: //p')"
+            if [ -z "$DIGEST" ]; then
+              echo "failed to parse digest for ${NAME}" >&2
+              exit 1
+            fi
+            echo "codeberg.org/towonel/charts/${NAME}@${DIGEST}" >> chart-digests.txt
+          done
+      - name: Install cosign
+        run: |
+          set -euo pipefail
+          HOST_ARCH="$(uname -m)"
+          case "$HOST_ARCH" in
+            x86_64) COSIGN_BIN="cosign-linux-amd64" ;;
+            aarch64) COSIGN_BIN="cosign-linux-arm64" ;;
+            *) echo "unsupported host arch: $HOST_ARCH" >&2; exit 1 ;;
+          esac
+          BASE="https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}"
+          curl -fsSL -o "${COSIGN_BIN}" "${BASE}/${COSIGN_BIN}"
+          curl -fsSL "${BASE}/cosign_checksums.txt" -o checksums.txt
+          grep "[[:space:]]${COSIGN_BIN}\$" checksums.txt | sha256sum -c -
+          install -m 0755 "${COSIGN_BIN}" /usr/local/bin/cosign
+          rm -f "${COSIGN_BIN}" checksums.txt
+      - name: Cosign sign charts
+        env:
+          COSIGN_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
+          USERNAME: ${{ vars.USERNAME }}
+        run: |
+          set -euo pipefail
+          # helm registry login only fills helm's config; cosign reads the
+          # docker config, so it needs its own login.
+          echo "${CODEBERG_TOKEN}" | cosign login codeberg.org --username "${USERNAME}" --password-stdin
+          xargs cosign sign --yes --key env://COSIGN_KEY < chart-digests.txt

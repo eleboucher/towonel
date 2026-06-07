@@ -353,6 +353,18 @@ docker compose up -d
 See [`docker-compose.yml`](docker-compose.yml) for the full stack and
 environment surface.
 
+### Kubernetes (Helm)
+
+Charts are published to
+`oci://codeberg.org/towonel/charts/towonel-{node,agent}` on every release,
+image pinned by digest and signed with cosign. `towonel-node` runs the
+hub, the edge, or both in one process (`hub.enabled` / `edge.enabled`,
+both on by default); hub-only renders a Deployment, an enabled edge a
+hostNetwork DaemonSet. Values are documented in the chart READMEs:
+[`charts/towonel-node`](charts/towonel-node/README.md),
+[`charts/towonel-agent`](charts/towonel-agent/README.md). Standalone
+Grafana dashboards live in [`deploy/grafana/`](deploy/grafana/).
+
 ## Configuration reference
 
 All settings come from `TOWONEL_*` environment variables (flat names,

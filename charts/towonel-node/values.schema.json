@@ -1,0 +1,553 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "affinity": {
+      "description": "Affinity rules for pod scheduling.",
+      "required": [],
+      "title": "affinity",
+      "type": "object"
+    },
+    "dnsPolicy": {
+      "default": "",
+      "description": "DNS policy. Empty picks the role default (ClusterFirstWithHostNet when\nthe edge is enabled, ClusterFirst otherwise).",
+      "title": "dnsPolicy",
+      "type": "string"
+    },
+    "edge": {
+      "properties": {
+        "bindAddress": {
+          "default": "[::]",
+          "description": "Bind address for the public TLS and plain-HTTP listeners.\n\"[::]\" is dual-stack: serves both IPv4 + IPv6.",
+          "title": "bindAddress",
+          "type": "string"
+        },
+        "dataDir": {
+          "default": "/data",
+          "description": "Data directory backed by an emptyDir volume (TOWONEL_DATA_DIR).",
+          "title": "dataDir",
+          "type": "string"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Run the public edge (TOWONEL_EDGE_ENABLED). Switches the workload to a\nhostNetwork DaemonSet; pin it to the right nodes with nodeSelector/affinity.",
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "healthBindAddress": {
+          "default": "0.0.0.0",
+          "description": "Bind address for the edge health/metrics listener.",
+          "title": "healthBindAddress",
+          "type": "string"
+        },
+        "httpPort": {
+          "default": 80,
+          "description": "Plain HTTP port for ACME HTTP-01 and redirects (TOWONEL_EDGE_HTTP_LISTEN_ADDR).",
+          "title": "httpPort",
+          "type": "integer"
+        },
+        "httpsPort": {
+          "default": 443,
+          "description": "Public TLS port (TOWONEL_EDGE_LISTEN_ADDR).",
+          "title": "httpsPort",
+          "type": "integer"
+        },
+        "metricsPort": {
+          "default": 9090,
+          "description": "Port serving edge health and Prometheus metrics (TOWONEL_EDGE_HEALTH_LISTEN_ADDR).",
+          "title": "metricsPort",
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "title": "edge",
+      "type": "object"
+    },
+    "env": {
+      "description": "Extra environment variables passed to the container (k8s EnvVar list).\nDeployment-specific configuration (DB DSN, public URLs, region, OTEL) goes here.",
+      "items": {
+        "required": []
+      },
+      "title": "env",
+      "type": "array"
+    },
+    "envFrom": {
+      "description": "Extra envFrom sources (e.g. secrets created by ExternalSecret).",
+      "items": {
+        "required": []
+      },
+      "title": "envFrom",
+      "type": "array"
+    },
+    "fullnameOverride": {
+      "default": "",
+      "description": "Override the full release name.",
+      "title": "fullnameOverride",
+      "type": "string"
+    },
+    "global": {
+      "description": "Global values are values that can be accessed from any chart or subchart by exactly the same name.",
+      "required": [],
+      "title": "global",
+      "type": "object"
+    },
+    "hub": {
+      "description": "Default values for towonel-node — the towonel hub/edge node.\n\nOne towonel-node process can run the hub control plane, the public edge,\nor both (hub.enabled / edge.enabled) — both by default, the single-node\ntopology. The chart derives the workload kind, networking, listeners,\nprobes and resource defaults from the enabled roles: hub-only renders a\nDeployment; an enabled edge renders a hostNetwork DaemonSet that binds\nthe public 443/80 listeners directly on each node.",
+      "properties": {
+        "apiPort": {
+          "default": 8443,
+          "description": "Port the user/operator HTTP API listens on (TOWONEL_HUB_LISTEN_ADDR).",
+          "title": "apiPort",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Run the hub control plane (TOWONEL_HUB_ENABLED).",
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "linkPort": {
+          "default": 51444,
+          "description": "Port edges dial for the hub link (TOWONEL_HUB_LINK_LISTEN_ADDR).",
+          "title": "linkPort",
+          "type": "integer"
+        },
+        "metricsPort": {
+          "default": 9091,
+          "description": "Port serving hub health and Prometheus metrics (TOWONEL_HUB_HEALTH_LISTEN_ADDR).",
+          "title": "metricsPort",
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "title": "hub",
+      "type": "object"
+    },
+    "image": {
+      "properties": {
+        "digest": {
+          "default": "",
+          "description": "Pin the image by digest (sha256:...); when set, overrides the tag.\nThe release pipeline fills it with the published image's digest.",
+          "title": "digest",
+          "type": "string"
+        },
+        "pullPolicy": {
+          "default": "IfNotPresent",
+          "description": "Image pull policy.",
+          "title": "pullPolicy",
+          "type": "string"
+        },
+        "repository": {
+          "default": "codeberg.org/towonel/towonel-node",
+          "description": "Image repository.",
+          "title": "repository",
+          "type": "string"
+        },
+        "tag": {
+          "default": "",
+          "description": "Overrides the image tag; defaults to the chart appVersion.",
+          "title": "tag",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "title": "image",
+      "type": "object"
+    },
+    "imagePullSecrets": {
+      "description": "Image pull secrets for private registries.",
+      "items": {
+        "required": []
+      },
+      "title": "imagePullSecrets",
+      "type": "array"
+    },
+    "livenessProbe": {
+      "description": "Liveness probe. Empty picks the role default (see startupProbe).",
+      "required": [],
+      "title": "livenessProbe",
+      "type": "object"
+    },
+    "monitoring": {
+      "properties": {
+        "dashboards": {
+          "properties": {
+            "annotations": {
+              "description": "Annotations added to the dashboard ConfigMap.",
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "enabled": {
+              "default": false,
+              "description": "Render the Grafana dashboard ConfigMap (for grafana-operator or the\nkube-prometheus-stack sidecar). The dashboard covers hub and edge metrics.",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "grafanaOperator": {
+              "properties": {
+                "allowCrossNamespaceImport": {
+                  "default": true,
+                  "description": "If true allows for a Grafana in any namespace to access this GrafanaDashboard.",
+                  "title": "allowCrossNamespaceImport",
+                  "type": "boolean"
+                },
+                "enabled": {
+                  "default": false,
+                  "description": "Render a GrafanaDashboard CR (grafana-operator) instead of a sidecar ConfigMap.",
+                  "title": "enabled",
+                  "type": "boolean"
+                },
+                "folder": {
+                  "default": "",
+                  "description": "Folder to create the dashboard in.",
+                  "title": "folder",
+                  "type": "string"
+                },
+                "matchLabels": {
+                  "description": "Selector labels for the Grafana instance. Must be set when enabled.",
+                  "required": [],
+                  "title": "matchLabels",
+                  "type": "object"
+                },
+                "resyncPeriod": {
+                  "default": "10m",
+                  "description": "Resync period for the Grafana operator to check for updates to the dashboard.",
+                  "title": "resyncPeriod",
+                  "type": "string"
+                }
+              },
+              "required": [],
+              "title": "grafanaOperator",
+              "type": "object"
+            },
+            "labels": {
+              "description": "Labels added to the dashboard ConfigMap.",
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            },
+            "namespace": {
+              "default": "",
+              "description": "Namespace for the dashboard objects; defaults to the release namespace.",
+              "title": "namespace",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "dashboards",
+          "type": "object"
+        },
+        "prometheusRule": {
+          "properties": {
+            "additionalRuleLabels": {
+              "description": "Extra labels added to every alert rule (e.g. cluster).",
+              "required": [],
+              "title": "additionalRuleLabels",
+              "type": "object"
+            },
+            "annotations": {
+              "description": "PrometheusRule annotations.",
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "enabled": {
+              "default": false,
+              "description": "Create a PrometheusRule with the hub alerting rules\n(rendered only when the hub is enabled).",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "labels": {
+              "description": "PrometheusRule labels.",
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            }
+          },
+          "required": [],
+          "title": "prometheusRule",
+          "type": "object"
+        },
+        "serviceMonitor": {
+          "properties": {
+            "annotations": {
+              "description": "ServiceMonitor annotations.",
+              "required": [],
+              "title": "annotations",
+              "type": "object"
+            },
+            "enabled": {
+              "default": false,
+              "description": "Create a Prometheus Operator ServiceMonitor with an endpoint per\nenabled role (requires its CRDs).",
+              "title": "enabled",
+              "type": "boolean"
+            },
+            "interval": {
+              "default": "30s",
+              "description": "Scrape interval.",
+              "title": "interval",
+              "type": "string"
+            },
+            "labels": {
+              "description": "ServiceMonitor labels.",
+              "required": [],
+              "title": "labels",
+              "type": "object"
+            },
+            "metricRelabelings": {
+              "description": "Prometheus metric relabelings.",
+              "items": {
+                "required": []
+              },
+              "title": "metricRelabelings",
+              "type": "array"
+            },
+            "path": {
+              "default": "/metrics",
+              "description": "Metrics path.",
+              "title": "path",
+              "type": "string"
+            },
+            "relabelings": {
+              "description": "Prometheus relabelings (applied before scraping).",
+              "items": {
+                "required": []
+              },
+              "title": "relabelings",
+              "type": "array"
+            },
+            "scrapeTimeout": {
+              "default": "10s",
+              "description": "Scrape timeout.",
+              "title": "scrapeTimeout",
+              "type": "string"
+            }
+          },
+          "required": [],
+          "title": "serviceMonitor",
+          "type": "object"
+        }
+      },
+      "required": [],
+      "title": "monitoring",
+      "type": "object"
+    },
+    "nameOverride": {
+      "default": "",
+      "description": "Override the chart name used in resource names.",
+      "title": "nameOverride",
+      "type": "string"
+    },
+    "nodeSelector": {
+      "description": "Node selector for pod scheduling.",
+      "required": [],
+      "title": "nodeSelector",
+      "type": "object"
+    },
+    "podAnnotations": {
+      "description": "Annotations added to the pod.",
+      "required": [],
+      "title": "podAnnotations",
+      "type": "object"
+    },
+    "podLabels": {
+      "description": "Labels added to the pod.",
+      "required": [],
+      "title": "podLabels",
+      "type": "object"
+    },
+    "podSecurityContext": {
+      "description": "Pod-level securityContext. Empty picks the role default: non-root\nuid/gid 10001 for hub-only; unset when the edge is enabled (it must run\nas root to bind the privileged host ports).",
+      "required": [],
+      "title": "podSecurityContext",
+      "type": "object"
+    },
+    "readinessProbe": {
+      "description": "Readiness probe. Empty picks the role default (/health on edge-metrics\nwhen the edge is enabled, /v1/readyz on hub-api otherwise).",
+      "required": [],
+      "title": "readinessProbe",
+      "type": "object"
+    },
+    "replicaCount": {
+      "default": 1,
+      "description": "Number of replicas (Deployment only; only one hub replica is the active leader).",
+      "title": "replicaCount",
+      "type": "integer"
+    },
+    "resources": {
+      "description": "Pod resource requests/limits. Empty picks the role default:\n500m/256Mi requests + 2Gi limit when the edge is enabled,\n100m/256Mi requests + 512Mi limit otherwise.",
+      "required": [],
+      "title": "resources",
+      "type": "object"
+    },
+    "securityContext": {
+      "description": "Container securityContext (read-only root filesystem, drops ALL\ncapabilities, keeps NET_BIND_SERVICE for the edge's privileged listeners).",
+      "properties": {
+        "allowPrivilegeEscalation": {
+          "default": false,
+          "title": "allowPrivilegeEscalation",
+          "type": "boolean"
+        },
+        "capabilities": {
+          "properties": {
+            "add": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  }
+                ],
+                "required": []
+              },
+              "title": "add",
+              "type": "array"
+            },
+            "drop": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  }
+                ],
+                "required": []
+              },
+              "title": "drop",
+              "type": "array"
+            }
+          },
+          "required": [],
+          "title": "capabilities",
+          "type": "object"
+        },
+        "readOnlyRootFilesystem": {
+          "default": true,
+          "title": "readOnlyRootFilesystem",
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "title": "securityContext",
+      "type": "object"
+    },
+    "service": {
+      "description": "Service configuration. Ports follow the enabled roles' listener ports.",
+      "properties": {
+        "annotations": {
+          "description": "Annotations for the Service.",
+          "required": [],
+          "title": "annotations",
+          "type": "object"
+        },
+        "enabled": {
+          "default": true,
+          "description": "Create a Service for the enabled listeners.",
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "type": {
+          "default": "ClusterIP",
+          "description": "Service type.",
+          "title": "type",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "title": "service",
+      "type": "object"
+    },
+    "serviceAccount": {
+      "properties": {
+        "annotations": {
+          "description": "Annotations for the ServiceAccount.",
+          "required": [],
+          "title": "annotations",
+          "type": "object"
+        },
+        "automount": {
+          "default": false,
+          "description": "Automount the API token (off by default: the node does not talk to the cluster API).",
+          "title": "automount",
+          "type": "boolean"
+        },
+        "create": {
+          "default": true,
+          "description": "Create a ServiceAccount.",
+          "title": "create",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "",
+          "description": "ServiceAccount name; generated from the release name if empty.",
+          "title": "name",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "title": "serviceAccount",
+      "type": "object"
+    },
+    "startupProbe": {
+      "description": "Startup probe. Empty picks the role default (/health on the edge-metrics\nport when the edge is enabled, /v1/health on hub-api otherwise).",
+      "required": [],
+      "title": "startupProbe",
+      "type": "object"
+    },
+    "terminationGracePeriodSeconds": {
+      "default": 30,
+      "description": "Grace period for in-flight connections on shutdown.",
+      "title": "terminationGracePeriodSeconds",
+      "type": "integer"
+    },
+    "tolerations": {
+      "description": "Tolerations for pod scheduling.",
+      "items": {
+        "required": []
+      },
+      "title": "tolerations",
+      "type": "array"
+    },
+    "updateStrategy": {
+      "description": "Update strategy (DaemonSet only).",
+      "required": [],
+      "title": "updateStrategy",
+      "type": "object"
+    },
+    "volumeMounts": {
+      "description": "Additional volume mounts on the container.",
+      "items": {
+        "required": []
+      },
+      "title": "volumeMounts",
+      "type": "array"
+    },
+    "volumes": {
+      "description": "Additional volumes on the workload (e.g. postgres client certificates).",
+      "items": {
+        "required": []
+      },
+      "title": "volumes",
+      "type": "array"
+    },
+    "workload": {
+      "properties": {
+        "annotations": {
+          "description": "Annotations added to the workload (e.g. reloader.stakater.com/auto).",
+          "required": [],
+          "title": "annotations",
+          "type": "object"
+        },
+        "kind": {
+          "default": "",
+          "description": "Workload kind: Deployment or DaemonSet. Empty picks the role default\n(DaemonSet when the edge is enabled, Deployment otherwise).",
+          "title": "kind",
+          "type": "string"
+        }
+      },
+      "required": [],
+      "title": "workload",
+      "type": "object"
+    }
+  },
+  "required": [],
+  "type": "object"
+}

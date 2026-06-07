@@ -1,0 +1,34 @@
+suite: prometheusrule
+templates:
+  - prometheusrule.yaml
+tests:
+  - it: should not render by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should render agent alert rules when enabled
+    set:
+      monitoring.prometheusRule.enabled: true
+    asserts:
+      - isKind:
+          of: PrometheusRule
+      - equal:
+          path: spec.groups[0].name
+          value: towonel-agent.rules
+      - equal:
+          path: spec.groups[0].rules[0].alert
+          value: TowonelAgentNoEdgeSessions
+
+  - it: should add additional rule labels to every rule
+    set:
+      monitoring.prometheusRule.enabled: true
+      monitoring.prometheusRule.additionalRuleLabels:
+        cluster: homelab
+    asserts:
+      - equal:
+          path: spec.groups[0].rules[0].labels.cluster
+          value: homelab
+      - equal:
+          path: spec.groups[0].rules[2].labels.cluster
+          value: homelab

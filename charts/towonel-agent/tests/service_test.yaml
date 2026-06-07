@@ -1,0 +1,27 @@
+suite: service
+templates:
+  - service.yaml
+tests:
+  - it: should expose the metrics port
+    asserts:
+      - isKind:
+          of: Service
+      - contains:
+          path: spec.ports
+          content:
+            name: metrics
+            port: 9090
+            targetPort: metrics
+            protocol: TCP
+
+  - it: should follow a custom health port
+    set:
+      agent.healthPort: 9999
+    asserts:
+      - contains:
+          path: spec.ports
+          content:
+            name: metrics
+            port: 9999
+            targetPort: metrics
+            protocol: TCP

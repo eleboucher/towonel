@@ -1,0 +1,103 @@
+{{- if and .Values.monitoring.prometheusRule.enabled .Values.hub.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "towonel-node.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "towonel-node.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.monitoring.prometheusRule.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: towonel-hub.rules
+      rules:
+        - alert: TowonelHubMetricsAbsent
+          expr: |-
+            absent(towonel_hub_is_leader)
+          for: 10m
+          annotations:
+            summary: >-
+              No towonel hub metrics received for 10 minutes — the hub is down
+              or its scrape is broken
+          labels:
+            severity: critical
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+        - alert: TowonelHubNoLeader
+          expr: |-
+            max(towonel_hub_is_leader) == 0
+          for: 5m
+          annotations:
+            summary: >-
+              No towonel hub replica is the active leader — route rebuilds and
+              leader-gated work are stalled
+          labels:
+            severity: critical
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+        - alert: TowonelHubHigh5xx
+          expr: |-
+            sum by (endpoint) (rate(towonel_hub_requests_total{status=~"5.."}[5m])) > 0.1
+          for: 10m
+          annotations:
+            summary: >-
+              Towonel hub is returning {{ `{{ $value | humanize }}` }} 5xx/s on
+              {{ `{{ $labels.endpoint }}` }}
+          labels:
+            severity: critical
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+        - alert: TowonelHubRateLimiting
+          expr: |-
+            sum by (endpoint) (rate(towonel_hub_requests_total{status="429"}[5m])) > 0.2
+          for: 15m
+          annotations:
+            summary: >-
+              Towonel hub is rate-limiting {{ `{{ $value | humanize }}` }} req/s (429) on
+              {{ `{{ $labels.endpoint }}` }} — agents or users are being throttled
+          labels:
+            severity: warning
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+        - alert: TowonelHubEntriesRejected
+          expr: |-
+            sum by (reason) (rate(towonel_hub_entries_rejected_total[5m])) > 0.2
+          for: 15m
+          annotations:
+            summary: >-
+              Towonel hub is rejecting {{ `{{ $value | humanize }}` }} signed config entries/s
+              with reason {{ `{{ $labels.reason }}` }}
+          labels:
+            severity: warning
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+        - alert: TowonelHubOidcJwksStale
+          expr: |-
+            time() - max by (provider) (towonel_hub_oidc_jwks_last_refresh_success_timestamp_seconds) > 86400
+          for: 1h
+          annotations:
+            summary: >-
+              OIDC metadata for {{ `{{ $labels.provider }}` }} has not refreshed in over 24h
+              (refresh interval is 12h) — OIDC logins may start failing
+          labels:
+            severity: warning
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+{{- end }}

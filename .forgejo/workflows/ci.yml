@@ -99,6 +99,54 @@ jobs:
           tool: taplo-cli
       - run: taplo fmt --check
 
+  helm:
+    runs-on: docker
+    env:
+      # renovate: datasource=github-releases depName=helm-unittest/helm-unittest
+      HELM_UNITTEST_VERSION: "1.1.1"
+      # renovate: datasource=github-releases depName=norwoodj/helm-docs
+      HELM_DOCS_VERSION: "1.14.2"
+      # renovate: datasource=github-releases depName=dadav/helm-schema
+      HELM_SCHEMA_VERSION: "0.23.4"
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://github.com/azure/setup-helm@v5
+      - name: Install helm-unittest
+        run: helm plugin install https://github.com/helm-unittest/helm-unittest.git --version "v${HELM_UNITTEST_VERSION}"
+      - name: Install helm-docs and helm-schema
+        run: |
+          set -euo pipefail
+          install_release() {
+            local archive="$1" url="$2" checksums="$3" bin="$4"
+            curl -fsSL -o "${archive}" "${url}/${archive}"
+            curl -fsSL "${url}/${checksums}" | grep "[[:space:]]${archive}\$" | sha256sum -c -
+            tar -xzf "${archive}" "${bin}"
+            install -m 0755 "${bin}" /usr/local/bin/
+            rm -f "${archive}" "${bin}"
+          }
+          install_release "helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz" \
+            "https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}" \
+            checksums.txt helm-docs
+          install_release "helm-schema_${HELM_SCHEMA_VERSION}_Linux_x86_64.tar.gz" \
+            "https://github.com/dadav/helm-schema/releases/download/${HELM_SCHEMA_VERSION}" \
+            checksums.txt helm-schema
+      - name: Lint charts
+        run: |
+          set -euo pipefail
+          for chart in charts/*/; do
+            helm lint "$chart"
+          done
+      - name: Run chart unit tests
+        run: helm unittest charts/*
+      - name: Check chart docs are current
+        run: |
+          set -euo pipefail
+          cp deploy/grafana/towonel-hub.json charts/towonel-node/dashboards/towonel-node.json
+          cp deploy/grafana/towonel-agent.json charts/towonel-agent/dashboards/towonel-agent.json
+          helm-docs --chart-search-root=charts --log-level=warn
+          helm-schema --chart-search-root charts --skip-auto-generation required,additionalProperties --append-newline
+          git diff --exit-code charts/*/README.md charts/*/values.schema.json charts/*/dashboards
+
   e2e:
     if: github.ref == 'refs/heads/main'
     runs-on: docker

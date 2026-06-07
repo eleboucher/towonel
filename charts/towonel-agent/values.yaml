@@ -1,0 +1,207 @@
+---
+# Default values for towonel-agent — origin-side connector for towonel tunnels.
+
+# -- Number of agent replicas (two give edge-session redundancy).
+replicaCount: 2
+
+image:
+  # -- Image repository.
+  repository: codeberg.org/towonel/towonel-agent
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+  # -- Overrides the image tag; defaults to the chart appVersion.
+  tag: ""
+  # -- Pin the image by digest (sha256:...); when set, overrides the tag.
+  # The release pipeline fills it with the published image's digest.
+  digest: ""
+
+# -- Image pull secrets for private registries.
+imagePullSecrets: []
+
+# -- Override the chart name used in resource names.
+nameOverride: ""
+# -- Override the full release name.
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a ServiceAccount.
+  create: true
+  # -- Automount the API token (off by default: the agent does not talk to the cluster API).
+  automount: false
+  # -- Annotations for the ServiceAccount.
+  annotations: {}
+  # -- ServiceAccount name; generated from the release name if empty.
+  name: ""
+
+# -- Annotations added to the Deployment (e.g. reloader.stakater.com/auto).
+deploymentAnnotations: {}
+
+# -- Annotations added to the pod.
+podAnnotations: {}
+# -- Labels added to the pod.
+podLabels: {}
+
+# -- Pod-level securityContext (runs as non-root uid/gid 10001).
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container securityContext (no privilege escalation, read-only root
+# filesystem, drops ALL capabilities).
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+agent:
+  # -- Log level (RUST_LOG).
+  logLevel: info
+  # -- Port serving health and Prometheus metrics (TOWONEL_AGENT_HEALTH_LISTEN_ADDR).
+  healthPort: 9090
+  # -- HTTPS services exposed through the tunnel (TOWONEL_AGENT_SERVICES).
+  services: []
+  # - hostname: "*.example.com"
+  #   origin: envoy-external.network.svc.cluster.local:443
+  # -- Raw TCP services exposed through the tunnel (TOWONEL_AGENT_TCP_SERVICES).
+  tcpServices: []
+  # - name: forgejo-ssh
+  #   origin: envoy-external.network.svc.cluster.local:2222
+  #   listen_port: 2222
+  # -- UDP services exposed through the tunnel (TOWONEL_AGENT_UDP_SERVICES).
+  udpServices: []
+  # - name: stunner-turn-udp
+  #   origin: stunner.network.svc.cluster.local:3478
+  #   listen_port: 3478
+  inviteTokenSecret:
+    # -- Name of the Secret holding the invite token (TOWONEL_INVITE_TOKEN).
+    # Leave empty to skip the env var.
+    name: ""
+    # -- Key inside the Secret.
+    key: TOWONEL_INVITE_TOKEN
+
+# -- Extra environment variables passed to the container (k8s EnvVar list).
+env: []
+
+# -- Extra envFrom sources.
+envFrom: []
+
+# -- Startup probe (on the named metrics port).
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 2
+  periodSeconds: 2
+  failureThreshold: 30
+
+# -- Liveness probe.
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 10
+  periodSeconds: 30
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# -- Readiness probe.
+readinessProbe:
+  httpGet:
+    path: /healthz
+    port: metrics
+  initialDelaySeconds: 3
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# -- Pod resource requests/limits.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+# -- Grace period for in-flight streams on shutdown.
+terminationGracePeriodSeconds: 30
+
+# -- Additional volumes on the Deployment.
+volumes: []
+
+# -- Additional volume mounts on the container.
+volumeMounts: []
+
+# -- Node selector for pod scheduling.
+nodeSelector: {}
+
+# -- Tolerations for pod scheduling.
+tolerations: []
+
+# -- Affinity rules for pod scheduling.
+affinity: {}
+
+# Service configuration for the metrics endpoint.
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Annotations for the Service.
+  annotations: {}
+
+monitoring:
+  serviceMonitor:
+    # -- Create a Prometheus Operator ServiceMonitor (requires its CRDs).
+    enabled: false
+    # -- Scrape interval.
+    interval: 30s
+    # -- Scrape timeout.
+    scrapeTimeout: 10s
+    # -- Metrics path.
+    path: /metrics
+    # -- ServiceMonitor labels.
+    labels: {}
+    # -- ServiceMonitor annotations.
+    annotations: {}
+    # -- Prometheus metric relabelings.
+    metricRelabelings: []
+    # -- Prometheus relabelings (applied before scraping).
+    relabelings: []
+
+  prometheusRule:
+    # -- Create a PrometheusRule with the agent alerting rules.
+    enabled: false
+    # -- PrometheusRule annotations.
+    annotations: {}
+    # -- PrometheusRule labels.
+    labels: {}
+    # -- Extra labels added to every alert rule (e.g. cluster).
+    additionalRuleLabels: {}
+
+  dashboards:
+    # -- Render the Grafana dashboard ConfigMap (for grafana-operator or the
+    # kube-prometheus-stack sidecar).
+    enabled: false
+    # -- Namespace for the dashboard objects; defaults to the release namespace.
+    namespace: ""
+    # -- Annotations added to the dashboard ConfigMap.
+    annotations: {}
+    # -- Labels added to the dashboard ConfigMap.
+    labels: {}
+    grafanaOperator:
+      # -- Render a GrafanaDashboard CR (grafana-operator) instead of a sidecar ConfigMap.
+      enabled: false
+      # -- If true allows for a Grafana in any namespace to access this GrafanaDashboard.
+      allowCrossNamespaceImport: true
+      # -- Folder to create the dashboard in.
+      folder: ""
+      # -- Resync period for the Grafana operator to check for updates to the dashboard.
+      resyncPeriod: "10m"
+      # -- Selector labels for the Grafana instance. Must be set when enabled.
+      matchLabels: {}
+      # matchLabels:
+      #   dashboards: grafana

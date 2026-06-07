@@ -1,0 +1,61 @@
+{{- if .Values.monitoring.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "towonel-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "towonel-agent.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.monitoring.prometheusRule.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: towonel-agent.rules
+      rules:
+        - alert: TowonelAgentNoEdgeSessions
+          expr: |-
+            sum by (instance) (towonel_agent_edge_session_state) == 0
+          for: 10m
+          annotations:
+            summary: >-
+              Towonel agent {{ `{{ $labels.instance }}` }} holds no edge session — its
+              tunnels are unreachable
+          labels:
+            severity: critical
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+        - alert: TowonelAgentStreamErrors
+          expr: |-
+            sum by (instance, reason) (rate(towonel_agent_stream_errors_total[5m])) > 0.5
+          for: 10m
+          annotations:
+            summary: >-
+              Towonel agent {{ `{{ $labels.instance }}` }} is failing
+              {{ `{{ $value | humanize }}` }} streams/s with reason {{ `{{ $labels.reason }}` }}
+          labels:
+            severity: warning
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+
+        - alert: TowonelAgentFlapping
+          expr: |-
+            sum by (instance, edge) (increase(towonel_agent_edge_session_reconnects_total[15m])) > 5
+          annotations:
+            summary: >-
+              Towonel agent {{ `{{ $labels.instance }}` }} reconnected to edge
+              {{ `{{ $labels.edge }}` }} {{ `{{ $value }}` }} times in 15 minutes —
+              unstable path or edge
+          labels:
+            severity: warning
+            {{- with .Values.monitoring.prometheusRule.additionalRuleLabels }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+{{- end }}

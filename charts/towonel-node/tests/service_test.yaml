@@ -1,0 +1,81 @@
+suite: service
+templates:
+  - service.yaml
+tests:
+  - it: should expose all ports by default (combined)
+    asserts:
+      - isKind:
+          of: Service
+      - lengthEqual:
+          path: spec.ports
+          count: 6
+
+  - it: should expose only hub ports when hub-only
+    set:
+      edge.enabled: false
+    asserts:
+      - contains:
+          path: spec.ports
+          content:
+            name: hub-api
+            port: 8443
+            targetPort: hub-api
+            protocol: TCP
+      - contains:
+          path: spec.ports
+          content:
+            name: hub-link
+            port: 51444
+            targetPort: hub-link
+            protocol: TCP
+      - contains:
+          path: spec.ports
+          content:
+            name: hub-metrics
+            port: 9091
+            targetPort: hub-metrics
+            protocol: TCP
+      - notContains:
+          path: spec.ports
+          content:
+            name: edge
+          any: true
+
+  - it: should expose only edge ports when edge-only
+    set:
+      hub.enabled: false
+      edge.enabled: true
+    asserts:
+      - contains:
+          path: spec.ports
+          content:
+            name: edge
+            port: 443
+            targetPort: edge
+            protocol: TCP
+      - contains:
+          path: spec.ports
+          content:
+            name: edge-http
+            port: 80
+            targetPort: edge-http
+            protocol: TCP
+      - contains:
+          path: spec.ports
+          content:
+            name: edge-metrics
+            port: 9090
+            targetPort: edge-metrics
+            protocol: TCP
+      - notContains:
+          path: spec.ports
+          content:
+            name: hub-api
+          any: true
+
+  - it: should not render when disabled
+    set:
+      service.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0

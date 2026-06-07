@@ -1,0 +1,10 @@
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as Deployment {{ include "towonel-agent.fullname" . }} ({{ .Values.replicaCount }} replicas).
+
+{{- if not .Values.agent.inviteTokenSecret.name }}
+
+WARNING: agent.inviteTokenSecret.name is not set; without an invite token
+the agent cannot register with the hub.
+{{- end }}
+
+Values reference:
+https://codeberg.org/towonel/towonel/src/branch/main/charts/towonel-agent/README.md

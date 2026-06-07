@@ -1,0 +1,156 @@
+{{- if not (or .Values.hub.enabled .Values.edge.enabled) }}
+{{- fail "at least one of hub.enabled or edge.enabled must be true" }}
+{{- end }}
+{{- $kind := include "towonel-node.kind" . }}
+---
+apiVersion: apps/v1
+kind: {{ $kind }}
+metadata:
+  name: {{ include "towonel-node.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "towonel-node.labels" . | nindent 4 }}
+  {{- with .Values.workload.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if eq $kind "Deployment" }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "towonel-node.selectorLabels" . | nindent 6 }}
+  {{- if eq $kind "DaemonSet" }}
+  {{- with .Values.updateStrategy }}
+  updateStrategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "towonel-node.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      enableServiceLinks: false
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- if .Values.edge.enabled }}
+      hostNetwork: true
+      {{- end }}
+      dnsPolicy: {{ .Values.dnsPolicy | default (.Values.edge.enabled | ternary "ClusterFirstWithHostNet" "ClusterFirst") }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "towonel-node.serviceAccountName" . }}
+      {{- with include "towonel-node.podSecurityContext" . }}
+      securityContext:
+        {{- . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: towonel
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: {{ include "towonel-node.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: TOWONEL_HUB_ENABLED
+              value: {{ .Values.hub.enabled | quote }}
+            - name: TOWONEL_EDGE_ENABLED
+              value: {{ .Values.edge.enabled | quote }}
+            {{- if .Values.hub.enabled }}
+            - name: TOWONEL_HUB_LISTEN_ADDR
+              value: 0.0.0.0:{{ .Values.hub.apiPort }}
+            - name: TOWONEL_HUB_LINK_LISTEN_ADDR
+              value: 0.0.0.0:{{ .Values.hub.linkPort }}
+            - name: TOWONEL_HUB_HEALTH_LISTEN_ADDR
+              value: 0.0.0.0:{{ .Values.hub.metricsPort }}
+            {{- end }}
+            {{- if .Values.edge.enabled }}
+            - name: TOWONEL_EDGE_LISTEN_ADDR
+              value: {{ printf "%s:%d" .Values.edge.bindAddress (int .Values.edge.httpsPort) | quote }}
+            - name: TOWONEL_EDGE_HTTP_LISTEN_ADDR
+              value: {{ printf "%s:%d" .Values.edge.bindAddress (int .Values.edge.httpPort) | quote }}
+            - name: TOWONEL_EDGE_HEALTH_LISTEN_ADDR
+              value: {{ printf "%s:%d" .Values.edge.healthBindAddress (int .Values.edge.metricsPort) | quote }}
+            - name: TOWONEL_DATA_DIR
+              value: {{ .Values.edge.dataDir | quote }}
+            {{- end }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            {{- if .Values.hub.enabled }}
+            - name: hub-api
+              containerPort: {{ .Values.hub.apiPort }}
+              protocol: TCP
+            - name: hub-link
+              containerPort: {{ .Values.hub.linkPort }}
+              protocol: TCP
+            - name: hub-metrics
+              containerPort: {{ .Values.hub.metricsPort }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.edge.enabled }}
+            - name: edge
+              containerPort: {{ .Values.edge.httpsPort }}
+              protocol: TCP
+            - name: edge-http
+              containerPort: {{ .Values.edge.httpPort }}
+              protocol: TCP
+            - name: edge-metrics
+              containerPort: {{ .Values.edge.metricsPort }}
+              protocol: TCP
+            {{- end }}
+          startupProbe:
+            {{- include "towonel-node.startupProbe" . | nindent 12 }}
+          livenessProbe:
+            {{- include "towonel-node.livenessProbe" . | nindent 12 }}
+          readinessProbe:
+            {{- include "towonel-node.readinessProbe" . | nindent 12 }}
+          resources:
+            {{- include "towonel-node.resources" . | nindent 12 }}
+          {{- if or .Values.edge.enabled .Values.volumeMounts }}
+          volumeMounts:
+            {{- if .Values.edge.enabled }}
+            - name: data
+              mountPath: {{ .Values.edge.dataDir }}
+            {{- end }}
+            {{- with .Values.volumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+      {{- if or .Values.edge.enabled .Values.volumes }}
+      volumes:
+        {{- if .Values.edge.enabled }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- with .Values.volumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

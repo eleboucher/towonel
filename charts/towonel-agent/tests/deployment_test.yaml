@@ -1,0 +1,151 @@
+suite: deployment
+templates:
+  - deployment.yaml
+tests:
+  - it: should be a Deployment
+    asserts:
+      - isKind:
+          of: Deployment
+
+  - it: should use the correct image
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: codeberg.org/towonel/towonel-agent:0.0.0
+
+  - it: should pin the image by digest when set, overriding the tag
+    set:
+      image.tag: "1.2.3"
+      image.digest: "sha256:abc123"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: codeberg.org/towonel/towonel-agent@sha256:abc123
+
+  - it: should run two replicas by default
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 2
+
+  - it: should expose node name and namespace to the agent
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: POD_NAMESPACE
+            valueFrom:
+              fieldRef:
+                fieldPath: metadata.namespace
+
+  - it: should derive the health listen address from the port value
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_HEALTH_LISTEN_ADDR
+            value: 0.0.0.0:9090
+
+  - it: should not set service env vars when no services are configured
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_SERVICES
+          any: true
+
+  - it: should render services as JSON
+    set:
+      agent.services:
+        - hostname: "*.example.com"
+          origin: envoy-external.network.svc.cluster.local:443
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_SERVICES
+            value: '[{"hostname":"*.example.com","origin":"envoy-external.network.svc.cluster.local:443"}]'
+
+  - it: should render tcp and udp services as JSON
+    set:
+      agent.tcpServices:
+        - name: forgejo-ssh
+          origin: envoy-external.network.svc.cluster.local:2222
+          listen_port: 2222
+      agent.udpServices:
+        - name: stunner-turn-udp
+          origin: stunner.network.svc.cluster.local:3478
+          listen_port: 3478
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_TCP_SERVICES
+            value: '[{"listen_port":2222,"name":"forgejo-ssh","origin":"envoy-external.network.svc.cluster.local:2222"}]'
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_UDP_SERVICES
+            value: '[{"listen_port":3478,"name":"stunner-turn-udp","origin":"stunner.network.svc.cluster.local:3478"}]'
+
+  - it: should wire the invite token from a secret
+    set:
+      agent.inviteTokenSecret.name: towonel-agent-secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_INVITE_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: towonel-agent-secret
+                key: TOWONEL_INVITE_TOKEN
+
+  - it: should not wire the invite token by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_INVITE_TOKEN
+          any: true
+
+  - it: should set the log level
+    set:
+      agent.logLevel: debug
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RUST_LOG
+            value: debug
+
+  - it: should set pod and container security contexts
+    asserts:
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 10001
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+
+  - it: should not mount the service account token by default
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+
+  - it: should probe /healthz on the named metrics port
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: metrics

@@ -1,0 +1,46 @@
+{{- if .Values.service.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "towonel-node.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "towonel-node.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    {{- if .Values.hub.enabled }}
+    - name: hub-api
+      port: {{ .Values.hub.apiPort }}
+      targetPort: hub-api
+      protocol: TCP
+    - name: hub-link
+      port: {{ .Values.hub.linkPort }}
+      targetPort: hub-link
+      protocol: TCP
+    - name: hub-metrics
+      port: {{ .Values.hub.metricsPort }}
+      targetPort: hub-metrics
+      protocol: TCP
+    {{- end }}
+    {{- if .Values.edge.enabled }}
+    - name: edge
+      port: {{ .Values.edge.httpsPort }}
+      targetPort: edge
+      protocol: TCP
+    - name: edge-http
+      port: {{ .Values.edge.httpPort }}
+      targetPort: edge-http
+      protocol: TCP
+    - name: edge-metrics
+      port: {{ .Values.edge.metricsPort }}
+      targetPort: edge-metrics
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "towonel-node.selectorLabels" . | nindent 4 }}
+{{- end }}
