@@ -98,7 +98,13 @@ impl SessionRegistry {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                Ok(_) => return true,
+                Ok(_) => {
+                    self.metrics
+                        .tenant_active_sessions
+                        .with_label_values(&[&tenant_id.to_string()])
+                        .inc();
+                    return true;
+                }
                 Err(observed) => current = observed,
             }
         }
@@ -115,7 +121,13 @@ impl SessionRegistry {
                     Ordering::Relaxed,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => return,
+                    Ok(_) => {
+                        self.metrics
+                            .tenant_active_sessions
+                            .with_label_values(&[&tenant_id.to_string()])
+                            .dec();
+                        return;
+                    }
                     Err(observed) => current = observed,
                 }
             }
@@ -270,6 +282,38 @@ mod tests {
         assert_eq!(registry.iroh_count(&tenant), MAX - 1);
         assert!(registry.record_tenant(a3, tenant));
         assert_eq!(registry.iroh_count(&tenant), MAX);
+    }
+
+    #[test]
+    fn tenant_active_sessions_gauge_tracks_slots() {
+        let registry = SessionRegistry::new(EdgeMetrics::new(), 2);
+        let tenant = TenantId::from_bytes(&[9u8; 32]);
+        let gauge = || {
+            registry
+                .metrics
+                .tenant_active_sessions
+                .with_label_values(&[&tenant.to_string()])
+                .get()
+        };
+        let a1 = iroh::SecretKey::generate().public();
+        let a2 = iroh::SecretKey::generate().public();
+        let a3 = iroh::SecretKey::generate().public();
+
+        assert!(registry.record_tenant(a1, tenant));
+        assert!(registry.record_tenant(a2, tenant));
+        assert_eq!(gauge(), 2);
+
+        // Over-limit and duplicate records must not move the gauge.
+        assert!(!registry.record_tenant(a3, tenant));
+        assert!(registry.record_tenant(a1, tenant));
+        assert_eq!(gauge(), 2);
+
+        registry.release_iroh(&tenant);
+        assert_eq!(gauge(), 1);
+        // Draining past zero must not underflow the gauge.
+        registry.release_iroh(&tenant);
+        registry.release_iroh(&tenant);
+        assert_eq!(gauge(), 0);
     }
 
     #[test]

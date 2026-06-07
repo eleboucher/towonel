@@ -673,6 +673,12 @@ async fn pick_agent_and_open_stream(
         for agent_addr in &candidates {
             match open_agent_stream(&ctx.sessions, &ctx.metrics, agent_addr.id).await {
                 Ok((send, recv)) => {
+                    if let Some(tenant) = ctx.sessions.tenant_for(&agent_addr.id) {
+                        ctx.metrics
+                            .tenant_connections_total
+                            .with_label_values(&[&tenant.to_string()])
+                            .inc();
+                    }
                     return Ok((agent_addr.clone(), send, recv));
                 }
                 Err(e) => {
@@ -820,6 +826,10 @@ async fn handle_connection_inner(
         };
         ctx.metrics.total_bytes_in.inc_by(bytes_in);
         ctx.metrics.total_bytes_out.inc_by(bytes_out);
+        if let Some(tenant) = ctx.sessions.tenant_for(&agent_addr.id) {
+            ctx.metrics
+                .record_tenant_bytes(&tenant, bytes_in, bytes_out);
+        }
         #[expect(
             clippy::cast_possible_truncation,
             reason = "connection won't last 584 million years"
@@ -964,6 +974,10 @@ async fn handle_http_connection_inner(
 
         ctx.metrics.total_bytes_in.inc_by(bytes_in);
         ctx.metrics.total_bytes_out.inc_by(bytes_out);
+        if let Some(tenant) = ctx.sessions.tenant_for(&agent_addr.id) {
+            ctx.metrics
+                .record_tenant_bytes(&tenant, bytes_in, bytes_out);
+        }
         #[expect(
             clippy::cast_possible_truncation,
             reason = "connection won't last 584 million years"
@@ -1253,6 +1267,8 @@ async fn handle_tcp_connection(
 
         ctx.metrics.total_bytes_in.inc_by(bytes_in);
         ctx.metrics.total_bytes_out.inc_by(bytes_out);
+        ctx.metrics
+            .record_tenant_bytes(&binding.tenant, bytes_in, bytes_out);
 
         #[expect(
             clippy::cast_possible_truncation,
@@ -1425,6 +1441,12 @@ async fn udp_listen_loop(
         Arc::new(tokio::sync::Mutex::new(UdpSessions::new()));
     let session_cap = max_udp_sessions_from_env();
 
+    // Per-datagram hot path: resolve the tenant's counter child once.
+    let tenant_bytes_in = ctx
+        .metrics
+        .tenant_bytes
+        .with_label_values(&[&binding.tenant.to_string(), "in"]);
+
     let mut buf = vec![0u8; MAX_UDP_DATAGRAM];
     loop {
         let (n, peer_addr) = match socket.recv_from(&mut buf).await {
@@ -1435,6 +1457,7 @@ async fn udp_listen_loop(
             }
         };
         ctx.metrics.total_bytes_in.inc_by(n as u64);
+        tenant_bytes_in.inc_by(n as u64);
         #[expect(
             clippy::indexing_slicing,
             reason = "UdpSocket::recv_from bounds n <= buf.len()"
@@ -1545,6 +1568,12 @@ async fn udp_session_pump(
 
         debug!(agent = %agent_addr.id.fmt_short(), "udp session opened");
 
+        // Per-datagram hot path: resolve the tenant's counter child once.
+        let tenant_bytes_out = ctx
+            .metrics
+            .tenant_bytes
+            .with_label_values(&[&binding.tenant.to_string(), "out"]);
+
         // `select!` (not `join!`) so an idle-timeout on the edge->agent side
         // tears down the agent->edge side too. Otherwise a quiet origin
         // would leak one task per session.
@@ -1571,7 +1600,10 @@ async fn udp_session_pump(
                             )]
                             let payload = &buf[..n];
                             match socket.send_to(payload, peer_addr).await {
-                                Ok(sent) => ctx.metrics.total_bytes_out.inc_by(sent as u64),
+                                Ok(sent) => {
+                                    ctx.metrics.total_bytes_out.inc_by(sent as u64);
+                                    tenant_bytes_out.inc_by(sent as u64);
+                                }
                                 Err(e) => {
                                     debug!(error = %e, "udp send_to client failed");
                                     break;

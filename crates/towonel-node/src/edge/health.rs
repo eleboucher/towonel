@@ -5,9 +5,14 @@ use axum::extract::State;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{Router, get};
-use prometheus::{Encoder, IntCounter, IntCounterVec, IntGauge, Registry, TextEncoder};
+use prometheus::{
+    Encoder, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Registry, TextEncoder,
+};
 use serde::Serialize;
-use towonel_common::metrics::{register_counter, register_counter_vec, register_gauge};
+use towonel_common::identity::TenantId;
+use towonel_common::metrics::{
+    register_counter, register_counter_vec, register_gauge, register_gauge_vec,
+};
 
 /// Edge observability surface. Cheap to clone: the `prometheus` metric
 /// types are internally `Arc`-shared and the `Registry` is held as an `Arc`.
@@ -26,6 +31,12 @@ pub struct EdgeMetrics {
     /// `TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS` semaphore) and UDP new-session
     /// overload (per-listener `TOWONEL_EDGE_MAX_UDP_SESSIONS_PER_LISTENER`).
     pub connections_rejected_overload: IntCounter,
+    /// Per-tenant mirrors of the global series above, labelled with the
+    /// hex-encoded `TenantId`. Bounded by the active tenant count; the
+    /// console scopes these server-side for the tenant dashboard.
+    pub tenant_bytes: IntCounterVec,
+    pub tenant_connections_total: IntCounterVec,
+    pub tenant_active_sessions: IntGaugeVec,
     registry: Arc<Registry>,
 }
 
@@ -83,8 +94,41 @@ impl EdgeMetrics {
                  reached. Sustained values mean an accept-time DoS or an under-sized \
                  EDGE_MAX_INFLIGHT_CONNECTIONS.",
             ),
+            tenant_bytes: register_counter_vec(
+                &r,
+                "towonel_edge_tenant_bytes_total",
+                "Bytes forwarded for a tenant, by direction relative to the client \
+                 (in = client to edge, out = edge to client)",
+                &["tenant", "direction"],
+            ),
+            tenant_connections_total: register_counter_vec(
+                &r,
+                "towonel_edge_tenant_connections_total",
+                "Connections and UDP sessions routed to a tenant's agents \
+                 (counted at successful agent pick, so unroutable junk is excluded)",
+                &["tenant"],
+            ),
+            tenant_active_sessions: register_gauge_vec(
+                &r,
+                "towonel_edge_tenant_active_sessions",
+                "Agent iroh connections currently held per tenant \
+                 (the same slots the per-tenant session limit counts)",
+                &["tenant"],
+            ),
             registry: Arc::new(r),
         }
+    }
+
+    /// Record forwarded bytes against the tenant's series. One hex encode of
+    /// the tenant id per call, so call once per connection, not per chunk.
+    pub fn record_tenant_bytes(&self, tenant: &TenantId, bytes_in: u64, bytes_out: u64) {
+        let t = tenant.to_string();
+        self.tenant_bytes
+            .with_label_values(&[&t, "in"])
+            .inc_by(bytes_in);
+        self.tenant_bytes
+            .with_label_values(&[&t, "out"])
+            .inc_by(bytes_out);
     }
 }
 
