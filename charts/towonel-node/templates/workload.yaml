@@ -58,7 +58,7 @@ spec:
       containers:
         - name: towonel
           securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- include "towonel-node.containerSecurityContext" . | nindent 12 }}
           image: {{ include "towonel-node.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:

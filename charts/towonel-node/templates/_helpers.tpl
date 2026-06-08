@@ -81,15 +81,15 @@ Overridable via workload.kind.
 {{- end }}
 
 {{/*
-Pod-level securityContext. An explicit value wins; otherwise hub-only runs
-non-root and the edge runs as root (it must bind the privileged host ports —
-Kubernetes has no ambient capabilities, so NET_BIND_SERVICE alone is not
-enough for non-root).
+Pod-level securityContext. An explicit value wins; otherwise both roles run
+non-root as uid/gid 10001. The edge binds the privileged host ports (443/80)
+as this non-root user via file capabilities (the image is built with
+`setcap cap_net_bind_service` on the binary), so it does not run as root.
 */}}
 {{- define "towonel-node.podSecurityContext" -}}
 {{- if .Values.podSecurityContext -}}
 {{- toYaml .Values.podSecurityContext -}}
-{{- else if not .Values.edge.enabled -}}
+{{- else -}}
 runAsNonRoot: true
 runAsUser: 10001
 runAsGroup: 10001
@@ -97,6 +97,20 @@ fsGroup: 10001
 seccompProfile:
   type: RuntimeDefault
 {{- end -}}
+{{- end }}
+
+{{/*
+Container securityContext. The edge binds 443/80 as the non-root user through
+file capabilities; allowPrivilegeEscalation:false sets NoNewPrivs, which blocks
+the file-cap elevation, so it is stripped when the edge is enabled. hub-only
+binds unprivileged ports and keeps it.
+*/}}
+{{- define "towonel-node.containerSecurityContext" -}}
+{{- $sc := deepCopy .Values.securityContext -}}
+{{- if .Values.edge.enabled -}}
+{{- $_ := unset $sc "allowPrivilegeEscalation" -}}
+{{- end -}}
+{{- toYaml $sc -}}
 {{- end }}
 
 {{/*

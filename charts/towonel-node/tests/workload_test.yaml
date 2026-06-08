@@ -147,6 +147,10 @@ tests:
           path: spec.template.spec.hostNetwork
       - notExists:
           path: spec.template.spec.volumes
+      # hub-only binds unprivileged ports, so it keeps NoNewPrivs locked.
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
 
   - it: should be a hostNetwork DaemonSet when the edge is enabled
     set:
@@ -242,19 +246,23 @@ tests:
           path: spec.template.spec.containers[0].readinessProbe.httpGet.path
           value: /health
 
-  - it: should run as root with edge resources when the edge is enabled
+  - it: should run non-root with edge resources when the edge is enabled
     set:
       hub.enabled: false
       edge.enabled: true
     asserts:
-      - notExists:
-          path: spec.template.spec.securityContext
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 10001
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 2Gi
       - contains:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
           content: NET_BIND_SERVICE
+      # The edge binds 443/80 as non-root via file caps; NoNewPrivs would block it.
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
 
   - it: should honor a workload kind override
     set:

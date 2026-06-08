@@ -96,11 +96,11 @@ Kubernetes: `>=1.25.0-0`
 | nodeSelector | object | `{}` | Node selector for pod scheduling. |
 | podAnnotations | object | `{}` | Annotations added to the pod. |
 | podLabels | object | `{}` | Labels added to the pod. |
-| podSecurityContext | object | `{}` | Pod-level securityContext. Empty picks the role default: non-root uid/gid 10001 for hub-only; unset when the edge is enabled (it must run as root to bind the privileged host ports). |
+| podSecurityContext | object | `{}` | Pod-level securityContext. Empty picks the role default: non-root uid/gid 10001 for both roles. The edge binds its privileged host ports (443/80) as this non-root user via the binary's file capabilities. |
 | readinessProbe | object | `{}` | Readiness probe. Empty picks the role default (/health on edge-metrics when the edge is enabled, /v1/readyz on hub-api otherwise). |
 | replicaCount | int | `1` | Number of replicas (Deployment only; only one hub replica is the active leader). |
 | resources | object | `{}` | Pod resource requests/limits. Empty picks the role default: 500m/256Mi requests + 2Gi limit when the edge is enabled, 100m/256Mi requests + 512Mi limit otherwise. |
-| securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"add":["NET_BIND_SERVICE"],"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container securityContext (read-only root filesystem, drops ALL capabilities, keeps NET_BIND_SERVICE for the edge's privileged listeners). |
+| securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"add":["NET_BIND_SERVICE"],"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container securityContext (read-only root filesystem, drops ALL capabilities, keeps NET_BIND_SERVICE for the edge's privileged listeners). allowPrivilegeEscalation:false is dropped automatically when the edge is enabled — NoNewPrivs would block the file-cap bind of 443/80. |
 | service.annotations | object | `{}` | Annotations for the Service. |
 | service.enabled | bool | `true` | Create a Service for the enabled listeners. |
 | service.type | string | `"ClusterIP"` | Service type. |
