@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use serde::Serialize;
 use tracing::warn;
@@ -10,7 +10,10 @@ use crate::hub::auth::middleware::{OperatorPrincipal, Principal};
 use crate::hub::db::admin_actions::NewAdminAction;
 
 use super::signup_invites::{now_ms_i64, principal_actor, random_code};
-use super::{AppState, internal_error, invalid_request, json_ok};
+use super::{
+    AppState, Pagination, internal_error, invalid_request, json_ok, json_ok_paged, not_found,
+    paginate,
+};
 
 #[derive(Debug, Serialize, ToSchema)]
 struct UserEntry {
@@ -25,12 +28,17 @@ struct UserEntry {
     get,
     path = "/v1/users",
     tag = "users",
-    responses((status = 200, description = "All users", body = [UserEntry])),
+    params(
+        ("limit" = Option<usize>, Query, description = "Page size; omit to return all"),
+        ("offset" = Option<usize>, Query, description = "Page offset (default 0)"),
+    ),
+    responses((status = 200, description = "Users; total in X-Total-Count", body = [UserEntry])),
     security(("operator_key" = [])),
 )]
 pub(super) async fn list_users(
     State(state): State<Arc<AppState>>,
     _operator: OperatorPrincipal,
+    Query(page): Query<Pagination>,
 ) -> Response {
     let rows = match state.db.list_users().await {
         Ok(r) => r,
@@ -49,7 +57,40 @@ pub(super) async fn list_users(
             created_at_ms: u.created_at_ms,
         })
         .collect();
-    json_ok(entries)
+    let (entries, total) = paginate(entries, &page);
+    json_ok_paged(entries, total)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/users/{id}",
+    tag = "users",
+    params(("id" = String, Path, description = "User id")),
+    responses(
+        (status = 200, description = "User detail", body = UserEntry),
+        (status = 404, description = "User not found"),
+    ),
+    security(("operator_key" = [])),
+)]
+pub(super) async fn get_user(
+    State(state): State<Arc<AppState>>,
+    _operator: OperatorPrincipal,
+    Path(id): Path<String>,
+) -> Response {
+    match state.db.find_user_by_id(&id).await {
+        Ok(Some(u)) => json_ok(UserEntry {
+            id: u.id,
+            email: u.email,
+            role: u.role,
+            disabled_at_ms: u.disabled_at_ms,
+            created_at_ms: u.created_at_ms,
+        }),
+        Ok(None) => not_found("user not found"),
+        Err(e) => {
+            warn!(error = %e, "find_user_by_id failed");
+            internal_error()
+        }
+    }
 }
 
 #[utoipa::path(

@@ -12,12 +12,13 @@ use utoipa::ToSchema;
 
 use towonel_common::time::now_ms;
 
-use crate::hub::auth::middleware::Principal;
+use crate::hub::auth::middleware::{OperatorPrincipal, Principal};
 use crate::hub::db::tenant_ownership::NewTenantOwnership;
 
 use super::db::{InviteRow, InviteStatus, PendingInvite};
 use super::{
-    AppState, conflict, internal_error, invalid_request, json_ok, not_found, parse_invite_id,
+    AppState, Pagination, conflict, internal_error, invalid_request, json_ok, json_ok_paged,
+    not_found, paginate, parse_invite_id,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -282,6 +283,10 @@ pub(super) struct InviteSummary {
     created_at_ms: u64,
     region: Option<String>,
     failover_regions: Vec<String>,
+    /// Owning user, resolved from `tenant_ownership`. Populated for operator
+    /// list requests; `None` for the ownership-scoped (self) view.
+    owner_user_id: Option<String>,
+    owner_email: Option<String>,
 }
 
 impl From<InviteRow> for InviteSummary {
@@ -296,8 +301,39 @@ impl From<InviteRow> for InviteSummary {
             created_at_ms: row.created_at_ms,
             region: row.region,
             failover_regions: row.failover_regions,
+            owner_user_id: None,
+            owner_email: None,
         }
     }
+}
+
+type OwnerMaps = (
+    std::collections::HashMap<Vec<u8>, String>,
+    std::collections::HashMap<String, String>,
+);
+
+/// Operator-only owner lookup: `invite_id` -> `user_id` and `user_id` -> email,
+/// so the admin UI can join tunnels to their owning user.
+async fn operator_owner_maps(state: &AppState) -> anyhow::Result<OwnerMaps> {
+    let owners = state.db.list_all_tenant_ownerships().await?;
+    let users = state.db.list_users().await?;
+    Ok((
+        owners
+            .into_iter()
+            .map(|o| (o.invite_id, o.user_id))
+            .collect(),
+        users.into_iter().map(|u| (u.id, u.email)).collect(),
+    ))
+}
+
+fn with_owner(row: InviteRow, owners: &OwnerMaps) -> InviteSummary {
+    let owner_user_id = owners.0.get(&row.invite_id[..]).cloned();
+    let mut summary = InviteSummary::from(row);
+    if let Some(uid) = owner_user_id {
+        summary.owner_email = owners.1.get(&uid).cloned();
+        summary.owner_user_id = Some(uid);
+    }
+    summary
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,6 +342,10 @@ pub(super) struct ListInvitesQuery {
     /// ownership-scoped list regardless of what they pass.
     #[serde(default)]
     scope: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 #[utoipa::path(
@@ -315,8 +355,10 @@ pub(super) struct ListInvitesQuery {
     params(
         ("scope" = Option<String>, Query,
          description = "Operators may pass `all` to list every invite; otherwise the list is ownership-scoped"),
+        ("limit" = Option<usize>, Query, description = "Page size; omit to return all"),
+        ("offset" = Option<usize>, Query, description = "Page offset (default 0)"),
     ),
-    responses((status = 200, description = "List of invites visible to the caller")),
+    responses((status = 200, description = "List of invites visible to the caller; total in X-Total-Count")),
     security(("operator_key" = []), ("session_cookie" = []), ("api_key" = [])),
 )]
 pub(super) async fn list_invites(
@@ -351,9 +393,147 @@ pub(super) async fn list_invites(
         }
     };
 
-    json_ok(serde_json::json!({
-        "invites": filtered.into_iter().map(InviteSummary::from).collect::<Vec<_>>()
-    }))
+    // Regular users only ever see their own invites, so owner stays implicit.
+    let owners: OwnerMaps = if principal.is_operator() {
+        match operator_owner_maps(&state).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(error = %e, "operator_owner_maps failed");
+                return internal_error();
+            }
+        }
+    } else {
+        Default::default()
+    };
+
+    let invites: Vec<InviteSummary> = filtered
+        .into_iter()
+        .map(|row| with_owner(row, &owners))
+        .collect();
+
+    let (invites, total) = paginate(
+        invites,
+        &Pagination {
+            limit: query.limit,
+            offset: query.offset,
+        },
+    );
+    json_ok_paged(serde_json::json!({ "invites": invites }), total)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/invites/{id}",
+    tag = "invites",
+    params(("id" = String, Path, description = "Base64url invite id")),
+    responses(
+        (status = 200, description = "Invite detail", body = InviteSummary),
+        (status = 400, description = "Invalid invite id"),
+        (status = 404, description = "Invite does not exist"),
+    ),
+    security(("operator_key" = []), ("session_cookie" = []), ("api_key" = [])),
+)]
+pub(super) async fn get_invite(
+    State(state): State<Arc<AppState>>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(invite_id) = parse_invite_id(&id) else {
+        return invalid_request("invite_id is not valid base64url");
+    };
+
+    let row = match state.db.get_invite(&invite_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found("invite does not exist"),
+        Err(e) => {
+            warn!(error = %e, "get_invite failed");
+            return internal_error();
+        }
+    };
+
+    if let Err(resp) = check_invite_ownership(&state, &principal, &invite_id).await {
+        return resp;
+    }
+
+    if !principal.is_operator() {
+        return json_ok(InviteSummary::from(row));
+    }
+
+    // Operator view: attach owner via a single reverse lookup.
+    let owner = match state.db.find_owner_by_invite(&invite_id).await {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "find_owner_by_invite failed");
+            return internal_error();
+        }
+    };
+    let mut summary = InviteSummary::from(row);
+    if let Some(o) = owner {
+        let email = match state.db.find_user_by_id(&o.user_id).await {
+            Ok(u) => u.map(|u| u.email),
+            Err(e) => {
+                warn!(error = %e, "find_user_by_id failed");
+                return internal_error();
+            }
+        };
+        summary.owner_email = email;
+        summary.owner_user_id = Some(o.user_id);
+    }
+    json_ok(summary)
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/users/{id}/invites",
+    tag = "invites",
+    params(
+        ("id" = String, Path, description = "User id"),
+        ("limit" = Option<usize>, Query, description = "Page size; omit to return all"),
+        ("offset" = Option<usize>, Query, description = "Page offset (default 0)"),
+    ),
+    responses((status = 200, description = "Tunnels owned by the user; total in X-Total-Count")),
+    security(("operator_key" = [])),
+)]
+pub(super) async fn list_user_invites(
+    State(state): State<Arc<AppState>>,
+    _operator: OperatorPrincipal,
+    Path(user_id): Path<String>,
+    Query(page): Query<Pagination>,
+) -> Response {
+    let owned = match state.db.list_invite_ids_for_user(&user_id).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            warn!(error = %e, "list_invite_ids_for_user failed");
+            return internal_error();
+        }
+    };
+    let rows = match state.db.get_invites_by_ids(&owned).await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(error = %e, "get_invites_by_ids failed");
+            return internal_error();
+        }
+    };
+    let email = match state.db.find_user_by_id(&user_id).await {
+        Ok(u) => u.map(|u| u.email),
+        Err(e) => {
+            warn!(error = %e, "find_user_by_id failed");
+            return internal_error();
+        }
+    };
+
+    let invites: Vec<InviteSummary> = rows
+        .into_iter()
+        .map(|row| {
+            let mut summary = InviteSummary::from(row);
+            summary.owner_user_id = Some(user_id.clone());
+            summary.owner_email.clone_from(&email);
+            summary
+        })
+        .collect();
+
+    let (invites, total) = paginate(invites, &page);
+    json_ok_paged(serde_json::json!({ "invites": invites }), total)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]

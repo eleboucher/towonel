@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Response;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
@@ -12,7 +12,9 @@ use utoipa::ToSchema;
 use crate::hub::auth::middleware::{OperatorPrincipal, Principal};
 use crate::hub::db::admin_actions::NewAdminAction;
 
-use super::{AppState, internal_error, invalid_request, json_ok};
+use super::{
+    AppState, Pagination, internal_error, invalid_request, json_ok, json_ok_paged, paginate,
+};
 
 const CODE_BYTES: usize = 18;
 const ID_BYTES: usize = 16;
@@ -147,12 +149,17 @@ pub(super) async fn post_signup_invite(
     get,
     path = "/v1/signup-invites",
     tag = "signup-invites",
-    responses((status = 200, description = "All signup invites", body = [SignupInviteEntry])),
+    params(
+        ("limit" = Option<usize>, Query, description = "Page size; omit to return all"),
+        ("offset" = Option<usize>, Query, description = "Page offset (default 0)"),
+    ),
+    responses((status = 200, description = "Signup invites; total in X-Total-Count", body = [SignupInviteEntry])),
     security(("operator_key" = [])),
 )]
 pub(super) async fn list_signup_invites(
     State(state): State<Arc<AppState>>,
     _operator: OperatorPrincipal,
+    Query(page): Query<Pagination>,
 ) -> Response {
     let rows = match state.db.list_signup_invites().await {
         Ok(rows) => rows,
@@ -172,7 +179,8 @@ pub(super) async fn list_signup_invites(
             redeemed_at_ms: r.redeemed_at_ms,
         })
         .collect();
-    json_ok(entries)
+    let (entries, total) = paginate(entries, &page);
+    json_ok_paged(entries, total)
 }
 
 pub(super) fn random_code(byte_len: usize) -> String {

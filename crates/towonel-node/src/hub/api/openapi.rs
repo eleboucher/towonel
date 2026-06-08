@@ -94,6 +94,7 @@ impl Modify for OperatorSecurity {
         super::ports::get_available_ports,
         super::invites::post_invite,
         super::invites::list_invites,
+        super::invites::get_invite,
         super::invites::delete_invite,
         super::invites::post_invite_hostnames,
         super::invites::delete_invite_hostname,
@@ -108,6 +109,8 @@ pub struct UserApiDoc;
     paths(
         super::invites::post_invite,
         super::invites::list_invites,
+        super::invites::get_invite,
+        super::invites::list_user_invites,
         super::invites::delete_invite,
         super::invites::post_invite_hostnames,
         super::invites::delete_invite_hostname,
@@ -123,6 +126,7 @@ pub struct UserApiDoc;
         super::signup_invites::post_signup_invite,
         super::signup_invites::list_signup_invites,
         super::users::list_users,
+        super::users::get_user,
         super::users::post_user_disable,
     ),
 )]

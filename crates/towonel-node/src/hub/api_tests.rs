@@ -376,6 +376,163 @@ async fn list_invites_scope_for_operator_role_user() {
     assert_eq!(leaked_invites[0]["hostnames"][0], "u.regular.test");
 }
 
+#[tokio::test]
+async fn user_detail_endpoints_require_operator() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let user_cookie = signup_and_login_user(&hub, &client, "owner@example.test", "hunter22!").await;
+    let user_id = user_id_by_email(&hub, "owner@example.test").await;
+
+    // The user owns one tunnel, created under their own session.
+    let create = client
+        .post(hub.url("/v1/invites"))
+        .header(reqwest::header::COOKIE, &user_cookie)
+        .json(&json!({"name": "mine", "hostnames": ["owner.test"], "expires_in_secs": 3600}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200);
+
+    // Non-operator: both detail endpoints are hidden (404), never leaking
+    // another user's record or tunnels.
+    for path in [
+        format!("/v1/users/{user_id}"),
+        format!("/v1/users/{user_id}/invites"),
+    ] {
+        let resp = client
+            .get(hub.url(&path))
+            .header(reqwest::header::COOKIE, &user_cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "non-operator must not reach {path}");
+    }
+
+    // Operator: user detail + their owned tunnels, with owner attached.
+    let (status, user) = get_json(
+        &client,
+        &hub.url(&format!("/v1/users/{user_id}")),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(user["email"], "owner@example.test");
+
+    let (status, body) = get_json(
+        &client,
+        &hub.url(&format!("/v1/users/{user_id}/invites")),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let invites = body["invites"].as_array().unwrap();
+    assert_eq!(invites.len(), 1);
+    assert_eq!(invites[0]["hostnames"][0], "owner.test");
+    assert_eq!(invites[0]["owner_user_id"], user_id);
+    assert_eq!(invites[0]["owner_email"], "owner@example.test");
+}
+
+#[tokio::test]
+async fn get_invite_detail_scopes_owner_and_suppresses_pii() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let owner_cookie = signup_and_login_user(&hub, &client, "o@example.test", "hunter22!").await;
+    let other_cookie = signup_and_login_user(&hub, &client, "x@example.test", "hunter22!").await;
+    let owner_id = user_id_by_email(&hub, "o@example.test").await;
+
+    let create = client
+        .post(hub.url("/v1/invites"))
+        .header(reqwest::header::COOKIE, &owner_cookie)
+        .json(&json!({"name": "t", "hostnames": ["t.test"], "expires_in_secs": 3600}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200);
+    let invite_id = create.json::<Value>().await.unwrap()["invite_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = format!("/v1/invites/{invite_id}");
+
+    // Owner sees their own tunnel, but owner PII is never attached for them.
+    let resp = client
+        .get(hub.url(&path))
+        .header(reqwest::header::COOKIE, &owner_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let detail: Value = resp.json().await.unwrap();
+    assert_eq!(detail["hostnames"][0], "t.test");
+    assert!(detail["owner_user_id"].is_null());
+    assert!(detail["owner_email"].is_null());
+
+    // A non-owner regular user gets 404 — no existence or info leak.
+    let resp = client
+        .get(hub.url(&path))
+        .header(reqwest::header::COOKIE, &other_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // Operator sees the owner attached.
+    let (status, detail) = get_json(&client, &hub.url(&path), Some(OPERATOR_KEY)).await;
+    assert_eq!(status, 200);
+    assert_eq!(detail["owner_user_id"], owner_id);
+    assert_eq!(detail["owner_email"], "o@example.test");
+}
+
+#[tokio::test]
+async fn list_invites_pagination() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    for i in 0..3 {
+        create_invite(&hub, &client, &format!("t{i}"), &[&format!("h{i}.test")]).await;
+    }
+
+    // First page: limit=2 yields 2 rows, X-Total-Count reflects the full 3.
+    let resp = client
+        .get(hub.url("/v1/invites?scope=all&limit=2"))
+        .bearer_auth(OPERATOR_KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let total = resp
+        .headers()
+        .get("x-total-count")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(total, "3");
+    assert_eq!(body["invites"].as_array().unwrap().len(), 2);
+
+    // Second page: offset past the first 2 leaves 1 row.
+    let resp = client
+        .get(hub.url("/v1/invites?scope=all&limit=2&offset=2"))
+        .bearer_auth(OPERATOR_KEY)
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["invites"].as_array().unwrap().len(), 1);
+
+    // No limit returns everything (backward-compatible for the dashboard).
+    let (status, body) = get_json(
+        &client,
+        &hub.url("/v1/invites?scope=all"),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body["invites"].as_array().unwrap().len(), 3);
+}
+
 // DELETE /v1/invites/{id} (revoke)
 
 #[tokio::test]

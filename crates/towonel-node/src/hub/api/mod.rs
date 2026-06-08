@@ -31,7 +31,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, broadcast};
 use tower_http::ServiceBuilderExt;
 use tower_http::limit::RequestBodyLimitLayer;
@@ -533,7 +533,10 @@ fn invites_routes() -> Router<Arc<AppState>> {
             "/v1/invites",
             post(invites::post_invite).get(invites::list_invites),
         )
-        .route("/v1/invites/{id}", delete(invites::delete_invite))
+        .route(
+            "/v1/invites/{id}",
+            get(invites::get_invite).delete(invites::delete_invite),
+        )
         .route(
             "/v1/invites/{id}/hostnames",
             post(invites::post_invite_hostnames),
@@ -619,6 +622,8 @@ fn web_admin_routes(web_enabled: bool) -> Router<Arc<AppState>> {
             post(signup_invites::post_signup_invite).get(signup_invites::list_signup_invites),
         )
         .route("/v1/users", get(users::list_users))
+        .route("/v1/users/{id}", get(users::get_user))
+        .route("/v1/users/{id}/invites", get(invites::list_user_invites))
         .route("/v1/users/{id}/disable", post(users::post_user_disable))
 }
 
@@ -773,6 +778,38 @@ pub(super) fn internal_error() -> Response {
 
 pub(super) fn json_ok(value: impl Serialize) -> Response {
     json_with_status(StatusCode::OK, value)
+}
+
+/// Optional `limit`/`offset` list pagination. Omitting `limit` returns the full
+/// set, so callers that need every row (e.g. the admin dashboard aggregates)
+/// keep working unchanged.
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct Pagination {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// Slice `items` to the requested window, returning the page and the full count
+/// (before slicing) for the `X-Total-Count` header.
+pub(super) fn paginate<T>(items: Vec<T>, page: &Pagination) -> (Vec<T>, usize) {
+    let total = items.len();
+    let offset = page.offset.unwrap_or(0).min(total);
+    let window = match page.limit {
+        Some(limit) => items.into_iter().skip(offset).take(limit).collect(),
+        None if offset == 0 => items,
+        None => items.into_iter().skip(offset).collect(),
+    };
+    (window, total)
+}
+
+/// `json_ok` plus an `X-Total-Count` header carrying the unpaginated total.
+pub(super) fn json_ok_paged(value: impl Serialize, total: usize) -> Response {
+    let mut resp = json_ok(value);
+    if let Ok(v) = axum::http::HeaderValue::from_str(&total.to_string()) {
+        resp.headers_mut()
+            .insert(axum::http::HeaderName::from_static("x-total-count"), v);
+    }
+    resp
 }
 
 pub(super) fn json_with_status(status: StatusCode, value: impl Serialize) -> Response {

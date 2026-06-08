@@ -83,6 +83,18 @@ impl Db {
         rows.into_iter().map(model_to_invite_row).collect()
     }
 
+    pub async fn get_invites_by_ids(&self, ids: &[Vec<u8>]) -> anyhow::Result<Vec<InviteRow>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = invites::Entity::find()
+            .filter(invites::Column::InviteId.is_in(ids.iter().cloned()))
+            .order_by_desc(invites::Column::CreatedAtMs)
+            .all(&self.conn)
+            .await?;
+        rows.into_iter().map(model_to_invite_row).collect()
+    }
+
     /// Pending → Claimed. No-op (returns false) on already-claimed or revoked rows.
     pub async fn mark_invite_claimed(
         &self,

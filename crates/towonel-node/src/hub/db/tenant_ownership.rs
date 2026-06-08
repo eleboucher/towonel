@@ -71,6 +71,22 @@ impl Db {
         Ok(rows.into_iter().map(|r| r.invite_id).collect())
     }
 
+    pub async fn list_all_tenant_ownerships(&self) -> anyhow::Result<Vec<TenantOwnershipRow>> {
+        let rows = tenant_ownership::Entity::find().all(&self.conn).await?;
+        Ok(rows.into_iter().map(into_row).collect())
+    }
+
+    pub async fn find_owner_by_invite(
+        &self,
+        invite_id: &[u8],
+    ) -> anyhow::Result<Option<TenantOwnershipRow>> {
+        let row = tenant_ownership::Entity::find()
+            .filter(tenant_ownership::Column::InviteId.eq(invite_id.to_vec()))
+            .one(&self.conn)
+            .await?;
+        Ok(row.map(into_row))
+    }
+
     pub async fn delete_tenant_ownership_by_invite(&self, invite_id: &[u8]) -> anyhow::Result<u64> {
         let result = tenant_ownership::Entity::delete_many()
             .filter(tenant_ownership::Column::InviteId.eq(invite_id.to_vec()))

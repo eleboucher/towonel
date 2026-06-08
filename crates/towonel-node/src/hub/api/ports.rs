@@ -16,8 +16,8 @@ use crate::hub::db::app_settings::{DEFAULT_USER_PORT_QUOTA, USER_PORT_QUOTA_KEY}
 use crate::hub::db::port_reservations::{NewPortReservation, PortProtocol, PortReservationRow};
 
 use super::{
-    AppState, conflict, error_response, internal_error, invalid_request, json_ok, json_with_status,
-    not_found,
+    AppState, Pagination, conflict, error_response, internal_error, invalid_request, json_ok,
+    json_ok_paged, json_with_status, not_found, paginate,
 };
 
 const MIN_RESERVABLE_PORT: u16 = 1024;
@@ -209,9 +209,13 @@ pub(super) async fn post_port(
     get,
     path = "/v1/tenants/{id}/ports",
     tag = "ports",
-    params(("id" = String, Path, description = "Tenant id")),
+    params(
+        ("id" = String, Path, description = "Tenant id"),
+        ("limit" = Option<usize>, Query, description = "Page size; omit to return all"),
+        ("offset" = Option<usize>, Query, description = "Page offset (default 0)"),
+    ),
     responses(
-        (status = 200, description = "Port reservations for the tenant"),
+        (status = 200, description = "Port reservations for the tenant; total in X-Total-Count"),
         (status = 400, description = "Invalid tenant id"),
         (status = 403, description = "Not authorized for this tenant"),
     ),
@@ -221,6 +225,7 @@ pub(super) async fn list_ports(
     State(state): State<Arc<AppState>>,
     principal: Principal,
     Path(id): Path<String>,
+    Query(page): Query<Pagination>,
 ) -> Response {
     let tenant_id: TenantId = match id.parse() {
         Ok(t) => t,
@@ -230,9 +235,11 @@ pub(super) async fn list_ports(
         return resp;
     }
     match state.db.list_port_reservations(Some(&tenant_id)).await {
-        Ok(rows) => json_ok(serde_json::json!({
-            "ports": rows.into_iter().map(PortRow::from).collect::<Vec<_>>(),
-        })),
+        Ok(rows) => {
+            let ports: Vec<PortRow> = rows.into_iter().map(PortRow::from).collect();
+            let (ports, total) = paginate(ports, &page);
+            json_ok_paged(serde_json::json!({ "ports": ports }), total)
+        }
         Err(e) => {
             warn!(error = %e, "list_port_reservations failed");
             internal_error()
@@ -244,14 +251,24 @@ pub(super) async fn list_ports(
     get,
     path = "/v1/ports",
     tag = "operator",
-    responses((status = 200, description = "All port reservations across every tenant")),
+    params(
+        ("limit" = Option<usize>, Query, description = "Page size; omit to return all"),
+        ("offset" = Option<usize>, Query, description = "Page offset (default 0)"),
+    ),
+    responses((status = 200, description = "All port reservations; total in X-Total-Count")),
     security(("operator_key" = [])),
 )]
-pub(super) async fn list_all_ports(State(state): State<Arc<AppState>>) -> Response {
+pub(super) async fn list_all_ports(
+    State(state): State<Arc<AppState>>,
+    Query(page): Query<Pagination>,
+) -> Response {
     match state.db.list_port_reservations(None).await {
-        Ok(rows) => json_ok(serde_json::json!({
-            "ports": rows.into_iter().map(PortRowWithTenant::from).collect::<Vec<_>>(),
-        })),
+        Ok(rows) => {
+            let ports: Vec<PortRowWithTenant> =
+                rows.into_iter().map(PortRowWithTenant::from).collect();
+            let (ports, total) = paginate(ports, &page);
+            json_ok_paged(serde_json::json!({ "ports": ports }), total)
+        }
         Err(e) => {
             warn!(error = %e, "list_port_reservations(None) failed");
             internal_error()

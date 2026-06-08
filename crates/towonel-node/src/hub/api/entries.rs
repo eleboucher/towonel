@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::Response;
 use serde::Serialize;
 use towonel_common::config_entry::{ConfigEntryError, ConfigOp, ConfigPayload, SignedConfigEntry};
@@ -13,10 +13,10 @@ use towonel_common::time::now_ms;
 use super::super::db::port_reservations::PortProtocol;
 use super::super::metrics::reject_reason;
 use super::{
-    AppState, PROTOCOL_VERSION, apply_port_index_delta, cbor_response, error_response,
-    hostname_not_owned, internal_error, invalid_request, invalid_signature, json_ok,
-    remove_tenant_from_port_index, sequence_conflict, tenant_not_allowed, trigger_route_rebuild,
-    unsupported_op, unsupported_version,
+    AppState, PROTOCOL_VERSION, Pagination, apply_port_index_delta, cbor_response, error_response,
+    hostname_not_owned, internal_error, invalid_request, invalid_signature, json_ok, json_ok_paged,
+    paginate, remove_tenant_from_port_index, sequence_conflict, tenant_not_allowed,
+    trigger_route_rebuild, unsupported_op, unsupported_version,
 };
 
 #[derive(Serialize)]
@@ -486,10 +486,17 @@ pub(super) async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     get,
     path = "/v1/edges",
     tag = "operator",
-    responses((status = 200, description = "Edge nodes (iroh endpoint topology) known to the hub")),
+    params(
+        ("limit" = Option<usize>, Query, description = "Page size; omit to return all"),
+        ("offset" = Option<usize>, Query, description = "Page offset (default 0)"),
+    ),
+    responses((status = 200, description = "Edge nodes known to the hub; total in X-Total-Count")),
     security(("operator_key" = [])),
 )]
-pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
+pub(super) async fn list_edges(
+    State(state): State<Arc<AppState>>,
+    Query(page): Query<Pagination>,
+) -> Response {
     #[derive(Serialize)]
     struct EdgeEntry {
         node_id: iroh::EndpointId,
@@ -518,7 +525,8 @@ pub(super) async fn list_edges(State(state): State<Arc<AppState>>) -> Response {
         }
     }
 
-    json_ok(ListEdgesResponse { edges })
+    let (edges, total) = paginate(edges, &page);
+    json_ok_paged(ListEdgesResponse { edges }, total)
 }
 
 /// `DELETE /v1/tenants/{tenant_id}` -- operator removes a tenant.
