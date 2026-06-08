@@ -199,6 +199,10 @@ pub struct HubConfig {
     pub console_url: Option<String>,
     pub mail: Option<MailConfig>,
     pub webauthn_rp_id: Option<String>,
+    /// Default failover regions for agents whose invite sets none. Bootstrap
+    /// edge selection only; reservation scoping is unchanged.
+    /// `TOWONEL_HUB_DEFAULT_FAILOVER_REGIONS` (comma-separated).
+    pub default_failover_regions: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -372,6 +376,7 @@ struct RawEnv {
     hub_oidc_codeberg_client_secret: Option<String>,
     hub_oidc_codeberg_redirect_uri: Option<String>,
     hub_console_url: Option<String>,
+    hub_default_failover_regions: Vec<String>,
 
     mail_mailjet_api_key: Option<String>,
     mail_mailjet_api_secret: Option<String>,
@@ -452,6 +457,7 @@ impl NodeConfig {
             hub_oidc_codeberg_client_secret,
             hub_oidc_codeberg_redirect_uri,
             hub_console_url,
+            hub_default_failover_regions,
             mail_mailjet_api_key,
             mail_mailjet_api_secret,
             mail_from_email,
@@ -555,6 +561,7 @@ impl NodeConfig {
             console_url,
             mail,
             webauthn_rp_id: hub_webauthn_rp_id,
+            default_failover_regions: hub_default_failover_regions,
             data_dir: data_dir.as_deref(),
         })?;
 
@@ -675,6 +682,7 @@ struct HubInputs<'a> {
     console_url: Option<String>,
     mail: Option<MailConfig>,
     webauthn_rp_id: Option<String>,
+    default_failover_regions: Vec<String>,
     data_dir: Option<&'a Path>,
 }
 
@@ -709,6 +717,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         console_url,
         mail,
         webauthn_rp_id,
+        default_failover_regions,
         data_dir,
     } = inputs;
 
@@ -805,6 +814,11 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         console_url,
         mail,
         webauthn_rp_id,
+        default_failover_regions: default_failover_regions
+            .into_iter()
+            .map(|r| r.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect(),
     })
 }
 

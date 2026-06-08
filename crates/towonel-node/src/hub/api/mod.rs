@@ -235,6 +235,9 @@ pub struct AppState {
     pub passkey_reg_states: PasskeyRegStates,
     pub passkey_auth_states: PasskeyAuthStates,
     pub tls: Option<crate::config::TlsConfig>,
+    /// Default failover regions for invites that set none. Bootstrap edge
+    /// selection only; reservation scoping is unchanged.
+    pub default_failover_regions: Vec<String>,
 }
 
 #[derive(Default, Clone)]

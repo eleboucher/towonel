@@ -13,6 +13,7 @@ use iroh::endpoint::Endpoint;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::edge_cred::{AuthFrame, EdgeCred};
@@ -85,6 +86,22 @@ fn max_inflight_connections_from_env() -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(DEFAULT_MAX_INFLIGHT_CONNECTIONS)
+}
+
+/// How long edge shutdown waits for in-flight connections before forcing them
+/// closed. Under the typical 30s Kubernetes grace period so the edge exits
+/// before SIGKILL. Override with `TOWONEL_EDGE_DRAIN_TIMEOUT_SECS`.
+const DEFAULT_DRAIN_TIMEOUT_SECS: u64 = 25;
+
+fn drain_timeout_from_env() -> Duration {
+    std::env::var("TOWONEL_EDGE_DRAIN_TIMEOUT_SECS")
+        .ok()
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or_else(
+            || Duration::from_secs(DEFAULT_DRAIN_TIMEOUT_SECS),
+            Duration::from_secs,
+        )
 }
 
 /// The edge: listens on one TCP port, peeks the SNI, and forwards raw TLS
@@ -175,7 +192,11 @@ impl Edge {
         self
     }
 
-    pub async fn run(&self) -> anyhow::Result<()> {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear listener spawn + drain orchestration; splitting hides the lifecycle"
+    )]
+    pub async fn run(&self, shutdown: CancellationToken) -> anyhow::Result<()> {
         let health_app = health::router(self.metrics.clone());
         let health_listener = TcpListener::bind(&self.health_listen_addr).await?;
         info!(listen = %self.health_listen_addr, "edge health server listening");
@@ -186,7 +207,12 @@ impl Edge {
         });
 
         let max_inflight = max_inflight_connections_from_env();
-        info!(max_inflight, "edge connection cap configured");
+        let drain_timeout = drain_timeout_from_env();
+        info!(
+            max_inflight,
+            ?drain_timeout,
+            "edge connection cap configured"
+        );
         let ctx = Arc::new(ConnCtx {
             router: Arc::clone(&self.router),
             sessions: Arc::clone(&self.sessions),
@@ -205,7 +231,12 @@ impl Edge {
         let mut tasks: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(listeners.len() + 3);
         for listener in listeners {
             let ctx = Arc::clone(&ctx);
-            tasks.push(tokio::spawn(accept_loop(listener, ctx, ListenerKind::Tls)));
+            tasks.push(tokio::spawn(accept_loop(
+                listener,
+                ctx,
+                ListenerKind::Tls,
+                shutdown.clone(),
+            )));
         }
 
         if let Some(http_addr) = self.http_listen_addr.as_deref() {
@@ -217,18 +248,23 @@ impl Edge {
             );
             for listener in http_listeners {
                 let ctx = Arc::clone(&ctx);
-                tasks.push(tokio::spawn(accept_loop(listener, ctx, ListenerKind::Http)));
+                tasks.push(tokio::spawn(accept_loop(
+                    listener,
+                    ctx,
+                    ListenerKind::Http,
+                    shutdown.clone(),
+                )));
             }
         }
 
         if self.tcp_services {
             let ctx = Arc::clone(&ctx);
-            tasks.push(tokio::spawn(tcp_listener_reconciler(ctx)));
+            tasks.push(tokio::spawn(tcp_listener_reconciler(ctx, shutdown.clone())));
         }
 
         if self.udp_services {
             let ctx = Arc::clone(&ctx);
-            tasks.push(tokio::spawn(udp_listener_reconciler(ctx)));
+            tasks.push(tokio::spawn(udp_listener_reconciler(ctx, shutdown.clone())));
         }
 
         // Agents dialing in register sessions; the legacy outbound-dial
@@ -241,32 +277,78 @@ impl Edge {
             let hub_client = self.hub_client.clone();
             let permits = Arc::clone(&ctx.connection_permits);
             tasks.push(tokio::spawn(iroh_accept_loop(
-                endpoint, sessions, router, metrics, hub_client, permits,
+                endpoint,
+                sessions,
+                router,
+                metrics,
+                hub_client,
+                permits,
+                shutdown.clone(),
             )));
         }
 
         if let Some(hub_client) = self.hub_client.as_ref() {
             let stream = hub_client.subscribe_routes();
             let router = Arc::clone(&self.router);
-            tasks.push(tokio::spawn(route_sync_loop(stream, router)));
+            tasks.push(tokio::spawn(route_sync_loop(
+                stream,
+                router,
+                shutdown.clone(),
+            )));
         }
 
+        shutdown.cancelled().await;
+        info!("edge: shutdown requested; no longer accepting, draining in-flight connections");
+
+        // Loops select on the same token and return; join them so the listeners
+        // are closed before we wait on in-flight work.
         for task in tasks {
-            // Accept loops never return `Ok`; only observe task panics.
             if let Err(e) = task.await {
-                warn!("accept loop panicked: {e}");
+                warn!("edge accept loop join error: {e}");
             }
+        }
+
+        // Each in-flight task holds a permit; acquiring the whole pool blocks
+        // until they finish, bounded by the drain timeout. UDP sessions are not
+        // permit-tracked, so they end on idle/exit rather than draining here.
+        let max = u32::try_from(max_inflight).unwrap_or(u32::MAX);
+        match tokio::time::timeout(
+            drain_timeout,
+            Arc::clone(&ctx.connection_permits).acquire_many_owned(max),
+        )
+        .await
+        {
+            Ok(Ok(_permits)) => info!("edge: all in-flight connections drained"),
+            Ok(Err(e)) => warn!("edge: drain semaphore closed unexpectedly: {e}"),
+            Err(_) => warn!(
+                remaining = max_inflight - ctx.connection_permits.available_permits(),
+                ?drain_timeout,
+                "edge: drain timed out; closing remaining connections"
+            ),
         }
         Ok(())
     }
 }
 
-async fn route_sync_loop(mut stream: hub_client::RouteStream, router: Arc<Router>) {
+async fn route_sync_loop(
+    mut stream: hub_client::RouteStream,
+    router: Arc<Router>,
+    shutdown: CancellationToken,
+) {
     use tokio_stream::StreamExt;
-    while let Some(table) = stream.next().await {
-        let count = table.len();
-        router.replace(table);
-        info!(hostnames = count, "dynamic route update applied");
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            next = stream.next() => match next {
+                Some(table) => {
+                    let count = table.len();
+                    router.replace(table);
+                    info!(hostnames = count, "dynamic route update applied");
+                }
+                None => break,
+            },
+        }
     }
     info!("route stream closed, stopping sync loop");
 }
@@ -278,10 +360,19 @@ async fn iroh_accept_loop(
     metrics: EdgeMetrics,
     hub_client: Option<Arc<dyn HubClient>>,
     connection_permits: Arc<tokio::sync::Semaphore>,
+    shutdown: CancellationToken,
 ) {
     info!("edge iroh accept loop ready");
     loop {
-        let Some(incoming) = endpoint.accept().await else {
+        let incoming = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                info!("edge iroh accept loop shutting down");
+                return;
+            }
+            incoming = endpoint.accept() => incoming,
+        };
+        let Some(incoming) = incoming else {
             info!("edge iroh endpoint closed, stopping accept loop");
             return;
         };
@@ -526,14 +617,23 @@ enum ListenerKind {
 }
 
 /// One accept loop — shared by all reuseport workers.
-async fn accept_loop(listener: TcpListener, ctx: Arc<ConnCtx>, kind: ListenerKind) {
+async fn accept_loop(
+    listener: TcpListener,
+    ctx: Arc<ConnCtx>,
+    kind: ListenerKind,
+    shutdown: CancellationToken,
+) {
     loop {
-        let (tcp_stream, peer_addr) = match listener.accept().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                warn!("TCP accept error: {e}");
-                continue;
-            }
+        let (tcp_stream, peer_addr) = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            res = listener.accept() => match res {
+                Ok(conn) => conn,
+                Err(e) => {
+                    warn!("TCP accept error: {e}");
+                    continue;
+                }
+            },
         };
         let Ok(permit) = Arc::clone(&ctx.connection_permits).try_acquire_owned() else {
             // Counter is the canonical signal here; logging per drop on a
@@ -1050,7 +1150,7 @@ async fn open_agent_stream(
     }
 }
 
-async fn tcp_listener_reconciler(ctx: Arc<ConnCtx>) {
+async fn tcp_listener_reconciler(ctx: Arc<ConnCtx>, shutdown: CancellationToken) {
     let mut active: std::collections::HashMap<u16, ActiveListener> =
         std::collections::HashMap::new();
     let mut rx = ctx.router.subscribe_tcp_listener_changes();
@@ -1059,10 +1159,21 @@ async fn tcp_listener_reconciler(ctx: Arc<ConnCtx>) {
     reconcile_tcp_listeners(&ctx, &mut active);
 
     loop {
-        if rx.changed().await.is_err() {
-            return;
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            res = rx.changed() => {
+                if res.is_err() {
+                    break;
+                }
+                reconcile_tcp_listeners(&ctx, &mut active);
+            }
         }
-        reconcile_tcp_listeners(&ctx, &mut active);
+    }
+    // Stop the per-service accept loops; their in-flight connections drain
+    // via the shared permit pool.
+    for (_, existing) in active.drain() {
+        existing.handle.abort();
     }
 }
 
@@ -1335,7 +1446,7 @@ const UDP_SESSION_IDLE: Duration = Duration::from_mins(1);
 /// overflow rather than blocking the listener and stalling other sessions.
 const UDP_SESSION_QUEUE: usize = 64;
 
-async fn udp_listener_reconciler(ctx: Arc<ConnCtx>) {
+async fn udp_listener_reconciler(ctx: Arc<ConnCtx>, shutdown: CancellationToken) {
     let mut active: std::collections::HashMap<u16, ActiveListener> =
         std::collections::HashMap::new();
     let mut rx = ctx.router.subscribe_udp_listener_changes();
@@ -1343,10 +1454,19 @@ async fn udp_listener_reconciler(ctx: Arc<ConnCtx>) {
     reconcile_udp_listeners(&ctx, &mut active);
 
     loop {
-        if rx.changed().await.is_err() {
-            return;
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            res = rx.changed() => {
+                if res.is_err() {
+                    break;
+                }
+                reconcile_udp_listeners(&ctx, &mut active);
+            }
         }
-        reconcile_udp_listeners(&ctx, &mut active);
+    }
+    for (_, existing) in active.drain() {
+        existing.handle.abort();
     }
 }
 

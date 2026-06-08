@@ -520,14 +520,28 @@ async fn run_node() -> anyhow::Result<()> {
                 .with_control_handler_cell(control_handler)
                 .with_live_agents_sink_cell(live_agents_sink);
 
+            // edge.run() runs as a task so it always drains: on SIGTERM or a
+            // hub exit we cancel the token and await it, rather than dropping
+            // its future mid-flight (which would skip the drain).
+            let edge_shutdown = tokio_util::sync::CancellationToken::new();
+            let mut edge_handle = tokio::spawn({
+                let shutdown = edge_shutdown.clone();
+                async move { edge.run(shutdown).await }
+            });
             tokio::select! {
                 res = hub.run() => {
                     if let Err(e) = res { error!("hub error: {e}"); }
                 }
-                res = edge.run() => {
-                    if let Err(e) = res { error!("edge error: {e}"); }
+                res = &mut edge_handle => {
+                    if let Ok(Err(e)) = &res { error!("edge error: {e}"); }
                 }
                 () = towonel_common::shutdown::shutdown_signal() => {}
+            }
+            edge_shutdown.cancel();
+            if !edge_handle.is_finished()
+                && let Err(e) = edge_handle.await
+            {
+                tracing::warn!("edge task join error: {e}");
             }
             endpoint.close().await;
         }
@@ -611,11 +625,18 @@ async fn run_node() -> anyhow::Result<()> {
                 })
             };
 
-            tokio::select! {
-                res = edge.run() => {
-                    if let Err(e) = res { error!("edge error: {e}"); }
-                }
-                () = towonel_common::shutdown::shutdown_signal() => {}
+            // SIGTERM cancels the token; edge.run() drains before returning
+            // instead of dropping connections.
+            let edge_shutdown = tokio_util::sync::CancellationToken::new();
+            {
+                let shutdown = edge_shutdown.clone();
+                tokio::spawn(async move {
+                    towonel_common::shutdown::shutdown_signal().await;
+                    shutdown.cancel();
+                });
+            }
+            if let Err(e) = edge.run(edge_shutdown).await {
+                error!("edge error: {e}");
             }
             link_shutdown.cancel();
             if let Err(e) = link_task.await {
@@ -692,6 +713,7 @@ async fn build_hub_params(
         oidc: config.hub.oidc.clone(),
         mailer,
         webauthn_rp_id: config.hub.webauthn_rp_id.clone(),
+        default_failover_regions: config.hub.default_failover_regions.clone(),
     })
 }
 

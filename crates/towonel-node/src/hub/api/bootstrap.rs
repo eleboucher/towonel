@@ -208,7 +208,10 @@ pub(super) async fn post_bootstrap(
 
     // Keep only edges in the invite's allowed regions. If that leaves nothing
     // dialable, fall back to every candidate so the agent is never stranded.
-    let allowed = allowed_regions(invite.region.as_deref(), &invite.failover_regions);
+    let mut allowed = allowed_regions(invite.region.as_deref(), &invite.failover_regions);
+    // Hub-wide default failover widens edge selection only (not reservation
+    // scoping in ports.rs), so an agent can reach another region's edge.
+    allowed.extend(state.default_failover_regions.iter().cloned());
     let in_region = |c: &EdgeCandidate| {
         allowed.contains(
             c.region
