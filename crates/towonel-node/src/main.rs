@@ -713,7 +713,6 @@ async fn build_hub_params(
         oidc: config.hub.oidc.clone(),
         mailer,
         webauthn_rp_id: config.hub.webauthn_rp_id.clone(),
-        default_failover_regions: config.hub.default_failover_regions.clone(),
     })
 }
 

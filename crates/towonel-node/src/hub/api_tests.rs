@@ -777,26 +777,6 @@ async fn bootstrap_failover_region_included() {
 }
 
 #[tokio::test]
-async fn bootstrap_hub_default_failover_widens_edges() {
-    // The hub carries a default failover region; the invite sets none of its
-    // own. Bootstrap should still hand the agent the CA edge so it survives an
-    // EU edge outage.
-    let hub = TestHub::start_with_default_failover(vec!["CA".to_string()]).await;
-    let client = reqwest::Client::new();
-    let eu = inject_edge(&hub, 2, "10.0.0.2:51820", "EU");
-    let ca = inject_edge(&hub, 3, "10.0.0.3:51820", "CA");
-
-    let token = create_invite_with_region(&hub, &client, "a", &["a.test"], Some("EU"), &[]).await;
-    let ids = bootstrap_endpoints(&hub, &client, &token).await;
-
-    assert!(ids.contains(&eu), "EU edge included: {ids:?}");
-    assert!(
-        ids.contains(&ca),
-        "CA edge included via hub default failover: {ids:?}"
-    );
-}
-
-#[tokio::test]
 async fn bootstrap_default_region_excludes_other_regions() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();

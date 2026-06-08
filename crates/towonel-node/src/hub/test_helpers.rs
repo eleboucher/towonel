@@ -88,35 +88,16 @@ impl TestHub {
     }
 
     pub(super) async fn start_with(ports_require_reservation: bool) -> Self {
-        Self::start_full(
-            ports_require_reservation,
-            vec!["127.0.0.1".to_string()],
-            Vec::new(),
-        )
-        .await
-    }
-
-    /// Start a hub with a non-empty default failover-region set so bootstrap
-    /// hands agents edges outside their invite's primary region.
-    pub(super) async fn start_with_default_failover(regions: Vec<String>) -> Self {
-        Self::start_full(false, vec!["127.0.0.1".to_string()], regions).await
+        Self::start_full(ports_require_reservation, vec!["127.0.0.1".to_string()]).await
     }
 
     /// Start a hub whose edge advertises no public IPs, for exercising the
     /// "nothing to assign" path in port reservation.
     pub(super) async fn start_without_edge_ips() -> Self {
-        Self::start_full(false, Vec::new(), Vec::new()).await
+        Self::start_full(false, Vec::new()).await
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "linear AppState construction for tests; mirrors the production builder"
-    )]
-    async fn start_full(
-        ports_require_reservation: bool,
-        edge_public_ips: Vec<String>,
-        default_failover_regions: Vec<String>,
-    ) -> Self {
+    async fn start_full(ports_require_reservation: bool, edge_public_ips: Vec<String>) -> Self {
         // Init once so test failures show the hub's `warn!`/`error!` lines.
         // Safe to call repeatedly; only the first wins.
         use std::sync::Once;
@@ -198,7 +179,6 @@ impl TestHub {
             passkey_reg_states: super::api::new_passkey_reg_states(),
             passkey_auth_states: super::api::new_passkey_auth_states(),
             tls: None,
-            default_failover_regions,
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));
