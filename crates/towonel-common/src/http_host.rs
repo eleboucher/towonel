@@ -1,5 +1,10 @@
 const MAX_HEADERS: usize = 64;
 
+/// Lowercased routing host from a buffered HTTP request head.
+///
+/// Returns `None` (drop the connection) when routing could desync from the
+/// origin: more than one `Host` header, or an absolute-form target whose
+/// authority disagrees with `Host`.
 #[must_use]
 pub fn extract_host_header(buf: &[u8]) -> Option<String> {
     let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
@@ -7,12 +12,38 @@ pub fn extract_host_header(buf: &[u8]) -> Option<String> {
     if !matches!(req.parse(buf), Ok(httparse::Status::Complete(_))) {
         return None;
     }
-    let value = req
+
+    // Exactly one Host header, or we can't be sure which the origin honors.
+    let mut hosts = req
         .headers
         .iter()
-        .find(|h| h.name.eq_ignore_ascii_case("host"))?
-        .value;
+        .filter(|h| h.name.eq_ignore_ascii_case("host"));
+    let value = hosts.next()?.value;
+    if hosts.next().is_some() {
+        return None;
+    }
+
     let raw = std::str::from_utf8(value).ok()?.trim();
+    let host = parse_authority_host(raw)?;
+
+    // Absolute-form target authority must agree with Host.
+    if let Some(path) = req.path
+        && let Some((_, scheme_rel)) = path.split_once("://")
+        && let Some(authority) = scheme_rel.split(['/', '?', '#']).next()
+        && !authority.is_empty()
+    {
+        let target_host = parse_authority_host(authority)?;
+        if target_host != host {
+            return None;
+        }
+    }
+
+    Some(host)
+}
+
+/// Parse an `authority` (host[:port], IPv6 bracketed) into its lowercased,
+/// unbracketed host.
+fn parse_authority_host(raw: &str) -> Option<String> {
     let authority: http::uri::Authority = raw.parse().ok()?;
     let host = authority.host();
     let unbracketed = host
@@ -47,6 +78,24 @@ mod tests {
     #[test]
     fn missing_host_returns_none() {
         let req = b"GET / HTTP/1.1\r\nUser-Agent: x\r\n\r\n";
+        assert!(extract_host_header(req).is_none());
+    }
+
+    #[test]
+    fn duplicate_host_header_rejected() {
+        let req = b"GET / HTTP/1.1\r\nHost: a.example.eu\r\nHost: b.example.eu\r\n\r\n";
+        assert!(extract_host_header(req).is_none());
+    }
+
+    #[test]
+    fn absolute_form_matching_authority_ok() {
+        let req = b"GET http://a.example.eu/path HTTP/1.1\r\nHost: a.example.eu\r\n\r\n";
+        assert_eq!(extract_host_header(req).as_deref(), Some("a.example.eu"));
+    }
+
+    #[test]
+    fn absolute_form_mismatched_authority_rejected() {
+        let req = b"GET http://b.example.eu/path HTTP/1.1\r\nHost: a.example.eu\r\n\r\n";
         assert!(extract_host_header(req).is_none());
     }
 }

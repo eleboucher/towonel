@@ -7,6 +7,23 @@ use crate::hostname::{ascii_lowercase_cow, wildcard_lookup_ascii_lower};
 use crate::identity::{AgentId, TenantId};
 use crate::ownership::OwnershipPolicy;
 use crate::tls_policy::{TlsMode, TlsPolicyTable};
+use crate::tunnel::{CONTROL_PREFIX, HTTP_ROUTE_PREFIX, TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX};
+
+/// Whether `hostname` begins with a route-key prefix the agent dispatches on.
+///
+/// (`tcp:`/`udp:`/`http:`/`ctrl:`) — the edge rejects such SNI/Host values so a
+/// client can't flip hostname routing into a raw service-map lookup.
+#[must_use]
+pub fn is_reserved_route_key(hostname: &str) -> bool {
+    [
+        TCP_ROUTE_PREFIX,
+        UDP_ROUTE_PREFIX,
+        HTTP_ROUTE_PREFIX,
+        CONTROL_PREFIX,
+    ]
+    .iter()
+    .any(|p| hostname.starts_with(p))
+}
 
 /// A materialized routing table: hostname -> set of agent IDs that serve it,
 /// plus a parallel TLS policy table so edges can look up termination mode

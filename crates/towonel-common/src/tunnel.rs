@@ -20,6 +20,10 @@ pub const TCP_ROUTE_PREFIX: &str = "tcp:";
 /// is a sequence of [`write_datagram_frame`] frames.
 pub const UDP_ROUTE_PREFIX: &str = "udp:";
 
+/// Plain-HTTP (`:80`) ingress route-key prefix; the edge writes it so the agent
+/// dials its cleartext origin.
+pub const HTTP_ROUTE_PREFIX: &str = "http:";
+
 /// Raw bytes at the head of an agent → edge control stream.
 ///
 /// Unlike [`TCP_ROUTE_PREFIX`] / [`UDP_ROUTE_PREFIX`] (which live in the

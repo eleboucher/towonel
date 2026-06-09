@@ -965,6 +965,10 @@ async fn prepare_connection(tcp_stream: &TcpStream, ctx: &ConnCtx) -> anyhow::Re
     let hostname = extract_sni(peeked)
         .ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?
         .to_string();
+    // SNI must not forge a route-key prefix the agent dispatches on.
+    if towonel_common::routing::is_reserved_route_key(&hostname) {
+        anyhow::bail!("SNI uses a reserved route-key prefix: {hostname}");
+    }
     debug!(%hostname, "SNI extracted");
 
     let (candidates, policy) = ctx

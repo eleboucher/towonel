@@ -1032,3 +1032,13 @@ fn tcp_and_udp_share_no_port_namespace() {
     assert!(table.tcp_listeners().get(&9000).is_some());
     assert!(table.udp_listeners().get(&9000).is_some());
 }
+
+#[test]
+fn reserved_route_key_prefixes() {
+    assert!(is_reserved_route_key("tcp:svc.example.eu"));
+    assert!(is_reserved_route_key("udp:svc.example.eu"));
+    assert!(is_reserved_route_key("http:host.example.eu"));
+    assert!(is_reserved_route_key("ctrl:x"));
+    assert!(!is_reserved_route_key("app.example.eu"));
+    assert!(!is_reserved_route_key("tcpsvc.example.eu"));
+}

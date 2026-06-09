@@ -291,33 +291,71 @@ pub(super) async fn post_login(
     // a stolen-password attacker could refresh it on every challenge.
     state.login_limiter.invalidate(&email_key).await;
 
-    let totp_enabled = match state.db.find_user_totp(&user.id).await {
+    let methods = match enrolled_second_factors(&state, &user.id).await {
+        Ok(m) => m,
+        Err(resp) => return resp,
+    };
+    if methods.is_empty() {
+        state.ip_login_limiter.invalidate(&ip_key).await;
+        issue_session_response(&state, &user.id, &user.email, &user.role).await
+    } else {
+        issue_login_challenge_response(&state, &user.id, &methods).await
+    }
+}
+
+/// Second-factor methods enrolled for `user_id` (`"totp"`, `"passkey"`); empty
+/// means single-factor. Shared by the password and OIDC paths.
+pub(super) async fn enrolled_second_factors(
+    state: &Arc<AppState>,
+    user_id: &str,
+) -> Result<Vec<&'static str>, Response> {
+    let totp_enabled = match state.db.find_user_totp(user_id).await {
         Ok(r) => r.is_some_and(|row| row.confirmed_at_ms.is_some()),
         Err(e) => {
             warn!(error = %e, "find_user_totp failed during login");
-            return internal_error();
+            return Err(internal_error());
         }
     };
-    let passkeys_enabled = match state.db.count_passkeys_for_user(&user.id).await {
+    let passkeys_enabled = match state.db.count_passkeys_for_user(user_id).await {
         Ok(n) => n > 0,
         Err(e) => {
             warn!(error = %e, "count_passkeys_for_user failed during login");
-            return internal_error();
+            return Err(internal_error());
         }
     };
-    if totp_enabled || passkeys_enabled {
-        let mut methods = Vec::new();
-        if totp_enabled {
-            methods.push("totp");
-        }
-        if passkeys_enabled {
-            methods.push("passkey");
-        }
-        issue_login_challenge_response(&state, &user.id, &methods).await
-    } else {
-        state.ip_login_limiter.invalidate(&ip_key).await;
-        issue_session_response(&state, &user.id, &user.email, &user.role).await
+    let mut methods = Vec::new();
+    if totp_enabled {
+        methods.push("totp");
     }
+    if passkeys_enabled {
+        methods.push("passkey");
+    }
+    Ok(methods)
+}
+
+/// Mint a login challenge for `user_id`, returning the token the client later
+/// presents to `POST /v1/auth/2fa/verify`.
+pub(super) async fn mint_login_challenge(
+    state: &Arc<AppState>,
+    user_id: &str,
+) -> Result<String, Response> {
+    let now = now_ms_i64();
+    let s = session::mint();
+    if let Err(e) = state
+        .db
+        .insert_login_challenge(NewLoginChallenge {
+            id: &s.id,
+            user_id,
+            token_hash: &s.token_hash,
+            expires_at_ms: now.saturating_add(LOGIN_CHALLENGE_TTL_MS),
+            now_ms: now,
+        })
+        .await
+    {
+        warn!(error = %e, "insert_login_challenge failed");
+        return Err(internal_error());
+    }
+    Ok(s.cookie_value)
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -432,27 +470,14 @@ pub(super) async fn issue_login_challenge_response(
     user_id: &str,
     methods: &[&str],
 ) -> Response {
-    let now = now_ms_i64();
-    let s = session::mint();
-    if let Err(e) = state
-        .db
-        .insert_login_challenge(NewLoginChallenge {
-            id: &s.id,
-            user_id,
-            token_hash: &s.token_hash,
-            expires_at_ms: now.saturating_add(LOGIN_CHALLENGE_TTL_MS),
-            now_ms: now,
-        })
-        .await
-    {
-        warn!(error = %e, "insert_login_challenge failed");
-        return internal_error();
+    match mint_login_challenge(state, user_id).await {
+        Ok(challenge_token) => json_ok(serde_json::json!({
+            "twofa_required": true,
+            "challenge_token": challenge_token,
+            "methods": methods,
+        })),
+        Err(resp) => resp,
     }
-    json_ok(serde_json::json!({
-        "twofa_required": true,
-        "challenge_token": s.cookie_value,
-        "methods": methods,
-    }))
 }
 
 /// Resolve the client IP used for the lockout counter.

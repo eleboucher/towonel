@@ -69,12 +69,14 @@ impl OwnershipPolicy {
             if pattern == &lower {
                 return true; // exact match
             }
-            // `*.example.eu` matches `<label>.example.eu` but NOT `evilexample.eu`:
-            // the byte preceding the suffix must be the separating dot.
+            // `*.example.eu` matches one label (`app.example.eu`) but not
+            // `evilexample.eu` (no dot boundary) nor `deep.app.example.eu`
+            // (matches the single-level wildcard `RouteTable::lookup` resolves).
             if let Some(suffix) = pattern.strip_prefix("*.")
                 && let Some(prefix) = lower.strip_suffix(suffix)
-                && let Some(prefix) = prefix.strip_suffix('.')
-                && !prefix.is_empty()
+                && let Some(label) = prefix.strip_suffix('.')
+                && !label.is_empty()
+                && !label.contains('.')
             {
                 return true;
             }
@@ -147,6 +149,9 @@ mod tests {
         // suffix match without a dot boundary must not be authorized
         assert!(!policy.is_hostname_allowed(&kp.id(), "evilexample.eu"));
         assert!(!policy.is_hostname_allowed(&kp.id(), "notexample.eu"));
+        // single-level wildcard must not match deeper subdomains
+        assert!(!policy.is_hostname_allowed(&kp.id(), "deep.app.example.eu"));
+        assert!(!policy.is_hostname_allowed(&kp.id(), "a.b.example.eu"));
     }
 
     #[test]

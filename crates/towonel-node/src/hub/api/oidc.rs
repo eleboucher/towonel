@@ -620,7 +620,7 @@ pub(super) async fn callback(
                     Err(why) => return error_redirect(&provider, why),
                 }
             };
-            issue_session_redirect(&state, &user_id, &next).await
+            issue_session_or_2fa_redirect(&state, &provider, &user_id, &next).await
         }
         OidcFlowKind::Link { user_id } => {
             link_callback(
@@ -1084,6 +1084,34 @@ async fn issue_session_redirect(state: &Arc<AppState>, user_id: &str, next: &str
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
     resp
+}
+
+/// Issue a session, or — if the user has TOTP/passkey enrolled — bounce to the
+/// SPA `/login/2fa` route with a fresh login challenge. The token rides in the
+/// URL fragment (never sent to the server, not leaked via `Referer`); the SPA
+/// reads `location.hash` and completes via `POST /v1/auth/2fa/verify`.
+/// Frontend contract: a `/login/2fa` route reading `#challenge=` + `?methods=`/`?next=`.
+async fn issue_session_or_2fa_redirect(
+    state: &Arc<AppState>,
+    provider: &str,
+    user_id: &str,
+    next: &str,
+) -> Response {
+    let Ok(methods) = super::auth::enrolled_second_factors(state, user_id).await else {
+        return error_redirect(provider, "internal_error");
+    };
+    if methods.is_empty() {
+        return issue_session_redirect(state, user_id, next).await;
+    }
+    let Ok(challenge_token) = super::auth::mint_login_challenge(state, user_id).await else {
+        return error_redirect(provider, "internal_error");
+    };
+    let next_enc: String = url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
+    let target = format!(
+        "/login/2fa?methods={}&next={next_enc}#challenge={challenge_token}",
+        methods.join(",")
+    );
+    redirect_to(&target)
 }
 
 fn redirect_to(url: &str) -> Response {
