@@ -218,8 +218,15 @@ impl Edge {
             sessions: Arc::clone(&self.sessions),
             metrics: self.metrics.clone(),
             proxy_protocol: Arc::clone(&self.proxy_protocol),
+            hub_client: self.hub_client.clone(),
             connection_permits: Arc::new(tokio::sync::Semaphore::new(max_inflight)),
         });
+        // Long-lived agent (iroh) connections get their own pool: if they drew
+        // from the client `connection_permits`, the shutdown drain (which
+        // acquires that whole pool) would block the full timeout while any
+        // agent stays connected. Agent connections are closed by
+        // `endpoint.close()` after `run()` returns.
+        let agent_permits = Arc::new(tokio::sync::Semaphore::new(max_inflight));
 
         let listeners = bind_listeners(&self.listen_addr, self.listen_workers).await?;
         info!(
@@ -275,7 +282,7 @@ impl Edge {
             let router = Arc::clone(&self.router);
             let metrics = self.metrics.clone();
             let hub_client = self.hub_client.clone();
-            let permits = Arc::clone(&ctx.connection_permits);
+            let permits = Arc::clone(&agent_permits);
             tasks.push(tokio::spawn(iroh_accept_loop(
                 endpoint,
                 sessions,
@@ -308,9 +315,10 @@ impl Edge {
             }
         }
 
-        // Each in-flight task holds a permit; acquiring the whole pool blocks
-        // until they finish, bounded by the drain timeout. UDP sessions are not
-        // permit-tracked, so they end on idle/exit rather than draining here.
+        // Each in-flight client task holds a permit; acquiring the whole pool
+        // blocks until they finish, bounded by the drain timeout. Agent (iroh)
+        // connections use a separate pool and UDP sessions are not
+        // permit-tracked, so neither blocks this drain.
         let max = u32::try_from(max_inflight).unwrap_or(u32::MAX);
         match tokio::time::timeout(
             drain_timeout,
@@ -359,7 +367,7 @@ async fn iroh_accept_loop(
     router: Arc<Router>,
     metrics: EdgeMetrics,
     hub_client: Option<Arc<dyn HubClient>>,
-    connection_permits: Arc<tokio::sync::Semaphore>,
+    agent_permits: Arc<tokio::sync::Semaphore>,
     shutdown: CancellationToken,
 ) {
     info!("edge iroh accept loop ready");
@@ -376,7 +384,7 @@ async fn iroh_accept_loop(
             info!("edge iroh endpoint closed, stopping accept loop");
             return;
         };
-        let Ok(permit) = Arc::clone(&connection_permits).try_acquire_owned() else {
+        let Ok(permit) = Arc::clone(&agent_permits).try_acquire_owned() else {
             metrics.connections_rejected_overload.inc();
             drop(incoming);
             continue;
@@ -715,6 +723,10 @@ struct ConnCtx {
     sessions: Arc<SessionRegistry>,
     metrics: EdgeMetrics,
     proxy_protocol: Arc<ProxyProtocolConfig>,
+    /// Lets the client routing path tell the hub an agent is gone when it
+    /// evicts a dead session (so hub liveness doesn't go stale until the next
+    /// link reconnect).
+    hub_client: Option<Arc<dyn HubClient>>,
     /// Hard cap on in-flight TCP connections (TLS + raw TCP services). An
     /// `OwnedSemaphorePermit` is acquired per accept and held for the
     /// lifetime of the spawned `handle_*_connection` task. When the cap is
@@ -771,7 +783,7 @@ async fn pick_agent_and_open_stream(
     let mut last_err: Option<anyhow::Error> = None;
     for attempt in 0..PICK_AGENT_ATTEMPTS {
         for agent_addr in &candidates {
-            match open_agent_stream(&ctx.sessions, &ctx.metrics, agent_addr.id).await {
+            match open_agent_stream(ctx, agent_addr.id).await {
                 Ok((send, recv)) => {
                     if let Some(tenant) = ctx.sessions.tenant_for(&agent_addr.id) {
                         ctx.metrics
@@ -1134,23 +1146,42 @@ async fn peek_http_hostname(tcp: &TcpStream) -> anyhow::Result<String> {
 /// if the agent has no session (offline) or if `open_bi` fails on a
 /// broken connection — the supersede-race retry happens at the caller.
 async fn open_agent_stream(
-    sessions: &SessionRegistry,
-    metrics: &EdgeMetrics,
+    ctx: &ConnCtx,
     agent_id: iroh::EndpointId,
 ) -> anyhow::Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
-    let Some(session) = sessions.get(&agent_id) else {
-        metrics.route_no_session_total.inc();
+    let Some(session) = ctx.sessions.get(&agent_id) else {
+        ctx.metrics.route_no_session_total.inc();
         anyhow::bail!("agent {} has no active session", agent_id.fmt_short());
     };
     match session.open_stream().await {
         Ok(pair) => Ok(pair),
         Err(e) => {
-            sessions.remove_if_current(&session);
+            // Capture the tenant before removing so we can tell the hub the
+            // agent is gone — the `conn.closed()` cleanup path would otherwise
+            // see the entry already removed and skip the notification.
+            let tenant = ctx.sessions.tenant_for(&agent_id);
+            if ctx.sessions.remove_if_current(&session) {
+                notify_session_removed(ctx, tenant, agent_id).await;
+            }
             Err(anyhow::anyhow!(
                 "open_bi on agent {} session failed: {e}",
                 agent_id.fmt_short()
             ))
         }
+    }
+}
+
+/// Tell the hub an agent session is gone, if a hub client and tenant are known.
+async fn notify_session_removed(
+    ctx: &ConnCtx,
+    tenant: Option<towonel_common::identity::TenantId>,
+    agent_id: iroh::EndpointId,
+) {
+    if let Some(tenant_id) = tenant
+        && let Some(client) = ctx.hub_client.as_deref()
+        && let Ok(aid) = towonel_common::identity::AgentId::from_bytes(agent_id.as_bytes())
+    {
+        client.record_session_removed(tenant_id, aid).await;
     }
 }
 
@@ -1608,6 +1639,7 @@ async fn udp_listen_loop(
                     let binding_for_session = Arc::clone(&binding);
                     let ctx_for_session = Arc::clone(&ctx);
                     let sessions_for_session = Arc::clone(&sessions);
+                    let tx_for_cleanup = tx.clone();
                     tokio::spawn(async move {
                         udp_session_pump(
                             socket_for_session,
@@ -1617,7 +1649,16 @@ async fn udp_listen_loop(
                             rx,
                         )
                         .await;
-                        sessions_for_session.lock().await.remove(&peer_addr);
+                        // Only evict our own entry: if the listener already
+                        // recreated the session (new channel) for this peer,
+                        // removing here would kill the live replacement.
+                        let mut map = sessions_for_session.lock().await;
+                        if map
+                            .get(&peer_addr)
+                            .is_some_and(|cur| cur.same_channel(&tx_for_cleanup))
+                        {
+                            map.remove(&peer_addr);
+                        }
                     });
                     tx
                 }

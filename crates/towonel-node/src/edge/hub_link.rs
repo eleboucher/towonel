@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -59,6 +59,9 @@ pub struct HubLinkHandle {
     /// Source the supervisor reads to ship a `SessionsSnapshot` after each
     /// (re)connect. `None` only in unit tests that bypass the supervisor.
     pub sessions: Option<Arc<super::sessions::SessionRegistry>>,
+    /// Set when a `SessionAdded`/`SessionRemoved` event is dropped (queue
+    /// full); `run_loop` then reships a full snapshot so the hub re-converges.
+    pub resync_needed: Arc<AtomicBool>,
 }
 
 impl HubLinkHandle {
@@ -76,6 +79,7 @@ impl HubLinkHandle {
             next_request_id: Arc::new(AtomicU64::new(1)),
             pending_control: Arc::new(Mutex::new(HashMap::new())),
             sessions: None,
+            resync_needed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -168,7 +172,33 @@ async fn run_once(
 
     // Hub gates its initial RouteSnapshot on this frame, so always send
     // one — empty is fine. Sent inline before run_loop owns write_half.
-    let snapshot_sessions = handle
+    write_edge_to_hub(&mut write_half, &sessions_snapshot(handle))
+        .await
+        .context("send SessionsSnapshot")?;
+
+    // mpsc receivers are single-consumer: take for this link, restore on disconnect.
+    let mut session_rx = take_rx(&handle.session_event_rx);
+    let mut control_rx = take_rx(&handle.control_request_rx);
+    let result = run_loop(
+        &mut reader,
+        &mut write_half,
+        handle,
+        shutdown,
+        session_rx.as_mut(),
+        control_rx.as_mut(),
+    )
+    .await;
+    restore_rx(&handle.session_event_rx, session_rx);
+    restore_rx(&handle.control_request_rx, control_rx);
+    drain_pending_control(handle);
+    result
+}
+
+/// Build a full `SessionsSnapshot` from the current registry. Sent on each
+/// (re)connect and whenever a `SessionAdded`/`SessionRemoved` event was dropped
+/// (queue full), so the hub's liveness view re-converges.
+fn sessions_snapshot(handle: &HubLinkHandle) -> EdgeToHub {
+    let sessions = handle
         .sessions
         .as_ref()
         .map(|r| {
@@ -188,31 +218,7 @@ async fn run_once(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    write_edge_to_hub(
-        &mut write_half,
-        &EdgeToHub::SessionsSnapshot {
-            sessions: snapshot_sessions,
-        },
-    )
-    .await
-    .context("send SessionsSnapshot")?;
-
-    // mpsc receivers are single-consumer: take for this link, restore on disconnect.
-    let mut session_rx = take_rx(&handle.session_event_rx);
-    let mut control_rx = take_rx(&handle.control_request_rx);
-    let result = run_loop(
-        &mut reader,
-        &mut write_half,
-        handle,
-        shutdown,
-        session_rx.as_mut(),
-        control_rx.as_mut(),
-    )
-    .await;
-    restore_rx(&handle.session_event_rx, session_rx);
-    restore_rx(&handle.control_request_rx, control_rx);
-    drain_pending_control(handle);
-    result
+    EdgeToHub::SessionsSnapshot { sessions }
 }
 
 fn take_rx<T>(slot: &Arc<Mutex<Option<mpsc::Receiver<T>>>>) -> Option<mpsc::Receiver<T>> {
@@ -247,12 +253,23 @@ where
     // below, so a bare `read_hub_to_edge` future dropped mid-frame would desync
     // the link. State lives in `frame_reader` across iterations.
     let mut frame_reader = EdgeLinkFrameReader::new();
+    let mut resync_tick = tokio::time::interval(Duration::from_secs(1));
+    resync_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
             frame = frame_reader.next_hub_to_edge(reader) => {
                 let frame = frame.context("read hub frame")?;
                 handle_frame(frame, handle);
+            }
+            _ = resync_tick.tick() => {
+                // A dropped session event left the hub's liveness view stale;
+                // reship the full snapshot to re-converge.
+                if handle.resync_needed.swap(false, Ordering::Relaxed) {
+                    write_edge_to_hub(writer, &sessions_snapshot(handle))
+                        .await
+                        .context("resync SessionsSnapshot")?;
+                }
             }
             outbound = recv_outbound(session_rx.as_deref_mut()) => {
                 if let Some(ev) = outbound {

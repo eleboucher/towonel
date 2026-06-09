@@ -175,7 +175,14 @@ impl SessionRegistry {
         });
         if let Ok(Some(_)) = result {
             self.metrics.active_sessions.dec();
-            if let Some(tenant_id) = self.tenants.pin().remove(&agent_id) {
+            // Only release the tenant binding/slot when no fresh session has
+            // taken this agent's place. On a supersede+reconnect race the new
+            // session reuses this binding (record_tenant early-returns on the
+            // existing entry), so removing it here would strand the live
+            // session with no tenant and an under-counted slot.
+            if self.by_id.pin().get(&agent_id).is_none()
+                && let Some(tenant_id) = self.tenants.pin().remove(&agent_id)
+            {
                 self.release_iroh(tenant_id);
             }
             info!(agent = %agent_id.fmt_short(), "agent session removed");

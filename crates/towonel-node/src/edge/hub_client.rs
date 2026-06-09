@@ -196,6 +196,7 @@ impl HubClient for RemoteHubClient {
             })
         {
             tracing::warn!(error = %e, "hub_link session event queue full or closed");
+            self.link.resync_needed.store(true, Ordering::Relaxed);
         }
     }
 
@@ -206,6 +207,7 @@ impl HubClient for RemoteHubClient {
             .try_send(EdgeToHub::SessionRemoved { agent_id })
         {
             tracing::warn!(error = %e, "hub_link session event queue full or closed");
+            self.link.resync_needed.store(true, Ordering::Relaxed);
         }
     }
 }
