@@ -570,24 +570,28 @@ async fn handle_stream(
 /// Record byte counts from a finished bidirectional copy, warning on either
 /// direction's error. Each half reports its total alongside its result, so
 /// bytes sent before an abnormal close are still counted. `e2o_label`/`o2e_label`
-/// scope the warning to the caller.
+/// scope the warning to the caller. Returns `true` if either direction errored
+/// (an abnormal termination) so the caller can flag it as a forward error
+/// rather than count it a clean completion.
+#[must_use]
 fn record_copy_results(
     metrics: &AgentMetrics,
     edge_to_origin: (u64, io::Result<()>),
     origin_to_edge: (u64, io::Result<()>),
     e2o_label: &str,
     o2e_label: &str,
-) {
+) -> bool {
     let (e2o_bytes, e2o_res) = edge_to_origin;
     metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, e2o_bytes);
-    if let Err(e) = e2o_res {
+    if let Err(e) = &e2o_res {
         warn!("{e2o_label}: {e}");
     }
     let (o2e_bytes, o2e_res) = origin_to_edge;
     metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, o2e_bytes);
-    if let Err(e) = o2e_res {
+    if let Err(e) = &o2e_res {
         warn!("{o2e_label}: {e}");
     }
+    e2o_res.is_err() || o2e_res.is_err()
 }
 
 async fn forward_plain(
@@ -615,7 +619,9 @@ async fn forward_plain(
     };
 
     let (r1, r2) = tokio::join!(q2o, o2q);
-    record_copy_results(metrics, r1, r2, "edge->origin", "origin->edge");
+    if record_copy_results(metrics, r1, r2, "edge->origin", "origin->edge") {
+        anyhow::bail!("forwarding ended with a copy error");
+    }
     Ok(())
 }
 
@@ -675,7 +681,10 @@ async fn handle_tcp_stream(
         };
 
         let (r1, r2) = tokio::join!(q2o, o2q);
-        record_copy_results(metrics, r1, r2, "edge->tcp-origin", "tcp-origin->edge");
+        if record_copy_results(metrics, r1, r2, "edge->tcp-origin", "tcp-origin->edge") {
+            metrics.record_stream_error(metrics::stream_error::FORWARD_ERROR);
+            return Err(anyhow::anyhow!("tcp forwarding ended with a copy error"));
+        }
 
         metrics.streams_completed.inc();
         #[expect(
@@ -766,18 +775,19 @@ async fn handle_udp_stream(
 
         metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, bytes_e2o);
         metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, bytes_o2e);
-        if let Err(e) = result {
-            // Best-effort: ICMP unreachable surfaces here too, so log at debug
-            // rather than warn to avoid noisy alerts on transient origin loss.
-            debug!(error = %e, "udp forwarding ended");
-        }
-
-        metrics.streams_completed.inc();
         #[expect(
             clippy::cast_possible_truncation,
             reason = "udp streams won't last 584 million years"
         )]
         let duration_ms = start.elapsed().as_millis() as u64;
+        if let Err(e) = result {
+            // Best-effort: ICMP unreachable surfaces here too, so log at debug
+            // rather than warn to avoid noisy alerts on transient origin loss.
+            debug!(error = %e, "udp forwarding ended");
+            metrics.record_stream_error(metrics::stream_error::FORWARD_ERROR);
+        } else {
+            metrics.streams_completed.inc();
+        }
         debug!(duration_ms, "udp stream closed");
         Ok(())
     }
@@ -832,7 +842,9 @@ async fn forward_tls(
     };
 
     let (r1, r2) = tokio::join!(q2o, o2q);
-    record_copy_results(metrics, r1, r2, "edge->origin(tls)", "origin(tls)->edge");
+    if record_copy_results(metrics, r1, r2, "edge->origin(tls)", "origin(tls)->edge") {
+        anyhow::bail!("tls forwarding ended with a copy error");
+    }
     Ok(())
 }
 

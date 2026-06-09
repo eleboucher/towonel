@@ -18,6 +18,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 
 use towonel_common::edge_cred::{AuthFrame, EdgeCred};
 use towonel_common::http_host::extract_host_header;
+use towonel_common::metrics::GaugeGuard;
 use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
@@ -747,11 +748,9 @@ async fn handle_connection(
     ctx: &ConnCtx,
 ) -> anyhow::Result<()> {
     ctx.metrics.total_connections.inc();
-    ctx.metrics.active_connections.inc();
+    let _active = GaugeGuard::inc(&ctx.metrics.active_connections);
 
     let result = handle_connection_inner(tcp_stream, peer_addr, ctx).await;
-
-    ctx.metrics.active_connections.dec();
 
     if let Err(ref e) = result {
         debug!(%peer_addr, error = %e, "connection ended with error");
@@ -920,6 +919,10 @@ async fn handle_connection_inner(
             recv_stream,
         } = prep;
         let agent_short = agent_addr.id.fmt_short();
+        // Resolve the tenant before piping: an abnormal close can remove the
+        // session mid-transfer, so looking it up afterward would drop the
+        // per-tenant byte counts for exactly the connections we want to keep.
+        let tenant = ctx.sessions.tenant_for(&agent_addr.id);
         let client_addrs = ClientAddrs {
             src: peer_addr,
             dst: tcp_stream.local_addr()?,
@@ -938,7 +941,7 @@ async fn handle_connection_inner(
         };
         ctx.metrics.total_bytes_in.inc_by(bytes_in);
         ctx.metrics.total_bytes_out.inc_by(bytes_out);
-        if let Some(tenant) = ctx.sessions.tenant_for(&agent_addr.id) {
+        if let Some(tenant) = tenant {
             ctx.metrics
                 .record_tenant_bytes(&tenant, bytes_in, bytes_out);
         }
@@ -1020,9 +1023,8 @@ async fn handle_http_connection(
     ctx: &ConnCtx,
 ) -> anyhow::Result<()> {
     ctx.metrics.total_connections.inc();
-    ctx.metrics.active_connections.inc();
+    let _active = GaugeGuard::inc(&ctx.metrics.active_connections);
     let result = handle_http_connection_inner(tcp_stream, peer_addr, ctx).await;
-    ctx.metrics.active_connections.dec();
     if let Err(ref e) = result {
         debug!(%peer_addr, error = %e, "HTTP connection ended with error");
     }
@@ -1070,6 +1072,10 @@ async fn handle_http_connection_inner(
             })
             .await?;
         let agent_short = agent_addr.id.fmt_short();
+        // Resolve the tenant before piping: an abnormal close can remove the
+        // session mid-transfer, so looking it up afterward would drop the
+        // per-tenant byte counts.
+        let tenant = ctx.sessions.tenant_for(&agent_addr.id);
 
         // The agent keys its cleartext origin-`:80` dial off
         // `dst.port() == 80`; the listener may be bound elsewhere (tests).
@@ -1090,7 +1096,7 @@ async fn handle_http_connection_inner(
 
         ctx.metrics.total_bytes_in.inc_by(bytes_in);
         ctx.metrics.total_bytes_out.inc_by(bytes_out);
-        if let Some(tenant) = ctx.sessions.tenant_for(&agent_addr.id) {
+        if let Some(tenant) = tenant {
             ctx.metrics
                 .record_tenant_bytes(&tenant, bytes_in, bytes_out);
         }
@@ -1365,9 +1371,9 @@ async fn handle_tcp_connection(
     ctx: &ConnCtx,
 ) -> anyhow::Result<()> {
     ctx.metrics.total_connections.inc();
-    ctx.metrics.active_connections.inc();
+    let _active = GaugeGuard::inc(&ctx.metrics.active_connections);
     let span = info_span!("tcp", peer = %peer_addr, service = %binding.service);
-    let result = async move {
+    async move {
         let start = Instant::now();
 
         let candidates = ctx
@@ -1432,10 +1438,7 @@ async fn handle_tcp_connection(
         Ok(())
     }
     .instrument(span)
-    .await;
-
-    ctx.metrics.active_connections.dec();
-    result
+    .await
 }
 
 async fn pipe_tcp(
