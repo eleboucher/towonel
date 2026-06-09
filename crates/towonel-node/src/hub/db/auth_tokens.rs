@@ -144,7 +144,7 @@ impl Db {
         password_hash: &str,
         now_ms: i64,
     ) -> anyhow::Result<bool> {
-        use super::entities::sessions;
+        use super::entities::{api_keys, sessions};
         let txn = self.conn.begin().await?;
         let consumed = password_reset_tokens::Entity::update_many()
             .col_expr(
@@ -174,6 +174,12 @@ impl Db {
             .await?;
         sessions::Entity::delete_many()
             .filter(sessions::Column::UserId.eq(user_id))
+            .exec(&txn)
+            .await?;
+        // Reset is the post-compromise recovery flow: kill the user's API keys
+        // too, else a planted twk_ key keeps programmatic access.
+        api_keys::Entity::delete_many()
+            .filter(api_keys::Column::UserId.eq(user_id))
             .exec(&txn)
             .await?;
         txn.commit().await?;

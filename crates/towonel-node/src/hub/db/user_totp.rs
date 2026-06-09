@@ -53,7 +53,19 @@ impl Db {
         Ok(())
     }
 
-    pub async fn confirm_totp(&self, user_id: &str, now_ms: i64) -> anyhow::Result<bool> {
+    /// Confirm TOTP and install backup codes atomically: either 2FA becomes
+    /// enabled with a usable recovery set, or nothing changes. Returns `false`
+    /// (no change) if 2FA was already confirmed.
+    pub async fn confirm_totp_with_backup_codes(
+        &self,
+        user_id: &str,
+        codes: &[super::user_backup_codes::NewBackupCode<'_>],
+        now_ms: i64,
+    ) -> anyhow::Result<bool> {
+        use sea_orm::TransactionTrait;
+
+        use super::entities::user_backup_codes;
+        let txn = self.conn.begin().await?;
         let result = user_totp::Entity::update_many()
             .col_expr(
                 user_totp::Column::ConfirmedAtMs,
@@ -61,9 +73,28 @@ impl Db {
             )
             .filter(user_totp::Column::UserId.eq(user_id))
             .filter(user_totp::Column::ConfirmedAtMs.is_null())
-            .exec(&self.conn)
+            .exec(&txn)
             .await?;
-        Ok(result.rows_affected == 1)
+        if result.rows_affected != 1 {
+            txn.rollback().await?;
+            return Ok(false);
+        }
+        user_backup_codes::Entity::delete_many()
+            .filter(user_backup_codes::Column::UserId.eq(user_id))
+            .exec(&txn)
+            .await?;
+        for c in codes {
+            let model = user_backup_codes::ActiveModel {
+                id: ActiveValue::Set(c.id.to_string()),
+                user_id: ActiveValue::Set(c.user_id.to_string()),
+                code_hash: ActiveValue::Set(c.code_hash.to_string()),
+                used_at_ms: ActiveValue::Set(None),
+                created_at_ms: ActiveValue::Set(c.now_ms),
+            };
+            user_backup_codes::Entity::insert(model).exec(&txn).await?;
+        }
+        txn.commit().await?;
+        Ok(true)
     }
 
     /// Compare-and-swap the last-used TOTP step: only advances `last_used_step`

@@ -17,7 +17,9 @@ use crate::hub::auth::{password, session};
 use crate::hub::db::admin_actions::NewAdminAction;
 use crate::hub::db::user_passkeys::NewPasskey;
 
-use super::auth::{client_ip_key, issue_session_response, record_login_failure};
+use super::auth::{
+    client_ip_key, issue_session_response, reauth_rate_limited, record_login_failure,
+};
 use super::signup_invites::{now_ms_i64, random_code};
 use super::twofa::verify_code_or_backup;
 use super::{
@@ -151,20 +153,29 @@ pub(super) struct RegisterFinishRequest {
 )]
 pub(super) async fn post_register_finish(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     principal: Principal,
     axum::Json(body): axum::Json<RegisterFinishRequest>,
 ) -> Response {
     let Principal::User(ref user) = principal else {
         return user_required("user session required");
     };
+    let ip_key = client_ip_key(&peer, &headers);
+    if let Some(resp) = reauth_rate_limited(&state, &ip_key).await {
+        return resp;
+    }
     let name = body.name.trim().to_string();
     if name.is_empty() || name.len() > 64 {
         return invalid_request("name must be 1-64 characters");
     }
     // Fresh password so a session-hijack can't plant a backdoor credential.
-    match password::verify(&body.password, &user.password_hash).await {
-        Ok(true) => {}
-        _ => return unauthorized("invalid credentials"),
+    if !matches!(
+        password::verify(&body.password, &user.password_hash).await,
+        Ok(true)
+    ) {
+        record_login_failure(&state, &user.email, &ip_key).await;
+        return unauthorized("invalid credentials");
     }
     let Some(reg_state) = state.passkey_reg_states.remove(&body.challenge_id).await else {
         return error_response(
@@ -246,6 +257,8 @@ pub(super) struct DeletePasskeyRequest {
 )]
 pub(super) async fn delete_passkey(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     principal: Principal,
     Path(id): Path<String>,
     axum::Json(body): axum::Json<DeletePasskeyRequest>,
@@ -253,11 +266,18 @@ pub(super) async fn delete_passkey(
     let Principal::User(ref user) = principal else {
         return user_required("user session required");
     };
+    let ip_key = client_ip_key(&peer, &headers);
+    if let Some(resp) = reauth_rate_limited(&state, &ip_key).await {
+        return resp;
+    }
     // Mirrors twofa::post_disable: password + existing factor so a session
     // hijack can't silently strip 2FA.
-    match password::verify(&body.password, &user.password_hash).await {
-        Ok(true) => {}
-        _ => return unauthorized("invalid credentials"),
+    if !matches!(
+        password::verify(&body.password, &user.password_hash).await,
+        Ok(true)
+    ) {
+        record_login_failure(&state, &user.email, &ip_key).await;
+        return unauthorized("invalid credentials");
     }
     if let Ok(Some(totp_row)) = state.db.find_user_totp(&user.id).await
         && totp_row.confirmed_at_ms.is_some()

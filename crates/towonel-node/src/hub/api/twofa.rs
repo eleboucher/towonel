@@ -1,7 +1,8 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::StatusCode;
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,7 @@ use crate::hub::db::admin_actions::NewAdminAction;
 use crate::hub::db::user_backup_codes::NewBackupCode;
 use crate::hub::db::user_totp::UserTotpRow;
 
+use super::auth::{client_ip_key, reauth_rate_limited, record_login_failure};
 use super::signup_invites::{now_ms_i64, principal_actor, random_code};
 use super::{
     AppState, error_response, internal_error, invalid_request, json_ok, unauthorized, user_required,
@@ -193,25 +195,54 @@ pub(super) async fn post_confirm(
     if totp::verify_code(&secret, body.code.trim(), now_unix(), None).is_err() {
         return invalid_request("invalid code");
     }
+    // last_used_step intentionally left unset: confirm happens inside an
+    // already-authenticated session, so an immediate login with the same code
+    // is the same legitimate user.
     let now = now_ms_i64();
-    if !state.db.confirm_totp(&user.id, now).await.unwrap_or(false) {
-        return error_response(
-            StatusCode::CONFLICT,
-            "twofa_already_enabled",
-            "2FA is already enabled",
-        );
-    }
-    // last_used_step is intentionally left unset: confirm happens inside an
-    // already-authenticated session, so an immediate login with the same
-    // code is the same legitimate user.
 
-    let codes = match issue_backup_codes(&state, &user.id, now).await {
-        Ok(c) => c,
+    // Prepare backup codes up front so confirm + install land in one
+    // transaction: a failure must not leave 2FA enabled with no recovery codes.
+    let plain = backup_codes::generate_set();
+    let mut hashes = Vec::with_capacity(plain.len());
+    for code in &plain {
+        match backup_codes::hash(code).await {
+            Ok(h) => hashes.push(h),
+            Err(e) => {
+                warn!(error = %e, "backup code hash failed");
+                return internal_error();
+            }
+        }
+    }
+    let ids: Vec<String> = (0..plain.len()).map(|_| random_code(12)).collect();
+    let news: Vec<NewBackupCode> = ids
+        .iter()
+        .zip(hashes.iter())
+        .map(|(id, code_hash)| NewBackupCode {
+            id,
+            user_id: &user.id,
+            code_hash,
+            now_ms: now,
+        })
+        .collect();
+    match state
+        .db
+        .confirm_totp_with_backup_codes(&user.id, &news, now)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            return error_response(
+                StatusCode::CONFLICT,
+                "twofa_already_enabled",
+                "2FA is already enabled",
+            );
+        }
         Err(e) => {
-            warn!(error = %e, "issue_backup_codes failed");
+            warn!(error = %e, "confirm_totp_with_backup_codes failed");
             return internal_error();
         }
-    };
+    }
+    let codes = plain;
 
     let (actor_kind, actor_user_id) = principal_actor(&principal);
     if let Err(e) = state
@@ -249,12 +280,18 @@ pub(super) async fn post_confirm(
 )]
 pub(super) async fn post_disable(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: axum::http::HeaderMap,
     principal: Principal,
     axum::Json(body): axum::Json<DisableRequest>,
 ) -> Response {
     let Principal::User(ref user) = principal else {
         return user_required("2FA management is per-user");
     };
+    let ip_key = client_ip_key(&peer, &headers);
+    if let Some(resp) = reauth_rate_limited(&state, &ip_key).await {
+        return resp;
+    }
     // Both factors required so a session-hijack attacker can't silently
     // strip 2FA. Pending (never-confirmed) rows accept password-only.
     let Ok(Some(row)) = state.db.find_user_totp(&user.id).await else {
@@ -265,9 +302,12 @@ pub(super) async fn post_disable(
         );
     };
     if row.confirmed_at_ms.is_none() {
-        match password::verify(&body.password, &user.password_hash).await {
-            Ok(true) => {}
-            _ => return unauthorized("invalid credentials"),
+        if !matches!(
+            password::verify(&body.password, &user.password_hash).await,
+            Ok(true)
+        ) {
+            record_login_failure(&state, &user.email, &ip_key).await;
+            return unauthorized("invalid credentials");
         }
         if let Err(e) = state.db.delete_user_totp(&user.id).await {
             warn!(error = %e, "delete_user_totp failed");
@@ -276,9 +316,12 @@ pub(super) async fn post_disable(
         return json_ok(serde_json::json!({"ok": true}));
     }
 
-    match password::verify(&body.password, &user.password_hash).await {
-        Ok(true) => {}
-        _ => return unauthorized("invalid credentials"),
+    if !matches!(
+        password::verify(&body.password, &user.password_hash).await,
+        Ok(true)
+    ) {
+        record_login_failure(&state, &user.email, &ip_key).await;
+        return unauthorized("invalid credentials");
     }
     if !verify_code_or_backup(&state, user, &row, body.code.trim()).await {
         return unauthorized("invalid code");

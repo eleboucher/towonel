@@ -480,6 +480,23 @@ pub(super) async fn issue_login_challenge_response(
     }
 }
 
+/// Reject a password re-auth (passkey/2FA management) when the IP is already
+/// locked out, mirroring the login throttle so a hijacked session can't
+/// brute-force the password these gates protect. Pair with
+/// [`record_login_failure`] on a bad password.
+pub(super) async fn reauth_rate_limited(state: &Arc<AppState>, ip_key: &str) -> Option<Response> {
+    if let Some(counter) = state.ip_login_limiter.get(ip_key).await
+        && counter.load(std::sync::atomic::Ordering::Relaxed) >= LOGIN_MAX_FAILURES
+    {
+        return Some(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "too many failed attempts from this IP; try again later",
+        ));
+    }
+    None
+}
+
 /// Resolve the client IP used for the lockout counter.
 pub(super) fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) -> String {
     if !peer_is_trusted_proxy(peer.ip()) {
