@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use towonel_common::edge_link::{
-    EDGE_LINK_VERSION, EdgeCapabilities, EdgeToHub, HubSigningKey, HubToEdge, Kid,
-    read_hub_to_edge, write_edge_to_hub,
+    EDGE_LINK_VERSION, EdgeCapabilities, EdgeLinkFrameReader, EdgeToHub, HubSigningKey, HubToEdge,
+    Kid, read_hub_to_edge, write_edge_to_hub,
 };
 use towonel_common::identity::AgentId;
 use towonel_common::routing::RouteTable;
@@ -243,10 +243,14 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
 {
+    // Cancellation-safe reader: the inbound read races the outbound mpsc arms
+    // below, so a bare `read_hub_to_edge` future dropped mid-frame would desync
+    // the link. State lives in `frame_reader` across iterations.
+    let mut frame_reader = EdgeLinkFrameReader::new();
     loop {
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
-            frame = read_hub_to_edge(reader) => {
+            frame = frame_reader.next_hub_to_edge(reader) => {
                 let frame = frame.context("read hub frame")?;
                 handle_frame(frame, handle);
             }

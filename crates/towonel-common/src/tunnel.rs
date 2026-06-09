@@ -317,27 +317,96 @@ pub async fn write_datagram_frame<W: AsyncWrite + Unpin>(
     writer.write_all(datagram).await
 }
 
-/// Read one length-prefixed datagram into `buf`, returning bytes written.
-/// `UnexpectedEof` here signals a clean half-close between frames.
-pub async fn read_datagram_frame<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    buf: &mut [u8],
-) -> std::io::Result<usize> {
-    let mut len_bytes = [0u8; 2];
-    reader.read_exact(&mut len_bytes).await?;
-    let len = usize::from(u16::from_be_bytes(len_bytes));
-    if len > buf.len() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("udp frame length {len} exceeds buffer ({})", buf.len()),
-        ));
+/// Cancellation-safe reader for length-prefixed UDP datagram frames.
+///
+/// A bare `read_exact` loop loses already-consumed bytes when its future is
+/// dropped mid-frame inside a `tokio::select!`, desyncing the stream. This
+/// keeps the parse state and partial bytes in the struct, so dropping the
+/// [`next`](Self::next) future loses nothing — the next call resumes the frame.
+pub struct DatagramFrameReader {
+    len_buf: [u8; 2],
+    /// Fixed `MAX_UDP_DATAGRAM` capacity, never reallocated.
+    payload: Vec<u8>,
+    state: FrameState,
+}
+
+enum FrameState {
+    /// Assembling the 2-byte length prefix; `got` bytes collected.
+    Len { got: usize },
+    /// Reading a `len`-byte payload; `got` bytes collected.
+    Payload { len: usize, got: usize },
+}
+
+impl Default for DatagramFrameReader {
+    fn default() -> Self {
+        Self::new()
     }
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "len was just checked against buf.len() above"
-    )]
-    reader.read_exact(&mut buf[..len]).await?;
-    Ok(len)
+}
+
+impl DatagramFrameReader {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            len_buf: [0u8; 2],
+            payload: vec![0u8; MAX_UDP_DATAGRAM],
+            state: FrameState::Len { got: 0 },
+        }
+    }
+
+    /// Read the next complete datagram, returning its payload.
+    ///
+    /// Cancellation-safe: if the future is dropped mid-frame, consumed bytes
+    /// are retained and the next call resumes. A clean half-close between
+    /// frames surfaces as `UnexpectedEof`.
+    pub async fn next<R: AsyncRead + Unpin>(&mut self, reader: &mut R) -> std::io::Result<&[u8]> {
+        let len = loop {
+            match self.state {
+                FrameState::Len { got } => {
+                    #[expect(clippy::indexing_slicing, reason = "got is 0 or 1, len_buf is 2")]
+                    let n = reader.read(&mut self.len_buf[got..]).await?;
+                    if n == 0 {
+                        return Err(frame_eof());
+                    }
+                    let got = got + n;
+                    if got == 2 {
+                        let len = usize::from(u16::from_be_bytes(self.len_buf));
+                        if len > MAX_UDP_DATAGRAM {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
+                                    "udp frame length {len} exceeds {MAX_UDP_DATAGRAM}-byte cap"
+                                ),
+                            ));
+                        }
+                        self.state = FrameState::Payload { len, got: 0 };
+                    } else {
+                        self.state = FrameState::Len { got };
+                    }
+                }
+                FrameState::Payload { len, got } if got == len => {
+                    self.state = FrameState::Len { got: 0 };
+                    break len;
+                }
+                FrameState::Payload { len, got } => {
+                    #[expect(clippy::indexing_slicing, reason = "got < len <= payload.len()")]
+                    let n = reader.read(&mut self.payload[got..len]).await?;
+                    if n == 0 {
+                        return Err(frame_eof());
+                    }
+                    self.state = FrameState::Payload { len, got: got + n };
+                }
+            }
+        };
+        #[expect(
+            clippy::indexing_slicing,
+            reason = "len <= MAX_UDP_DATAGRAM == payload.len()"
+        )]
+        Ok(&self.payload[..len])
+    }
+}
+
+fn frame_eof() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "udp stream closed")
 }
 
 #[cfg(test)]
@@ -426,5 +495,43 @@ mod tests {
         drop(client);
         let err = read_control_prefix(&mut server).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    /// Yields at most one byte per `poll_read` to force the framed reader
+    /// through the multi-read path that cancellation-safety depends on.
+    struct OneByteAtATime {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl AsyncRead for OneByteAtATime {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            if self.pos < self.data.len() && buf.remaining() > 0 {
+                let b = self.data[self.pos];
+                self.pos += 1;
+                buf.put_slice(&[b]);
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn datagram_frame_reader_reassembles_across_reads() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&5u16.to_be_bytes());
+        data.extend_from_slice(b"hello");
+        data.extend_from_slice(&2u16.to_be_bytes());
+        data.extend_from_slice(b"hi");
+        let mut r = OneByteAtATime { data, pos: 0 };
+        let mut reader = DatagramFrameReader::new();
+        assert_eq!(reader.next(&mut r).await.unwrap(), b"hello");
+        assert_eq!(reader.next(&mut r).await.unwrap(), b"hi");
+        // Clean close between frames surfaces as UnexpectedEof.
+        let err = reader.next(&mut r).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 }

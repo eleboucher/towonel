@@ -22,9 +22,9 @@ use towonel_common::sni::extract_sni;
 use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
     CONTROL_STATUS_INTERNAL_ERROR, CONTROL_STATUS_INVALID, CONTROL_STATUS_NOT_IMPLEMENTED,
-    CONTROL_STATUS_OK, COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX,
-    UDP_ROUTE_PREFIX, copy_buf_counting, forward_quic_to_writer, read_control_prefix,
-    read_datagram_frame, write_control_status, write_datagram_frame, write_handshake,
+    CONTROL_STATUS_OK, COPY_BUF_SIZE, ClientAddrs, DatagramFrameReader, MAX_UDP_DATAGRAM,
+    TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX, copy_buf_counting, forward_quic_to_writer,
+    read_control_prefix, write_control_status, write_datagram_frame, write_handshake,
 };
 
 use self::health::{EdgeMetrics, session_reject_reason};
@@ -1704,7 +1704,7 @@ async fn udp_session_pump(
         // `select!` (not `join!`) so an idle-timeout on the edge->agent side
         // tears down the agent->edge side too. Otherwise a quiet origin
         // would leak one task per session.
-        let mut buf = vec![0u8; MAX_UDP_DATAGRAM];
+        let mut frame_reader = DatagramFrameReader::new();
         loop {
             tokio::select! {
                 framed = tokio::time::timeout(UDP_SESSION_IDLE, rx.recv()) => {
@@ -1718,14 +1718,9 @@ async fn udp_session_pump(
                         Ok(None) | Err(_) => break,
                     }
                 }
-                read = read_datagram_frame(&mut recv_stream, &mut buf) => {
+                read = frame_reader.next(&mut recv_stream) => {
                     match read {
-                        Ok(n) => {
-                            #[expect(
-                                clippy::indexing_slicing,
-                                reason = "read_datagram_frame bounds n <= buf.len()"
-                            )]
-                            let payload = &buf[..n];
+                        Ok(payload) => {
                             match socket.send_to(payload, peer_addr).await {
                                 Ok(sent) => {
                                     ctx.metrics.total_bytes_out.inc_by(sent as u64);

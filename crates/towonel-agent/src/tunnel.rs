@@ -13,8 +13,8 @@ use tracing::{Instrument, debug, info, info_span, warn};
 use towonel_common::hostname::wildcard_lookup;
 use towonel_common::metrics::GaugeGuard;
 use towonel_common::tunnel::{
-    COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX,
-    copy_buf_counting, forward_quic_to_writer, read_datagram_frame, read_handshake,
+    COPY_BUF_SIZE, ClientAddrs, DatagramFrameReader, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX,
+    UDP_ROUTE_PREFIX, copy_buf_counting, forward_quic_to_writer, read_handshake,
     write_datagram_frame,
 };
 
@@ -729,23 +729,19 @@ async fn handle_udp_stream(
             }
         };
 
-        let mut buf_in = vec![0u8; MAX_UDP_DATAGRAM];
+        let mut frame_reader = DatagramFrameReader::new();
         let mut buf_out = vec![0u8; MAX_UDP_DATAGRAM];
         let mut bytes_e2o: u64 = 0;
         let mut bytes_o2e: u64 = 0;
         let result: anyhow::Result<()> = loop {
             tokio::select! {
-                read = read_datagram_frame(&mut quic_recv, &mut buf_in) => match read {
-                    Ok(n) => {
-                        #[expect(
-                            clippy::indexing_slicing,
-                            reason = "read_datagram_frame bounds n <= buf_in.len()"
-                        )]
-                        let payload = &buf_in[..n];
+                read = frame_reader.next(&mut quic_recv) => match read {
+                    Ok(payload) => {
+                        let n = payload.len() as u64;
                         if let Err(e) = socket.send(payload).await {
                             break Err(e.into());
                         }
-                        bytes_e2o = bytes_e2o.saturating_add(n as u64);
+                        bytes_e2o = bytes_e2o.saturating_add(n);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break Ok(()),
                     Err(e) => break Err(e.into()),

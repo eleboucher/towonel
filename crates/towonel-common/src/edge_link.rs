@@ -189,6 +189,92 @@ where
     decode_versioned(&frame)
 }
 
+/// Cancellation-safe reader for length-prefixed edge-link frames.
+///
+/// `read_frame_bytes` (`read_u32` + `read_exact`) loses consumed bytes when its
+/// future is dropped mid-frame inside a `tokio::select!`, desyncing the link.
+/// This keeps the parse state and partial bytes in the struct, so dropping the
+/// [`next_hub_to_edge`](Self::next_hub_to_edge) future loses nothing.
+pub struct EdgeLinkFrameReader {
+    len_buf: [u8; 4],
+    body: Vec<u8>,
+    state: LinkFrameState,
+}
+
+enum LinkFrameState {
+    /// Assembling the 4-byte length prefix; `got` bytes collected.
+    Len { got: usize },
+    /// Reading a `len`-byte body; `got` bytes collected.
+    Body { len: usize, got: usize },
+}
+
+impl Default for EdgeLinkFrameReader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EdgeLinkFrameReader {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            len_buf: [0u8; 4],
+            body: Vec::new(),
+            state: LinkFrameState::Len { got: 0 },
+        }
+    }
+
+    /// Read and decode the next `HubToEdge` frame. Cancellation-safe.
+    pub async fn next_hub_to_edge<R>(&mut self, reader: &mut R) -> Result<HubToEdge, EdgeLinkError>
+    where
+        R: AsyncRead + Unpin,
+    {
+        let len = loop {
+            match self.state {
+                LinkFrameState::Len { got } => {
+                    #[expect(clippy::indexing_slicing, reason = "got < 4, len_buf is 4")]
+                    let n = reader.read(&mut self.len_buf[got..]).await?;
+                    if n == 0 {
+                        return Err(EdgeLinkError::Io(link_eof()));
+                    }
+                    let got = got + n;
+                    if got == 4 {
+                        let len = u32::from_be_bytes(self.len_buf) as usize;
+                        if len > EDGE_LINK_MAX_FRAME {
+                            return Err(EdgeLinkError::FrameTooLarge(len));
+                        }
+                        if len < 2 {
+                            return Err(EdgeLinkError::Truncated);
+                        }
+                        self.body.resize(len, 0);
+                        self.state = LinkFrameState::Body { len, got: 0 };
+                    } else {
+                        self.state = LinkFrameState::Len { got };
+                    }
+                }
+                LinkFrameState::Body { len, got } if got == len => {
+                    self.state = LinkFrameState::Len { got: 0 };
+                    break len;
+                }
+                LinkFrameState::Body { len, got } => {
+                    #[expect(clippy::indexing_slicing, reason = "got < len <= body.len()")]
+                    let n = reader.read(&mut self.body[got..len]).await?;
+                    if n == 0 {
+                        return Err(EdgeLinkError::Io(link_eof()));
+                    }
+                    self.state = LinkFrameState::Body { len, got: got + n };
+                }
+            }
+        };
+        #[expect(clippy::indexing_slicing, reason = "len == body.len()")]
+        decode_versioned(&self.body[..len])
+    }
+}
+
+fn link_eof() -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "edge link closed")
+}
+
 pub async fn write_edge_to_hub<W>(writer: &mut W, msg: &EdgeToHub) -> Result<(), EdgeLinkError>
 where
     W: AsyncWrite + Unpin,
