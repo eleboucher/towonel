@@ -117,10 +117,12 @@ pub async fn fetch_latest_sequence(
     let bytes = check_response(resp).await?;
     let entries: Vec<SignedConfigEntry> = ciborium::from_reader(bytes.as_slice())
         .context("hub returned malformed tenant-entries CBOR")?;
-    let pq_pubkey = kp.public_key();
     let mut max_seq = 0u64;
     for entry in &entries {
-        if let Ok(payload) = entry.verify(pq_pubkey) {
+        // Read the sequence without requiring a valid signature: allocation
+        // must not collide even with an entry signed under a rotated key or a
+        // corrupt highest entry, or the next submit reuses a taken sequence.
+        if let Ok(payload) = entry.decode_trusted() {
             max_seq = max_seq.max(payload.sequence);
         }
     }

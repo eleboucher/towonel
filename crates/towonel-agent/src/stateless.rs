@@ -515,8 +515,19 @@ pub fn spawn_edge_cred_refresh(ctx: Arc<BootstrapContext>) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
             let Some(current) = ctx.edge_cred.load_full() else {
-                // Legacy hub didn't mint a cred; re-check in case that changes.
-                tokio::time::sleep(REFRESH_RETRY_DELAY).await;
+                // No cred cached yet (bootstrap returned none, or one became
+                // available later). Actively ask the hub instead of sleeping on
+                // a cache nothing else populates.
+                match call_refresh(&ctx).await {
+                    Ok(new_cred) => {
+                        info!(kid = new_cred.kid, "EdgeCred acquired");
+                        ctx.edge_cred.store(Some(Arc::new(new_cred)));
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "EdgeCred acquisition failed; retrying");
+                        tokio::time::sleep(REFRESH_RETRY_DELAY).await;
+                    }
+                }
                 continue;
             };
             let now = towonel_common::time::now_ms();

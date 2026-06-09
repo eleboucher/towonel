@@ -49,9 +49,11 @@ where
 }
 
 /// Restart `activity` until `shutdown`. `base` is the gap between healthy runs
-/// (a poll interval, or the redial gap after a session ends). A run that errors
-/// in under `base` is a fast failure and escalates the next delay up to `max`;
-/// any healthy run (`Ok`, or lasting at least `base`) resets the escalation.
+/// (a poll interval, or the redial gap after a session ends). Each consecutive
+/// error escalates the next delay up to `max`; a clean (`Ok`) run resets the
+/// escalation. A single error after a long healthy run still redials at `base`
+/// (escalation only bites on *consecutive* failures), so a timeout-bound
+/// failure can no longer masquerade as healthy and pin the delay at `base`.
 /// Delays are jittered so concurrent supervisors don't fire in lockstep.
 pub async fn supervise<F, Fut>(
     label: &str,
@@ -75,7 +77,7 @@ pub async fn supervise<F, Fut>(
         };
 
         let ran = started.elapsed();
-        if outcome.is_ok() || ran >= base {
+        if outcome.is_ok() {
             failures = 0;
         } else {
             failures = failures.saturating_add(1);

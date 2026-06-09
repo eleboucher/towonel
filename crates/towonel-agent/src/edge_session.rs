@@ -219,27 +219,22 @@ async fn dial_and_serve(
         .edge_session_reconnects
         .with_label_values(&[&edge_label])
         .inc();
-    metrics
-        .edge_session_state
-        .with_label_values(&[&edge_label])
-        .set(1);
+    // Marks the session live; resets the gauge and aborts the path watcher on
+    // Drop, surviving a mid-session cancellation (see `EdgeSessionGuard`).
+    let mut guard = EdgeSessionGuard::live(Arc::clone(metrics), edge_label.clone());
 
     if let Some(cred) = edge_cred.load_full()
         && let Err(e) = present_edge_cred(&conn, &edge_label, &cred).await
     {
-        metrics
-            .edge_session_state
-            .with_label_values(&[&edge_label])
-            .set(0);
         return Err(e);
     }
 
     // iroh usually opens on the relay and upgrades to direct once holepunched.
-    let path_watcher = tokio::spawn(watch_paths(
+    guard.path_watcher = Some(tokio::spawn(watch_paths(
         conn.path_events(),
         edge_label.clone(),
         Arc::clone(metrics),
-    ));
+    )));
 
     let started = Instant::now();
     tunnel::handle_connection(
@@ -250,13 +245,44 @@ async fn dial_and_serve(
     )
     .await;
 
-    path_watcher.abort();
-    metrics.clear_edge_path(&edge_label);
-    metrics
-        .edge_session_state
-        .with_label_values(&[&edge_label])
-        .set(0);
     Ok(started.elapsed())
+}
+
+/// Holds an edge session's liveness gauge and path-watcher task, resetting both
+/// on Drop. A cancelled session (supervisor token fired mid-connection) would
+/// otherwise skip the straight-line cleanup, leaking the watcher and pinning
+/// `edge_session_state` at 1.
+struct EdgeSessionGuard {
+    metrics: Arc<AgentMetrics>,
+    edge_label: String,
+    path_watcher: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl EdgeSessionGuard {
+    fn live(metrics: Arc<AgentMetrics>, edge_label: String) -> Self {
+        metrics
+            .edge_session_state
+            .with_label_values(&[&edge_label])
+            .set(1);
+        Self {
+            metrics,
+            edge_label,
+            path_watcher: None,
+        }
+    }
+}
+
+impl Drop for EdgeSessionGuard {
+    fn drop(&mut self) {
+        if let Some(h) = self.path_watcher.take() {
+            h.abort();
+        }
+        self.metrics.clear_edge_path(&self.edge_label);
+        self.metrics
+            .edge_session_state
+            .with_label_values(&[&self.edge_label])
+            .set(0);
+    }
 }
 
 /// A rejected cred means the session is never reported live and no routes

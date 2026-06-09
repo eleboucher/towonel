@@ -92,6 +92,10 @@ const LIFECYCLE_MAX_DELAY: Duration = Duration::from_mins(1);
 /// lifecycle supervisor rebuilds with a fresh endpoint.
 const NO_SESSION_REBUILD_TIMEOUT: Duration = Duration::from_mins(5);
 
+/// Bound on the graceful endpoint close at shutdown so a stuck close can't hang
+/// process exit past the orchestrator's grace period.
+const ENDPOINT_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// A live agent: stable endpoint + supervisor pool, built once and kept for the
 /// process lifetime (no identity churn after the first successful bring-up).
 struct BroughtUp {
@@ -149,6 +153,11 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
     // The whole lifecycle — bring up a fresh endpoint, serve, tear down — is one
     // supervised activity: serve returning (wedged endpoint) or bring-up failing
     // (hub unreachable) both restart it, rebuilding from scratch.
+    // Holds the current lifecycle's endpoint so shutdown can close it even if
+    // the lifecycle future is dropped mid-serve by the supervisor.
+    let shutdown_endpoint: Arc<tokio::sync::Mutex<Option<Endpoint>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
     retry::supervise(
         "agent-lifecycle",
         &shutdown,
@@ -164,10 +173,23 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
                 &desired_tcp_bindings,
                 &desired_udp_bindings,
                 &shutdown,
+                &shutdown_endpoint,
             )
         },
     )
     .await;
+
+    // Graceful close on shutdown: if the lifecycle tore itself down cleanly this
+    // is a no-op (close is idempotent); if it was cancelled mid-serve, this is
+    // what flushes CONNECTION_CLOSE to the edges.
+    let endpoint = shutdown_endpoint.lock().await.take();
+    if let Some(endpoint) = endpoint
+        && tokio::time::timeout(ENDPOINT_CLOSE_TIMEOUT, endpoint.close())
+            .await
+            .is_err()
+    {
+        warn!("endpoint close timed out during shutdown");
+    }
 
     health_handle.abort();
     info!("towonel-agent stopped");
@@ -195,6 +217,7 @@ async fn run_lifecycle(
     desired_tcp_bindings: &[(String, u16)],
     desired_udp_bindings: &[(String, u16)],
     shutdown: &CancellationToken,
+    shutdown_endpoint: &Arc<tokio::sync::Mutex<Option<Endpoint>>>,
 ) -> anyhow::Result<()> {
     let BroughtUp {
         ctx,
@@ -212,6 +235,12 @@ async fn run_lifecycle(
         shutdown,
     )
     .await?;
+
+    // Stash the live endpoint so a SIGTERM that cancels this future mid-serve
+    // (dropping it before the teardown below) can still close it from
+    // `run_agent`, sending CONNECTION_CLOSE instead of leaving edges to route
+    // to a dead agent until QUIC idle timeout.
+    *shutdown_endpoint.lock().await = Some(endpoint.clone());
 
     info!(
         interval_secs = TOPOLOGY_REFRESH_INTERVAL.as_secs(),
