@@ -1,7 +1,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// A hub link that stayed up at least this long is considered healthy, so its
+/// next disconnect restarts the redial backoff from the floor instead of
+/// inheriting the escalation from an earlier failure burst.
+const HUB_LINK_STABLE_AFTER: Duration = Duration::from_mins(1);
 
 use anyhow::Context;
 use backon::{BackoffBuilder, ExponentialBuilder};
@@ -108,18 +113,22 @@ pub async fn run_supervisor(
         if shutdown.is_cancelled() {
             break;
         }
+        let started = Instant::now();
         let result = tokio::select! {
             () = shutdown.cancelled() => break,
             r = run_once(&cfg, &handle, &shutdown) => r,
         };
-        match result {
-            Ok(()) => {
-                info!("hub_link disconnected cleanly; reconnecting");
-                backoff = redial_backoff().build();
-            }
-            Err(e) => {
-                warn!(error = %e, "hub_link connection failed");
-            }
+        let ran = started.elapsed();
+        match &result {
+            Ok(()) => info!("hub_link disconnected cleanly; reconnecting"),
+            Err(e) => warn!(error = %e, "hub_link connection failed"),
+        }
+        // Reset escalation after a clean exit or a connection that stayed up
+        // long enough to be healthy. `run_once` returns `Ok` only on shutdown,
+        // so without the duration check a long-lived link that finally drops
+        // would keep climbing toward the 30s cap on every reconnect.
+        if result.is_ok() || ran >= HUB_LINK_STABLE_AFTER {
+            backoff = redial_backoff().build();
         }
         let delay = backoff.next().unwrap_or(Duration::from_secs(30));
         tokio::select! {
