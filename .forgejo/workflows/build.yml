@@ -59,8 +59,6 @@ jobs:
           provenance: mode=max
           tags: ${{ steps.meta-node.outputs.tags }}
           labels: ${{ steps.meta-node.outputs.labels }}
-          cache-from: type=gha,scope=towonel-node
-          cache-to: type=gha,scope=towonel-node,mode=max
           build-args: |
             ENABLE_SCCACHE=1
             VERSION=${{ steps.meta-node.outputs.version }}
@@ -96,8 +94,6 @@ jobs:
           provenance: mode=max
           tags: ${{ steps.meta-agent.outputs.tags }}
           labels: ${{ steps.meta-agent.outputs.labels }}
-          cache-from: type=gha,scope=towonel-agent
-          cache-to: type=gha,scope=towonel-agent,mode=max
           build-args: |
             ENABLE_SCCACHE=1
             VERSION=${{ steps.meta-agent.outputs.version }}
@@ -133,8 +129,6 @@ jobs:
           provenance: mode=max
           tags: ${{ steps.meta-hub-caddy.outputs.tags }}
           labels: ${{ steps.meta-hub-caddy.outputs.labels }}
-          cache-from: type=gha,scope=towonel-hub-caddy
-          cache-to: type=gha,scope=towonel-hub-caddy,mode=max
           build-args: |
             ENABLE_SCCACHE=1
             VERSION=${{ steps.meta-hub-caddy.outputs.version }}
