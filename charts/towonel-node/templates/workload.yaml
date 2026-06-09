@@ -17,6 +17,15 @@ metadata:
 spec:
   {{- if eq $kind "Deployment" }}
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- if .Values.strategy }}
+    {{- toYaml .Values.strategy | nindent 4 }}
+    {{- else }}
+    {{- /* Active/passive hub: a new pod only passes /v1/readyz once it wins the
+           Postgres advisory lock the old leader holds, so the old pod must
+           terminate first. RollingUpdate (maxUnavailable:0) deadlocks here. */}}
+    type: Recreate
+    {{- end }}
   {{- end }}
   selector:
     matchLabels:

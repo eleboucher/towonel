@@ -83,6 +83,17 @@ updateStrategy: {}
 #   rollingUpdate:
 #     maxUnavailable: 1
 
+# -- Deployment update strategy (hub-only). Empty defaults to Recreate, because
+# the hub is active/passive: a surged pod can only pass /v1/readyz once it wins
+# the Postgres advisory lock the old leader holds, so the old pod must terminate
+# first. The default RollingUpdate (maxUnavailable:0) deadlocks the rollout.
+strategy: {}
+# strategy:
+#   type: RollingUpdate
+#   rollingUpdate:
+#     maxSurge: 0
+#     maxUnavailable: 1
+
 # -- DNS policy. Empty picks the role default (ClusterFirstWithHostNet when
 # the edge is enabled, ClusterFirst otherwise).
 dnsPolicy: ""

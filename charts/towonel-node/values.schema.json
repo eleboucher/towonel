@@ -492,6 +492,12 @@
       "title": "startupProbe",
       "type": "object"
     },
+    "strategy": {
+      "description": "Deployment update strategy (hub-only). Empty defaults to Recreate, because\nthe hub is active/passive: a surged pod can only pass /v1/readyz once it wins\nthe Postgres advisory lock the old leader holds, so the old pod must terminate\nfirst. The default RollingUpdate (maxUnavailable:0) deadlocks the rollout.",
+      "required": [],
+      "title": "strategy",
+      "type": "object"
+    },
     "terminationGracePeriodSeconds": {
       "default": 30,
       "description": "Grace period for in-flight connections on shutdown.",

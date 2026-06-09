@@ -54,6 +54,38 @@ tests:
           path: spec.replicas
           value: 1
 
+  - it: should default the Deployment strategy to Recreate (active/passive hub)
+    set:
+      edge.enabled: false
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+
+  - it: should honor an explicit Deployment strategy override
+    set:
+      edge.enabled: false
+      strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 0
+          maxUnavailable: 1
+    asserts:
+      - equal:
+          path: spec.strategy.type
+          value: RollingUpdate
+      - equal:
+          path: spec.strategy.rollingUpdate.maxUnavailable
+          value: 1
+
+  - it: should not set a Deployment strategy on the DaemonSet
+    set:
+      hub.enabled: false
+      edge.enabled: true
+    asserts:
+      - notExists:
+          path: spec.strategy
+
   - it: should run as hub and not as edge when hub-only
     set:
       edge.enabled: false

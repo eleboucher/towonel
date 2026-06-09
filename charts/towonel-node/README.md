@@ -109,6 +109,7 @@ Kubernetes: `>=1.25.0-0`
 | serviceAccount.create | bool | `true` | Create a ServiceAccount. |
 | serviceAccount.name | string | `""` | ServiceAccount name; generated from the release name if empty. |
 | startupProbe | object | `{}` | Startup probe. Empty picks the role default (/health on the edge-metrics port when the edge is enabled, /v1/health on hub-api otherwise). |
+| strategy | object | `{}` | Deployment update strategy (hub-only). Empty defaults to Recreate, because the hub is active/passive: a surged pod can only pass /v1/readyz once it wins the Postgres advisory lock the old leader holds, so the old pod must terminate first. The default RollingUpdate (maxUnavailable:0) deadlocks the rollout. |
 | terminationGracePeriodSeconds | int | `30` | Grace period for in-flight connections on shutdown. |
 | tolerations | list | `[]` | Tolerations for pod scheduling. |
 | updateStrategy | object | `{}` | Update strategy (DaemonSet only). |
