@@ -23,8 +23,8 @@ use towonel_common::tls_policy::TlsMode;
 use towonel_common::tunnel::{
     CONTROL_STATUS_INTERNAL_ERROR, CONTROL_STATUS_INVALID, CONTROL_STATUS_NOT_IMPLEMENTED,
     CONTROL_STATUS_OK, COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX,
-    UDP_ROUTE_PREFIX, forward_quic_to_writer, read_control_prefix, read_datagram_frame,
-    write_control_status, write_datagram_frame, write_handshake,
+    UDP_ROUTE_PREFIX, copy_buf_counting, forward_quic_to_writer, read_control_prefix,
+    read_datagram_frame, write_control_status, write_datagram_frame, write_handshake,
 };
 
 use self::health::{EdgeMetrics, session_reject_reason};
@@ -1416,20 +1416,20 @@ async fn pipe_tcp(
     let mut tcp_read = tokio::io::BufReader::with_capacity(COPY_BUF_SIZE, tcp_read);
 
     let c2a = async {
-        let res = tokio::io::copy_buf(&mut tcp_read, &mut send_stream).await;
+        let (n, res) = copy_buf_counting(&mut tcp_read, &mut send_stream).await;
         if let Err(ref e) = res {
             warn!(%route_key, "client->agent forward: {e}");
         }
         drop(send_stream.finish());
-        res.unwrap_or(0)
+        n
     };
     let a2c = async {
-        let res = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
+        let (n, res) = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
         if let Err(ref e) = res {
             warn!(%route_key, "agent->client forward: {e}");
         }
         drop(tcp_write.shutdown().await);
-        res.unwrap_or(0)
+        n
     };
 
     let (c2a, a2c) = tokio::join!(c2a, a2c);
@@ -1576,8 +1576,6 @@ async fn udp_listen_loop(
                 continue;
             }
         };
-        ctx.metrics.total_bytes_in.inc_by(n as u64);
-        tenant_bytes_in.inc_by(n as u64);
         #[expect(
             clippy::indexing_slicing,
             reason = "UdpSocket::recv_from bounds n <= buf.len()"
@@ -1628,6 +1626,11 @@ async fn udp_listen_loop(
                 %peer_addr,
                 "udp session queue full, dropping datagram"
             );
+        } else {
+            // Count only datagrams handed off for forwarding, not ones dropped
+            // at the session cap or a full queue.
+            ctx.metrics.total_bytes_in.inc_by(n as u64);
+            tenant_bytes_in.inc_by(n as u64);
         }
     }
 }

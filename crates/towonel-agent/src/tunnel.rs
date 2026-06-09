@@ -14,7 +14,8 @@ use towonel_common::hostname::wildcard_lookup;
 use towonel_common::metrics::GaugeGuard;
 use towonel_common::tunnel::{
     COPY_BUF_SIZE, ClientAddrs, MAX_UDP_DATAGRAM, TCP_ROUTE_PREFIX, UDP_ROUTE_PREFIX,
-    forward_quic_to_writer, read_datagram_frame, read_handshake, write_datagram_frame,
+    copy_buf_counting, forward_quic_to_writer, read_datagram_frame, read_handshake,
+    write_datagram_frame,
 };
 
 use crate::config::{ProxyProtocol, ServiceConfig, TcpServiceConfig, UdpServiceConfig};
@@ -567,21 +568,25 @@ async fn handle_stream(
 }
 
 /// Record byte counts from a finished bidirectional copy, warning on either
-/// direction's error. `e2o_label`/`o2e_label` scope the warning to the caller.
+/// direction's error. Each half reports its total alongside its result, so
+/// bytes sent before an abnormal close are still counted. `e2o_label`/`o2e_label`
+/// scope the warning to the caller.
 fn record_copy_results(
     metrics: &AgentMetrics,
-    edge_to_origin: io::Result<u64>,
-    origin_to_edge: io::Result<u64>,
+    edge_to_origin: (u64, io::Result<()>),
+    origin_to_edge: (u64, io::Result<()>),
     e2o_label: &str,
     o2e_label: &str,
 ) {
-    match edge_to_origin {
-        Ok(n) => metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, n),
-        Err(e) => warn!("{e2o_label}: {e}"),
+    let (e2o_bytes, e2o_res) = edge_to_origin;
+    metrics.add_bytes(metrics::direction::EDGE_TO_ORIGIN, e2o_bytes);
+    if let Err(e) = e2o_res {
+        warn!("{e2o_label}: {e}");
     }
-    match origin_to_edge {
-        Ok(n) => metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, n),
-        Err(e) => warn!("{o2e_label}: {e}"),
+    let (o2e_bytes, o2e_res) = origin_to_edge;
+    metrics.add_bytes(metrics::direction::ORIGIN_TO_EDGE, o2e_bytes);
+    if let Err(e) = o2e_res {
+        warn!("{o2e_label}: {e}");
     }
 }
 
@@ -604,7 +609,7 @@ async fn forward_plain(
         res
     };
     let o2q = async {
-        let res = io::copy_buf(&mut origin_read, quic_send).await;
+        let res = copy_buf_counting(&mut origin_read, quic_send).await;
         drop(quic_send.finish());
         res
     };
@@ -664,7 +669,7 @@ async fn handle_tcp_stream(
             res
         };
         let o2q = async {
-            let res = io::copy_buf(&mut origin_read, &mut quic_send).await;
+            let res = copy_buf_counting(&mut origin_read, &mut quic_send).await;
             drop(quic_send.finish());
             res
         };
@@ -825,7 +830,7 @@ async fn forward_tls(
         res
     };
     let o2q = async {
-        let res = io::copy_buf(&mut tls_read, quic_send).await;
+        let res = copy_buf_counting(&mut tls_read, quic_send).await;
         drop(quic_send.finish());
         res
     };

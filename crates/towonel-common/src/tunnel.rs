@@ -1,7 +1,9 @@
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use ppp::v2;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt,
+};
 
 /// Buffer size for `tokio::io::copy_buf` on agent↔edge bidirectional pipes.
 /// 64 KiB matches QUIC's typical window-unit and keeps syscall count low on
@@ -42,11 +44,15 @@ pub const MAX_UDP_DATAGRAM: usize = 65_535;
 /// QUIC chunk into a single `write_all`, so with `TCP_NODELAY` set the peer
 /// sees one segment instead of two back-to-back tiny ones. Pass `Vec::new()`
 /// when no prefix is needed — the `is_empty` branch elides the extra copy.
+///
+/// Returns the byte total alongside the result so a partway failure still
+/// reports its count — `tokio::io::copy*` discards its total on error. The
+/// total excludes `prefix` (framing, not tunnel payload).
 pub async fn forward_quic_to_writer<W>(
     mut prefix: Vec<u8>,
     recv: &mut iroh::endpoint::RecvStream,
     writer: &mut W,
-) -> std::io::Result<u64>
+) -> (u64, std::io::Result<()>)
 where
     W: AsyncWrite + Unpin,
 {
@@ -54,22 +60,57 @@ where
     loop {
         match recv.read_chunk(COPY_BUF_SIZE).await {
             Ok(Some(chunk)) => {
-                total = total.saturating_add(chunk.len() as u64);
-                if prefix.is_empty() {
-                    writer.write_all(&chunk).await?;
+                let write = if prefix.is_empty() {
+                    writer.write_all(&chunk).await
                 } else {
                     prefix.extend_from_slice(&chunk);
-                    writer.write_all(&prefix).await?;
+                    let res = writer.write_all(&prefix).await;
                     prefix = Vec::new();
+                    res
+                };
+                if let Err(e) = write {
+                    return (total, Err(e));
                 }
+                total = total.saturating_add(chunk.len() as u64);
             }
             Ok(None) => {
-                if !prefix.is_empty() {
-                    writer.write_all(&prefix).await?;
+                if !prefix.is_empty()
+                    && let Err(e) = writer.write_all(&prefix).await
+                {
+                    return (total, Err(e));
                 }
-                return Ok(total);
+                return (total, Ok(()));
             }
-            Err(e) => return Err(std::io::Error::other(e)),
+            Err(e) => return (total, Err(std::io::Error::other(e))),
+        }
+    }
+}
+
+/// Copy `reader` into `writer` like `tokio::io::copy_buf`.
+///
+/// Returns the bytes copied even on a partway failure — `tokio::io::copy*`
+/// discards its total on error.
+pub async fn copy_buf_counting<R, W>(reader: &mut R, writer: &mut W) -> (u64, std::io::Result<()>)
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let mut total = 0u64;
+    loop {
+        let buf = match reader.fill_buf().await {
+            Ok(b) => b,
+            Err(e) => return (total, Err(e)),
+        };
+        if buf.is_empty() {
+            return (total, writer.flush().await);
+        }
+        match writer.write(buf).await {
+            Ok(0) => return (total, Err(std::io::ErrorKind::WriteZero.into())),
+            Ok(n) => {
+                reader.consume(n);
+                total = total.saturating_add(n as u64);
+            }
+            Err(e) => return (total, Err(e)),
         }
     }
 }
