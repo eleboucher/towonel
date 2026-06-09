@@ -175,6 +175,13 @@ fn spawn_oidc_initializer(
                 Ok(Ok(meta)) => {
                     let client = build_client(meta, &parts);
                     client_swap.store(Arc::new(Some(client)));
+                    // Count the success too: the periodic refresher increments
+                    // {success}, so omitting it here skewed the success/failure
+                    // ratio of oidc_jwks_refresh_total during init.
+                    metrics
+                        .oidc_jwks_refresh_total
+                        .with_label_values(&[provider_id, "success"])
+                        .inc();
                     metrics
                         .oidc_jwks_last_refresh_success_timestamp_seconds
                         .with_label_values(&[provider_id])

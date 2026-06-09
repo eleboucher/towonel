@@ -52,8 +52,9 @@ use db::Db;
 pub(super) use towonel_common::CBOR_CONTENT_TYPE;
 pub(super) use towonel_common::JSON_CONTENT_TYPE;
 
-/// Protocol version supported by this hub.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Protocol version supported by this hub. Single source of truth lives in
+/// `towonel-common` next to the decode checks that enforce it.
+pub const PROTOCOL_VERSION: u16 = towonel_common::config_entry::CONFIG_PAYLOAD_VERSION;
 
 /// Upper bound on any request body accepted by the hub API.
 pub const MAX_REQUEST_BODY_BYTES: usize = 64 * 1024;

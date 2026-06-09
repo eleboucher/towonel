@@ -302,15 +302,8 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         }
     };
 
-    if payload.version != PROTOCOL_VERSION {
-        state
-            .metrics
-            .record_reject(reject_reason::UNSUPPORTED_VERSION);
-        return unsupported_version(format!(
-            "payload version {} is not supported by this hub (expected {PROTOCOL_VERSION})",
-            payload.version
-        ));
-    }
+    // No redundant version re-check here: `entry.verify` above already rejected
+    // any unsupported version (both enforce CONFIG_PAYLOAD_VERSION).
 
     let hostname_for_check = match &payload.op {
         ConfigOp::UpsertHostname { hostname }

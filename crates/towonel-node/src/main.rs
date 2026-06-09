@@ -491,18 +491,8 @@ async fn run_node() -> anyhow::Result<()> {
 
             let edge = edge.with_hub_client(hub_client);
 
-            let public_addresses = if config.edge.public_addresses.is_empty() {
-                bound_socket_strings.clone()
-            } else {
-                config.edge.public_addresses.clone()
-            };
-            let edge_iroh_addresses =
-                derive_edge_iroh_addresses(&public_addresses, iroh_port, &bound_socket_strings);
-            let edge_public_ips = if config.edge.public_ips.is_empty() {
-                extract_hosts_from_addresses(&public_addresses)
-            } else {
-                config.edge.public_ips.clone()
-            };
+            let (public_addresses, edge_iroh_addresses, edge_public_ips) =
+                edge_advertised_addresses(&config.edge, &bound_socket_strings, iroh_port);
 
             let identity = HubIdentity {
                 node_id,
@@ -588,18 +578,8 @@ async fn run_node() -> anyhow::Result<()> {
                 );
             };
             let handle = edge::hub_link::HubLinkHandle::new(64).with_sessions(edge.sessions());
-            let public_addresses = if config.edge.public_addresses.is_empty() {
-                bound_socket_strings.clone()
-            } else {
-                config.edge.public_addresses.clone()
-            };
-            let iroh_endpoints =
-                derive_edge_iroh_addresses(&public_addresses, iroh_port, &bound_socket_strings);
-            let public_ips = if config.edge.public_ips.is_empty() {
-                extract_hosts_from_addresses(&public_addresses)
-            } else {
-                config.edge.public_ips.clone()
-            };
+            let (_public_addresses, iroh_endpoints, public_ips) =
+                edge_advertised_addresses(&config.edge, &bound_socket_strings, iroh_port);
             let cfg = edge::hub_link::HubLinkConfig {
                 addr: link_addr,
                 psk: link_psk,
@@ -701,11 +681,7 @@ async fn build_hub_params(
         public_url,
         link_listen_addr: config.hub.link_listen_addr.clone(),
         link_psk: config.hub.link_psk.clone(),
-        tls: config.hub.tls.as_ref().map(|t| crate::config::TlsConfig {
-            cert_dir: t.cert_dir.clone(),
-            acme_email: t.acme_email.clone(),
-            acme_staging: t.acme_staging,
-        }),
+        tls: config.hub.tls.clone(),
         web_enabled: config.hub.web_enabled,
         ports_require_reservation: config.hub.ports_require_reservation,
         leader_election: config.hub.leader_election,
@@ -852,6 +828,30 @@ async fn build_edge(
 
 /// For each operator-advertised `host:port`, swap in `iroh_port`. Falls
 /// back to bound sockets filtered to routable addresses when no
+/// Resolve the addresses an edge advertises, shared by the hub+edge and
+/// edge-only run arms so both derive identical topology: public addresses
+/// (falling back to the bound sockets), the derived iroh addresses, and the
+/// public IPs (falling back to hosts extracted from the public addresses).
+fn edge_advertised_addresses(
+    edge_cfg: &crate::config::EdgeConfig,
+    bound_socket_strings: &[String],
+    iroh_port: u16,
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let public_addresses = if edge_cfg.public_addresses.is_empty() {
+        bound_socket_strings.to_vec()
+    } else {
+        edge_cfg.public_addresses.clone()
+    };
+    let iroh_addresses =
+        derive_edge_iroh_addresses(&public_addresses, iroh_port, bound_socket_strings);
+    let public_ips = if edge_cfg.public_ips.is_empty() {
+        extract_hosts_from_addresses(&public_addresses)
+    } else {
+        edge_cfg.public_ips.clone()
+    };
+    (public_addresses, iroh_addresses, public_ips)
+}
+
 /// hostnames are advertised.
 fn derive_edge_iroh_addresses(
     public_addresses: &[String],

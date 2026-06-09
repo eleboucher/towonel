@@ -51,6 +51,10 @@ pub enum ConfigOp {
     },
 }
 
+/// The single supported config-payload protocol version. The one source of
+/// truth for both the decode checks here and the hub's API-layer constant.
+pub const CONFIG_PAYLOAD_VERSION: u16 = 1;
+
 /// The payload of a config entry, before signing.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConfigPayload {
@@ -180,7 +184,7 @@ impl SignedConfigEntry {
             return Err(ConfigEntryError::InvalidSignature);
         }
         let payload = from_canonical_cbor(&self.payload_cbor)?;
-        if payload.version != 1 {
+        if payload.version != CONFIG_PAYLOAD_VERSION {
             return Err(ConfigEntryError::UnsupportedVersion(payload.version));
         }
         if payload.tenant_id != self.tenant_id {
@@ -198,7 +202,7 @@ impl SignedConfigEntry {
     /// Never call this on entries arriving over the wire — use [`Self::verify`].
     pub fn decode_trusted(&self) -> Result<ConfigPayload, ConfigEntryError> {
         let payload = from_canonical_cbor(&self.payload_cbor)?;
-        if payload.version != 1 {
+        if payload.version != CONFIG_PAYLOAD_VERSION {
             return Err(ConfigEntryError::UnsupportedVersion(payload.version));
         }
         if payload.tenant_id != self.tenant_id {
