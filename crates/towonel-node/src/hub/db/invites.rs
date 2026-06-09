@@ -78,6 +78,9 @@ impl Db {
     pub async fn list_invites(&self) -> anyhow::Result<Vec<InviteRow>> {
         let rows = invites::Entity::find()
             .order_by_desc(invites::Column::CreatedAtMs)
+            // Stable tiebreaker so same-millisecond rows don't reorder across
+            // paginated requests (offset dup/skip).
+            .order_by_desc(invites::Column::InviteId)
             .all(&self.conn)
             .await?;
         rows.into_iter().map(model_to_invite_row).collect()

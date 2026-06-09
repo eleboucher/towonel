@@ -118,6 +118,9 @@ impl Db {
         use sea_orm::QueryOrder;
         let rows = users::Entity::find()
             .order_by_desc(users::Column::CreatedAtMs)
+            // Stable tiebreaker so same-millisecond rows don't reorder across
+            // paginated requests (offset dup/skip).
+            .order_by_desc(users::Column::Id)
             .all(&self.conn)
             .await?;
         Ok(rows.into_iter().map(UserRow::from).collect())

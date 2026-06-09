@@ -118,6 +118,9 @@ impl Db {
         use sea_orm::{EntityTrait, QueryOrder};
         let rows = signup_invites::Entity::find()
             .order_by_desc(signup_invites::Column::CreatedAtMs)
+            // Stable tiebreaker so same-millisecond rows don't reorder across
+            // paginated requests (offset dup/skip).
+            .order_by_desc(signup_invites::Column::Code)
             .all(&self.conn)
             .await?;
         Ok(rows
