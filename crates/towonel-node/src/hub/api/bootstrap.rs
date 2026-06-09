@@ -208,7 +208,7 @@ pub(super) async fn post_bootstrap(
 
     // Keep only edges in the invite's allowed regions. If that leaves nothing
     // dialable, fall back to every candidate so the agent is never stranded.
-    let allowed = allowed_regions(invite.region.as_deref(), &invite.failover_regions);
+    let allowed = invite.allowed_regions();
     let in_region = |c: &EdgeCandidate| {
         allowed.contains(
             c.region
@@ -296,17 +296,6 @@ pub(super) fn mint_edge_cred(
         Box::new(internal_error())
     })?;
     Ok((cred.kid, B64.encode(&cred_bytes), B64.encode(sig)))
-}
-
-/// Regions an invite's agent may be served from: its region (default `EU`)
-/// plus any failover regions.
-fn allowed_regions(region: Option<&str>, failover: &[String]) -> std::collections::HashSet<String> {
-    let mut set = std::collections::HashSet::new();
-    set.insert(region.unwrap_or(towonel_common::DEFAULT_REGION).to_string());
-    for r in failover {
-        set.insert(r.clone());
-    }
-    set
 }
 
 #[cfg(test)]

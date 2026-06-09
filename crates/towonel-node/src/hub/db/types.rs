@@ -78,6 +78,23 @@ pub struct InviteRow {
     pub failover_regions: Vec<String>,
 }
 
+impl InviteRow {
+    /// The set of regions this invite may use: its primary region (defaulting
+    /// to `DEFAULT_REGION`) plus any failover regions. One source of truth for
+    /// both edge selection (bootstrap) and port-reservation scoping (ports).
+    #[must_use]
+    pub fn allowed_regions(&self) -> std::collections::HashSet<String> {
+        let mut set = std::collections::HashSet::new();
+        set.insert(
+            self.region
+                .clone()
+                .unwrap_or_else(|| towonel_common::DEFAULT_REGION.to_string()),
+        );
+        set.extend(self.failover_regions.iter().cloned());
+        set
+    }
+}
+
 pub struct RedeemedTenant {
     pub tenant_id: TenantId,
     pub hostnames: Vec<String>,

@@ -503,12 +503,7 @@ async fn allowed_regions_for_tenant(
             return Err(internal_error());
         }
     };
-    let mut regions = HashSet::new();
-    regions.insert(invite.region.unwrap_or_else(|| DEFAULT_REGION.to_string()));
-    for r in invite.failover_regions {
-        regions.insert(r);
-    }
-    Ok(regions)
+    Ok(invite.allowed_regions())
 }
 
 /// Build a map from each public IP to the region of the edge that
