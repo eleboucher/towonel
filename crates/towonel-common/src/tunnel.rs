@@ -131,6 +131,11 @@ pub struct ClientAddrs {
 /// Fixed PROXY v2 header length: 12-byte signature + 4-byte version/fam/len.
 const V2_PREAMBLE_LEN: usize = 16;
 
+/// The fixed 12-byte PROXY v2 signature (spec constant).
+const V2_SIGNATURE: [u8; 12] = [
+    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
+];
+
 /// Write the edge→agent preamble as a PROXY v2 header whose AUTHORITY TLV
 /// carries the SNI hostname. The agent reads this once and extracts both
 /// client addrs and hostname.
@@ -166,6 +171,14 @@ pub async fn read_handshake(
 ) -> std::io::Result<(String, ClientAddrs)> {
     let mut preamble = [0u8; V2_PREAMBLE_LEN];
     stream.read_exact(&mut preamble).await?;
+    // Validate the fixed signature before trusting the body length, so a
+    // non-PROXY peer can't force a ~64 KiB allocation + read.
+    if preamble.first_chunk::<12>() != Some(&V2_SIGNATURE) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid PROXY v2 signature",
+        ));
+    }
     let body_len = u16::from_be_bytes([preamble[14], preamble[15]]) as usize;
     let mut all = preamble.to_vec();
     all.resize(V2_PREAMBLE_LEN + body_len, 0);
@@ -517,6 +530,20 @@ mod tests {
             }
             std::task::Poll::Ready(Ok(()))
         }
+    }
+
+    #[tokio::test]
+    async fn read_handshake_rejects_bad_signature() {
+        // Wrong signature with a max advertised body length: must reject on the
+        // signature alone, not allocate/read ~64 KiB first.
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let mut head = [0u8; V2_PREAMBLE_LEN];
+        head[14] = 0xFF;
+        head[15] = 0xFF;
+        client.write_all(&head).await.unwrap();
+        drop(client);
+        let err = read_handshake(&mut server).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[tokio::test]
