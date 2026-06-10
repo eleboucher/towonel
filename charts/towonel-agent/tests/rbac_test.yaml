@@ -1,0 +1,41 @@
+suite: rbac
+templates:
+  - rbac.yaml
+tests:
+  - it: should not render RBAC by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should grant node and service read when directConnect is enabled
+    set:
+      directConnect.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 4
+      - documentIndex: 0
+        containsDocument:
+          kind: ClusterRole
+          apiVersion: rbac.authorization.k8s.io/v1
+          name: RELEASE-NAME-towonel-agent-node-reader
+      - documentIndex: 0
+        equal:
+          path: rules[0].resources
+          value: ["nodes"]
+      - documentIndex: 2
+        containsDocument:
+          kind: Role
+          apiVersion: rbac.authorization.k8s.io/v1
+          name: RELEASE-NAME-towonel-agent-service-reader
+      - documentIndex: 2
+        equal:
+          path: rules[0].resources
+          value: ["services"]
+
+  - it: should not render RBAC when the ServiceAccount is not created
+    set:
+      directConnect.enabled: true
+      serviceAccount.create: false
+    asserts:
+      - hasDocuments:
+          count: 0

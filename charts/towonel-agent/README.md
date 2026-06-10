@@ -48,8 +48,13 @@ Kubernetes: `>=1.25.0-0`
 | agent.tcpServices | list | `[]` | Raw TCP services exposed through the tunnel (TOWONEL_AGENT_TCP_SERVICES). |
 | agent.udpServices | list | `[]` | UDP services exposed through the tunnel (TOWONEL_AGENT_UDP_SERVICES). |
 | deploymentAnnotations | object | `{}` | Annotations added to the Deployment (e.g. reloader.stakater.com/auto). |
+| directConnect.annotations | object | `{}` | Annotations for the direct (NodePort) Service. |
+| directConnect.enabled | bool | `false` | Enable relay-less direct connectivity (NodePort + node autodiscovery). |
+| directConnect.irohPort | int | `51820` | Fixed iroh UDP port the agent binds and the NodePort targets (TOWONEL_AGENT_IROH_PORT). |
+| directConnect.nodePort | string | `nil` | Explicit nodePort for the iroh UDP port; null lets Kubernetes assign one. |
 | env | list | `[]` | Extra environment variables passed to the container (k8s EnvVar list). |
 | envFrom | list | `[]` | Extra envFrom sources. |
+| extraLocalAddrs | string | `""` | Reachable local addresses advertised to edges, comma-separated host:port (TOWONEL_AGENT_EXTRA_LOCAL_ADDRS). |
 | fullnameOverride | string | `""` | Override the full release name. |
 | image.digest | string | `""` | Pin the image by digest (sha256:...); when set, overrides the tag. The release pipeline fills it with the published image's digest. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
@@ -84,6 +89,7 @@ Kubernetes: `>=1.25.0-0`
 | podLabels | object | `{}` | Labels added to the pod. |
 | podSecurityContext | object | `{"fsGroup":10001,"runAsGroup":10001,"runAsNonRoot":true,"runAsUser":10001,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod-level securityContext (runs as non-root uid/gid 10001). |
 | readinessProbe | object | `{"failureThreshold":3,"httpGet":{"path":"/healthz","port":"metrics"},"initialDelaySeconds":3,"periodSeconds":10,"timeoutSeconds":3}` | Readiness probe. |
+| relayUrl | string | `""` | Relay URL(s), comma-separated (TOWONEL_AGENT_RELAY_URL). Empty uses the hub-advertised relay. |
 | replicaCount | int | `2` | Number of agent replicas (two give edge-session redundancy). |
 | resources | object | `{"limits":{"memory":"256Mi"},"requests":{"cpu":"50m","memory":"128Mi"}}` | Pod resource requests/limits. |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container securityContext (no privilege escalation, read-only root filesystem, drops ALL capabilities). |

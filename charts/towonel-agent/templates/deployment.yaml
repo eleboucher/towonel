@@ -28,7 +28,7 @@ spec:
         {{- end }}
     spec:
       enableServiceLinks: false
-      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      automountServiceAccountToken: {{ or .Values.serviceAccount.automount .Values.directConnect.enabled }}
       terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -75,6 +75,22 @@ spec:
                   name: {{ .Values.agent.inviteTokenSecret.name }}
                   key: {{ .Values.agent.inviteTokenSecret.key }}
             {{- end }}
+            {{- if .Values.directConnect.enabled }}
+            - name: TOWONEL_AGENT_K8S_AUTODISCOVER
+              value: "true"
+            - name: TOWONEL_AGENT_K8S_SERVICE
+              value: {{ include "towonel-agent.fullname" . }}-direct
+            - name: TOWONEL_AGENT_IROH_PORT
+              value: {{ .Values.directConnect.irohPort | quote }}
+            {{- end }}
+            {{- with .Values.relayUrl }}
+            - name: TOWONEL_AGENT_RELAY_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.extraLocalAddrs }}
+            - name: TOWONEL_AGENT_EXTRA_LOCAL_ADDRS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -86,6 +102,11 @@ spec:
             - name: metrics
               containerPort: {{ .Values.agent.healthPort }}
               protocol: TCP
+            {{- if .Values.directConnect.enabled }}
+            - name: iroh
+              containerPort: {{ .Values.directConnect.irohPort }}
+              protocol: UDP
+            {{- end }}
           {{- with .Values.startupProbe }}
           startupProbe:
             {{- toYaml . | nindent 12 }}

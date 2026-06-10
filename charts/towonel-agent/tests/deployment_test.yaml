@@ -149,3 +149,61 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].livenessProbe.httpGet.port
           value: metrics
+
+  - it: should not wire direct connectivity by default
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_K8S_AUTODISCOVER
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: iroh
+          any: true
+
+  - it: should wire autodiscovery, the iroh port and a mounted token when directConnect is enabled
+    set:
+      directConnect.enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_K8S_AUTODISCOVER
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_K8S_SERVICE
+            value: RELEASE-NAME-towonel-agent-direct
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_IROH_PORT
+            value: "51820"
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: iroh
+            containerPort: 51820
+            protocol: UDP
+
+  - it: should wire the relay url and extra local addrs when set
+    set:
+      relayUrl: https://relay.example/
+      extraLocalAddrs: 1.2.3.4:51820
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_RELAY_URL
+            value: https://relay.example/
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_EXTRA_LOCAL_ADDRS
+            value: 1.2.3.4:51820

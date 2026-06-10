@@ -76,6 +76,42 @@
       "title": "deploymentAnnotations",
       "type": "object"
     },
+    "directConnect": {
+      "description": "Relay-less direct connectivity: bind a fixed iroh UDP port, expose it as a\nNodePort, and advertise the node IP + nodePort via autodiscovery (also grants\nNode/Service read RBAC and mounts the token). The node address must be\nreachable from the edge.",
+      "properties": {
+        "annotations": {
+          "description": "Annotations for the direct (NodePort) Service.",
+          "required": [],
+          "title": "annotations",
+          "type": "object"
+        },
+        "enabled": {
+          "default": false,
+          "description": "Enable relay-less direct connectivity (NodePort + node autodiscovery).",
+          "title": "enabled",
+          "type": "boolean"
+        },
+        "irohPort": {
+          "default": 51820,
+          "description": "Fixed iroh UDP port the agent binds and the NodePort targets (TOWONEL_AGENT_IROH_PORT).",
+          "title": "irohPort",
+          "type": "integer"
+        },
+        "nodePort": {
+          "default": "null",
+          "description": "Explicit nodePort for the iroh UDP port; null lets Kubernetes assign one.",
+          "required": [],
+          "title": "nodePort",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [],
+      "title": "directConnect",
+      "type": "object"
+    },
     "env": {
       "description": "Extra environment variables passed to the container (k8s EnvVar list).",
       "items": {
@@ -91,6 +127,12 @@
       },
       "title": "envFrom",
       "type": "array"
+    },
+    "extraLocalAddrs": {
+      "default": "",
+      "description": "Reachable local addresses advertised to edges, comma-separated host:port (TOWONEL_AGENT_EXTRA_LOCAL_ADDRS).",
+      "title": "extraLocalAddrs",
+      "type": "string"
     },
     "fullnameOverride": {
       "default": "",
@@ -461,6 +503,12 @@
       "required": [],
       "title": "readinessProbe",
       "type": "object"
+    },
+    "relayUrl": {
+      "default": "",
+      "description": "Relay URL(s), comma-separated (TOWONEL_AGENT_RELAY_URL). Empty uses the hub-advertised relay.",
+      "title": "relayUrl",
+      "type": "string"
     },
     "replicaCount": {
       "default": 2,
