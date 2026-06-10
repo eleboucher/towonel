@@ -67,6 +67,8 @@ jobs:
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+          cache-from: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node:buildcache
+          cache-to: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node:buildcache,mode=max
       - name: Compute agent image metadata
         id: meta-agent
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -102,6 +104,8 @@ jobs:
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+          cache-from: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent:buildcache
+          cache-to: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent:buildcache,mode=max
       - name: Compute hub-caddy image metadata
         id: meta-hub-caddy
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -137,3 +141,5 @@ jobs:
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
+          cache-from: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy:buildcache
+          cache-to: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy:buildcache,mode=max

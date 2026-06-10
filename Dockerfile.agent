@@ -1,15 +1,17 @@
 # syntax=docker/dockerfile:1.24
 
-FROM --platform=$BUILDPLATFORM rust:1.96-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.96-bookworm AS chef
 ARG BUILDARCH
-ARG TARGETARCH
 # renovate: datasource=github-releases depName=ziglang/zig
 ARG ZIG_VERSION=0.16.0
 # renovate: datasource=github-releases depName=rust-cross/cargo-zigbuild
 ARG CARGO_ZIGBUILD_VERSION=0.22.3
 # renovate: datasource=github-releases depName=mozilla/sccache
 ARG SCCACHE_VERSION=0.15.0
-ARG ENABLE_SCCACHE=0
+# renovate: datasource=crate depName=cargo-chef
+ARG CARGO_CHEF_VERSION=0.1.77
+# sccache cannot cache incremental artifacts; release builds do not use them.
+ENV CARGO_INCREMENTAL=0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libclang-dev clang \
@@ -29,43 +31,85 @@ RUN case "${BUILDARCH}" in \
     && curl -fsSL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl.tar.gz" \
        | tar -xzO "sccache-v${SCCACHE_VERSION}-${SCCACHE_ARCH}-unknown-linux-musl/sccache" > /usr/local/bin/sccache \
     && chmod +x /usr/local/bin/sccache
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${BUILDARCH},sharing=locked \
+    cargo install --locked cargo-chef --version "${CARGO_CHEF_VERSION}"
 
+# Sourced by each build RUN: maps TARGETARCH to RUST_TARGET and, when
+# ENABLE_SCCACHE=1, starts the cache server. Idle timeout off: the compile
+# steps outlast the 10-minute default.
+RUN cat > /usr/local/lib/build-env.sh <<'EOF'
+case "${TARGETARCH}" in
+    amd64) RUST_TARGET=x86_64-unknown-linux-gnu; SCCACHE_SERVER_PORT=4226 ;;
+    arm64) RUST_TARGET=aarch64-unknown-linux-gnu; SCCACHE_SERVER_PORT=4227 ;;
+    *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;;
+esac
+if [ "$ENABLE_SCCACHE" = "1" ]; then
+    # Launcher/CC wrapping caches the C deps (aws-lc-sys, openssl-src) too.
+    # cargo-zigbuild may override CC/CXX for target code, which is fine.
+    export RUSTC_WRAPPER=sccache \
+           CMAKE_C_COMPILER_LAUNCHER=sccache \
+           CMAKE_CXX_COMPILER_LAUNCHER=sccache \
+           CC="sccache cc" \
+           CXX="sccache c++" \
+           SCCACHE_IGNORE_SERVER_IO_ERROR=1 \
+           SCCACHE_SERVER_PORT \
+           SCCACHE_IDLE_TIMEOUT=0 \
+           SCCACHE_BUCKET=sccache \
+           SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
+           SCCACHE_REGION=us-east-1 \
+           SCCACHE_S3_USE_SSL=true \
+           AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
+           AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"
+    if sccache --start-server; then
+        echo "sccache server started (wrapper=$RUSTC_WRAPPER port=$SCCACHE_SERVER_PORT)"
+    else
+        echo "sccache failed to start, continuing without cache" >&2
+        unset RUSTC_WRAPPER CMAKE_C_COMPILER_LAUNCHER CMAKE_CXX_COMPILER_LAUNCHER CC CXX
+    fi
+fi
+EOF
 WORKDIR /app
+
+# Planner: distil the workspace into a dependency recipe.
+FROM chef AS planner
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY src/ src/
+RUN cargo chef prepare --recipe-path recipe.json
 
+# Builder: cook dependencies (cached layer), then build the binary.
+FROM chef AS builder
+ARG TARGETARCH
+ARG ENABLE_SCCACHE=0
+COPY rust-toolchain.toml ./
+COPY --from=planner /app/recipe.json recipe.json
+# Cached while recipe.json is unchanged: re-runs on manifest/lockfile
+# changes only, never on application code changes.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH},sharing=locked \
     --mount=type=cache,target=/root/.cache,id=root-cache-${TARGETARCH},sharing=locked \
     --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
     --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
-    set -eux && \
-    case "${TARGETARCH}" in \
-        amd64) RUST_TARGET=x86_64-unknown-linux-gnu; SCCACHE_SERVER_PORT=4226 ;; \
-        arm64) RUST_TARGET=aarch64-unknown-linux-gnu; SCCACHE_SERVER_PORT=4227 ;; \
-        *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
-    esac && \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then \
-        export RUSTC_WRAPPER=sccache \
-               SCCACHE_SERVER_PORT \
-               SCCACHE_BUCKET=sccache \
-               SCCACHE_ENDPOINT=https://s3.erwanleboucher.dev \
-               SCCACHE_REGION=us-east-1 \
-               SCCACHE_S3_USE_SSL=true \
-               AWS_ACCESS_KEY_ID="$(cat /run/secrets/SCCACHE_AWS_ACCESS_KEY_ID)" \
-               AWS_SECRET_ACCESS_KEY="$(cat /run/secrets/SCCACHE_AWS_SECRET_ACCESS_KEY)"; \
-        if sccache --start-server; then \
-            echo "sccache server started"; \
-        else \
-            echo "sccache failed to start, continuing without cache" >&2; \
-            unset RUSTC_WRAPPER; \
-        fi; \
-    fi && \
-    rustup target add "$RUST_TARGET" && \
-    cargo zigbuild --release --target "$RUST_TARGET" -p towonel-agent && \
-    if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats || true; fi && \
-    cp "target/${RUST_TARGET}/release/towonel-agent" /towonel-agent
+    set -eux \
+    && . /usr/local/lib/build-env.sh \
+    && rustup target add "$RUST_TARGET" \
+    && cargo chef cook --release --zigbuild --target "$RUST_TARGET" --package towonel-agent --recipe-path recipe.json \
+    && if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats || true; fi
+
+# Only the workspace crates recompile here; deps come from the cooked layer.
+COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
+COPY crates/ crates/
+COPY src/ src/
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git-${TARGETARCH},sharing=locked \
+    --mount=type=cache,target=/root/.cache,id=root-cache-${TARGETARCH},sharing=locked \
+    --mount=type=secret,id=SCCACHE_AWS_ACCESS_KEY_ID,required=false \
+    --mount=type=secret,id=SCCACHE_AWS_SECRET_ACCESS_KEY,required=false \
+    set -eux \
+    && . /usr/local/lib/build-env.sh \
+    && cargo zigbuild --release --target "$RUST_TARGET" -p towonel-agent \
+    && if [ "$ENABLE_SCCACHE" = "1" ]; then sccache --show-stats || true; fi \
+    && cp "target/${RUST_TARGET}/release/towonel-agent" /towonel-agent
 
 FROM scratch AS artifact
 COPY --from=builder /towonel-agent /towonel-agent
