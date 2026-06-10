@@ -1587,7 +1587,13 @@ fn bind_udp_port(
 /// One UDP-socket-per-listener accept loop. Multiplexes incoming datagrams
 /// across per-client-address sessions; each session owns a fresh QUIC stream
 /// tagged `udp:<service>`.
-type UdpSessions = std::collections::HashMap<std::net::SocketAddr, mpsc::Sender<Vec<u8>>>;
+type UdpSessions = std::collections::HashMap<std::net::SocketAddr, mpsc::Sender<bytes::Bytes>>;
+
+/// Receive-buffer chunk for the UDP listener. Each datagram is split off the
+/// chunk as a refcounted `Bytes` (no copy, no per-datagram allocation); a
+/// fresh chunk is allocated only once spare capacity dips below one
+/// max-size datagram.
+const UDP_RECV_CHUNK: usize = 4 * MAX_UDP_DATAGRAM;
 
 async fn udp_listen_loop(
     socket: Arc<UdpSocket>,
@@ -1605,20 +1611,21 @@ async fn udp_listen_loop(
         .tenant_bytes
         .with_label_values(&[&binding.tenant.to_string(), "in"]);
 
-    let mut buf = vec![0u8; MAX_UDP_DATAGRAM];
+    let mut chunk = bytes::BytesMut::with_capacity(UDP_RECV_CHUNK);
     loop {
-        let (n, peer_addr) = match socket.recv_from(&mut buf).await {
+        // `recv_buf_from` appends into spare capacity, so keep at least one
+        // max-size datagram spare or an oversized datagram would truncate.
+        if chunk.capacity() < MAX_UDP_DATAGRAM {
+            chunk = bytes::BytesMut::with_capacity(UDP_RECV_CHUNK);
+        }
+        let (n, peer_addr) = match socket.recv_buf_from(&mut chunk).await {
             Ok(v) => v,
             Err(e) => {
                 warn!(service = %binding.service, "udp recv error: {e}");
                 continue;
             }
         };
-        #[expect(
-            clippy::indexing_slicing,
-            reason = "UdpSocket::recv_from bounds n <= buf.len()"
-        )]
-        let datagram = buf[..n].to_vec();
+        let datagram = chunk.split_to(n).freeze();
 
         // Single critical section: get-or-create the session sender, then
         // release the lock before `try_send`. A stale entry (closed channel,
@@ -1635,7 +1642,7 @@ async fn udp_listen_loop(
                         ctx.metrics.connections_rejected_overload.inc();
                         continue;
                     }
-                    let (tx, rx) = mpsc::channel::<Vec<u8>>(UDP_SESSION_QUEUE);
+                    let (tx, rx) = mpsc::channel::<bytes::Bytes>(UDP_SESSION_QUEUE);
                     map.insert(peer_addr, tx.clone());
                     drop(map);
                     let socket_for_session = Arc::clone(&socket);
@@ -1692,7 +1699,7 @@ async fn udp_session_pump(
     peer_addr: std::net::SocketAddr,
     binding: Arc<towonel_common::routing::UdpListenerBinding>,
     ctx: Arc<ConnCtx>,
-    mut rx: mpsc::Receiver<Vec<u8>>,
+    mut rx: mpsc::Receiver<bytes::Bytes>,
 ) {
     let span = info_span!("udp_session", peer = %peer_addr, service = %binding.service);
     async move {
