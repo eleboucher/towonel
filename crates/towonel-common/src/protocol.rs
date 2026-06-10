@@ -34,5 +34,19 @@ pub fn tunnel_transport_config() -> QuicTransportConfig {
         .stream_receive_window(VarInt::from_u32(TUNNEL_STREAM_RECEIVE_WINDOW))
         .receive_window(VarInt::from_u32(TUNNEL_RECEIVE_WINDOW))
         .send_window(TUNNEL_SEND_WINDOW)
+        .enable_segmentation_offload(udp_gso_enabled())
         .build()
+}
+
+/// `TOWONEL_DISABLE_UDP_GSO=true` turns off UDP segmentation offload. Some pod
+/// datapaths (e.g. Cilium netkit) accept GSO super-datagrams from `sendmsg`
+/// but drop the segments without an error, so noq-udp's EIO/EINVAL fallback
+/// never triggers; single-segment sends survive.
+fn udp_gso_enabled() -> bool {
+    !matches!(
+        std::env::var("TOWONEL_DISABLE_UDP_GSO")
+            .as_deref()
+            .map(str::trim),
+        Ok("true" | "TRUE" | "True" | "1")
+    )
 }
