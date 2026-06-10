@@ -159,6 +159,15 @@ relayUrl: ""
 # -- Reachable local addresses advertised to edges, comma-separated host:port (TOWONEL_AGENT_EXTRA_LOCAL_ADDRS).
 extraLocalAddrs: ""
 
+# -- Run the agent on the host network. Works around pod datapaths that break
+# QUIC UDP sends (e.g. Cilium netkit). dnsPolicy switches to
+# ClusterFirstWithHostNet so cluster-internal origins still resolve.
+hostNetwork: false
+
+# -- Disable UDP segmentation offload (TOWONEL_DISABLE_UDP_GSO). Lighter
+# alternative to hostNetwork for pod datapaths that drop offloaded sends.
+disableUdpGso: false
+
 # Relay-less direct connectivity: bind a fixed iroh UDP port, expose it as a
 # NodePort, and advertise the node IP + nodePort via autodiscovery (also grants
 # Node/Service read RBAC and mounts the token). The node address must be

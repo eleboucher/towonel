@@ -112,6 +112,12 @@
       "title": "directConnect",
       "type": "object"
     },
+    "disableUdpGso": {
+      "default": false,
+      "description": "Disable UDP segmentation offload (TOWONEL_DISABLE_UDP_GSO). Lighter\nalternative to hostNetwork for pod datapaths that drop offloaded sends.",
+      "title": "disableUdpGso",
+      "type": "boolean"
+    },
     "env": {
       "description": "Extra environment variables passed to the container (k8s EnvVar list).",
       "items": {
@@ -145,6 +151,12 @@
       "required": [],
       "title": "global",
       "type": "object"
+    },
+    "hostNetwork": {
+      "default": false,
+      "description": "Run the agent on the host network. Works around pod datapaths that break\nQUIC UDP sends (e.g. Cilium netkit). dnsPolicy switches to\nClusterFirstWithHostNet so cluster-internal origins still resolve.",
+      "title": "hostNetwork",
+      "type": "boolean"
     },
     "image": {
       "properties": {

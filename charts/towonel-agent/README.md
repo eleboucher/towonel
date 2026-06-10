@@ -52,10 +52,12 @@ Kubernetes: `>=1.25.0-0`
 | directConnect.enabled | bool | `false` | Enable relay-less direct connectivity (NodePort + node autodiscovery). |
 | directConnect.irohPort | int | `51820` | Fixed iroh UDP port the agent binds and the NodePort targets (TOWONEL_AGENT_IROH_PORT). |
 | directConnect.nodePort | string | `nil` | Explicit nodePort for the iroh UDP port; null lets Kubernetes assign one. |
+| disableUdpGso | bool | `false` | Disable UDP segmentation offload (TOWONEL_DISABLE_UDP_GSO). Lighter alternative to hostNetwork for pod datapaths that drop offloaded sends. |
 | env | list | `[]` | Extra environment variables passed to the container (k8s EnvVar list). |
 | envFrom | list | `[]` | Extra envFrom sources. |
 | extraLocalAddrs | string | `""` | Reachable local addresses advertised to edges, comma-separated host:port (TOWONEL_AGENT_EXTRA_LOCAL_ADDRS). |
 | fullnameOverride | string | `""` | Override the full release name. |
+| hostNetwork | bool | `false` | Run the agent on the host network. Works around pod datapaths that break QUIC UDP sends (e.g. Cilium netkit). dnsPolicy switches to ClusterFirstWithHostNet so cluster-internal origins still resolve. |
 | image.digest | string | `""` | Pin the image by digest (sha256:...); when set, overrides the tag. The release pipeline fills it with the published image's digest. |
 | image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
 | image.repository | string | `"codeberg.org/towonel/towonel-agent"` | Image repository. |

@@ -192,6 +192,32 @@ tests:
             containerPort: 51820
             protocol: UDP
 
+  - it: should not use the host network by default
+    asserts:
+      - notExists:
+          path: spec.template.spec.hostNetwork
+
+  - it: should use the host network with cluster DNS when enabled
+    set:
+      hostNetwork: true
+    asserts:
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: true
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: ClusterFirstWithHostNet
+
+  - it: should disable UDP GSO when set
+    set:
+      disableUdpGso: true
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_DISABLE_UDP_GSO
+            value: "true"
+
   - it: should wire the relay url and extra local addrs when set
     set:
       relayUrl: https://relay.example/
