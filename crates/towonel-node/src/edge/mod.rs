@@ -785,10 +785,7 @@ async fn pick_agent_and_open_stream(
             match open_agent_stream(ctx, agent_addr.id).await {
                 Ok((send, recv)) => {
                     if let Some(tenant) = ctx.sessions.tenant_for(&agent_addr.id) {
-                        ctx.metrics
-                            .tenant_connections_total
-                            .with_label_values(&[&tenant.to_string()])
-                            .inc();
+                        ctx.metrics.tenant_counters(&tenant).connections_total.inc();
                     }
                     return Ok((agent_addr.clone(), send, recv));
                 }
@@ -1462,7 +1459,7 @@ async fn pipe_tcp(
         n
     };
     let a2c = async {
-        let (n, res) = forward_quic_to_writer(Vec::new(), &mut recv_stream, &mut tcp_write).await;
+        let (n, res) = forward_quic_to_writer(&mut recv_stream, &mut tcp_write).await;
         if let Err(ref e) = res {
             warn!(%route_key, "agent->client forward: {e}");
         }
@@ -1606,10 +1603,7 @@ async fn udp_listen_loop(
     let session_cap = max_udp_sessions_from_env();
 
     // Per-datagram hot path: resolve the tenant's counter child once.
-    let tenant_bytes_in = ctx
-        .metrics
-        .tenant_bytes
-        .with_label_values(&[&binding.tenant.to_string(), "in"]);
+    let tenant_bytes_in = ctx.metrics.tenant_counters(&binding.tenant).bytes_in;
 
     let mut chunk = bytes::BytesMut::with_capacity(UDP_RECV_CHUNK);
     loop {
@@ -1747,10 +1741,7 @@ async fn udp_session_pump(
         debug!(agent = %agent_addr.id.fmt_short(), "udp session opened");
 
         // Per-datagram hot path: resolve the tenant's counter child once.
-        let tenant_bytes_out = ctx
-            .metrics
-            .tenant_bytes
-            .with_label_values(&[&binding.tenant.to_string(), "out"]);
+        let tenant_bytes_out = ctx.metrics.tenant_counters(&binding.tenant).bytes_out;
 
         // `select!` (not `join!`) so an idle-timeout on the edge->agent side
         // tears down the agent->edge side too. Otherwise a quiet origin

@@ -37,7 +37,19 @@ pub struct EdgeMetrics {
     pub tenant_bytes: IntCounterVec,
     pub tenant_connections_total: IntCounterVec,
     pub tenant_active_sessions: IntGaugeVec,
+    /// Resolved per-tenant counter children, so per-connection paths skip the
+    /// hex encode of the tenant id and the label-map walk.
+    tenant_children: Arc<papaya::HashMap<TenantId, TenantCounters>>,
     registry: Arc<Registry>,
+}
+
+/// Per-tenant children of the `tenant_*` counter vecs. Cheap to clone:
+/// `prometheus` counters are internally `Arc`-shared.
+#[derive(Clone)]
+pub struct TenantCounters {
+    pub bytes_in: IntCounter,
+    pub bytes_out: IntCounter,
+    pub connections_total: IntCounter,
 }
 
 impl EdgeMetrics {
@@ -115,20 +127,32 @@ impl EdgeMetrics {
                  (the same slots the per-tenant session limit counts)",
                 &["tenant"],
             ),
+            tenant_children: Arc::new(papaya::HashMap::new()),
             registry: Arc::new(r),
         }
     }
 
-    /// Record forwarded bytes against the tenant's series. One hex encode of
-    /// the tenant id per call, so call once per connection, not per chunk.
-    pub fn record_tenant_bytes(&self, tenant: &TenantId, bytes_in: u64, bytes_out: u64) {
+    /// Resolved counter children for a tenant, cached after the first call.
+    pub fn tenant_counters(&self, tenant: &TenantId) -> TenantCounters {
+        let map = self.tenant_children.pin();
+        if let Some(c) = map.get(tenant) {
+            return c.clone();
+        }
         let t = tenant.to_string();
-        self.tenant_bytes
-            .with_label_values(&[&t, "in"])
-            .inc_by(bytes_in);
-        self.tenant_bytes
-            .with_label_values(&[&t, "out"])
-            .inc_by(bytes_out);
+        let counters = TenantCounters {
+            bytes_in: self.tenant_bytes.with_label_values(&[&t, "in"]),
+            bytes_out: self.tenant_bytes.with_label_values(&[&t, "out"]),
+            connections_total: self.tenant_connections_total.with_label_values(&[&t]),
+        };
+        map.get_or_insert_with(*tenant, || counters.clone()).clone()
+    }
+
+    /// Record forwarded bytes against the tenant's series. Call once per
+    /// connection, not per chunk.
+    pub fn record_tenant_bytes(&self, tenant: &TenantId, bytes_in: u64, bytes_out: u64) {
+        let counters = self.tenant_counters(tenant);
+        counters.bytes_in.inc_by(bytes_in);
+        counters.bytes_out.inc_by(bytes_out);
     }
 }
 
