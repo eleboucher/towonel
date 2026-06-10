@@ -1583,8 +1583,9 @@ fn bind_udp_port(
 
 /// One UDP-socket-per-listener accept loop. Multiplexes incoming datagrams
 /// across per-client-address sessions; each session owns a fresh QUIC stream
-/// tagged `udp:<service>`.
-type UdpSessions = std::collections::HashMap<std::net::SocketAddr, mpsc::Sender<bytes::Bytes>>;
+/// tagged `udp:<service>`. Lock-free map so the per-datagram sender lookup
+/// doesn't serialize on a mutex.
+type UdpSessions = papaya::HashMap<std::net::SocketAddr, mpsc::Sender<bytes::Bytes>>;
 
 /// Receive-buffer chunk for the UDP listener. Each datagram is split off the
 /// chunk as a refcounted `Bytes` (no copy, no per-datagram allocation); a
@@ -1598,8 +1599,7 @@ async fn udp_listen_loop(
     ctx: Arc<ConnCtx>,
 ) {
     let binding = Arc::new(binding);
-    let sessions: Arc<tokio::sync::Mutex<UdpSessions>> =
-        Arc::new(tokio::sync::Mutex::new(UdpSessions::new()));
+    let sessions: Arc<UdpSessions> = Arc::new(UdpSessions::new());
     let session_cap = max_udp_sessions_from_env();
 
     // Per-datagram hot path: resolve the tenant's counter child once.
@@ -1621,24 +1621,22 @@ async fn udp_listen_loop(
         };
         let datagram = chunk.split_to(n).freeze();
 
-        // Single critical section: get-or-create the session sender, then
-        // release the lock before `try_send`. A stale entry (closed channel,
+        // Get-or-create the session sender. A stale entry (closed channel,
         // pump exited) is recreated in place. New sessions are refused once
         // the per-listener cap is hit so a UDP source-address flood can't
-        // exhaust tasks/FDs/streams.
+        // exhaust tasks/FDs/streams. Only this task inserts, so the cap
+        // check can't race another creator.
         let tx = {
-            let mut map = sessions.lock().await;
+            let map = sessions.pin();
             match map.get(&peer_addr) {
                 Some(tx) if !tx.is_closed() => tx.clone(),
                 _ => {
                     if map.len() >= session_cap {
-                        drop(map);
                         ctx.metrics.connections_rejected_overload.inc();
                         continue;
                     }
                     let (tx, rx) = mpsc::channel::<bytes::Bytes>(UDP_SESSION_QUEUE);
                     map.insert(peer_addr, tx.clone());
-                    drop(map);
                     let socket_for_session = Arc::clone(&socket);
                     let binding_for_session = Arc::clone(&binding);
                     let ctx_for_session = Arc::clone(&ctx);
@@ -1656,13 +1654,9 @@ async fn udp_listen_loop(
                         // Only evict our own entry: if the listener already
                         // recreated the session (new channel) for this peer,
                         // removing here would kill the live replacement.
-                        let mut map = sessions_for_session.lock().await;
-                        if map
-                            .get(&peer_addr)
-                            .is_some_and(|cur| cur.same_channel(&tx_for_cleanup))
-                        {
-                            map.remove(&peer_addr);
-                        }
+                        let _removed = sessions_for_session
+                            .pin()
+                            .remove_if(&peer_addr, |_, cur| cur.same_channel(&tx_for_cleanup));
                     });
                     tx
                 }
