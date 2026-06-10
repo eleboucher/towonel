@@ -357,6 +357,7 @@ async fn try_bring_up(
 
     let mut endpoint_builder = Endpoint::builder(Minimal)
         .secret_key(ctx.iroh_secret_key())
+        .transport_config(towonel_common::protocol::tunnel_transport_config())
         .relay_mode(relay_mode)
         .ca_roots_config(iroh::tls::CaRootsConfig::insecure_skip_verify())
         .address_lookup(edge_lookup)

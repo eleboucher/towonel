@@ -777,6 +777,7 @@ async fn build_edge(
     let ep = Endpoint::builder(Minimal)
         .secret_key(secret_key)
         .alpns(vec![towonel_common::protocol::ALPN_TUNNEL.to_vec()])
+        .transport_config(towonel_common::protocol::tunnel_transport_config())
         .relay_mode(towonel_common::relay::relay_mode_from_env(
             "TOWONEL_EDGE_RELAY_URL",
         ))

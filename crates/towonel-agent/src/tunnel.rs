@@ -35,7 +35,8 @@ const STREAM_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// Reaching the cap applies QUIC backpressure rather than dropping streams.
 /// 256 bounds worst-case copy buffers to ~16 MiB (64 KiB each) so a traffic
 /// burst fits in a small container; 1024 allowed more than a 64 Mi pod.
-const MAX_CONCURRENT_STREAMS: usize = 256;
+const MAX_CONCURRENT_STREAMS: usize =
+    towonel_common::protocol::TUNNEL_MAX_CONCURRENT_STREAMS as usize;
 
 /// Bound on each TCP/UDP `connect` to the configured origin. A tarpitting
 /// or firewall-dropped origin must not pin an agent task indefinitely.
