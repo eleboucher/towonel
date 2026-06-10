@@ -26,11 +26,9 @@ pub struct EdgeMetrics {
     pub sessions_total: IntCounter,
     pub sessions_rejected_total: IntCounterVec,
     pub route_no_session_total: IntCounter,
-    /// Connections / sessions dropped because the edge concurrency caps were
-    /// saturated. Counts both TCP-accept overload (the global
-    /// `TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS` semaphore) and UDP new-session
-    /// overload (per-listener `TOWONEL_EDGE_MAX_UDP_SESSIONS_PER_LISTENER`).
-    pub connections_rejected_overload: IntCounter,
+    /// Connections / sessions dropped because an edge concurrency cap was
+    /// saturated, split by which cap fired.
+    pub connections_rejected_overload: OverloadRejectCounters,
     /// Per-tenant mirrors of the global series above, labelled with the
     /// hex-encoded `TenantId`. Bounded by the active tenant count; the
     /// console scopes these server-side for the tenant dashboard.
@@ -50,6 +48,18 @@ pub struct TenantCounters {
     pub bytes_in: IntCounter,
     pub bytes_out: IntCounter,
     pub connections_total: IntCounter,
+}
+
+/// Children of `towonel_edge_connections_rejected_overload_total`, one per
+/// `reason`, pre-resolved at startup so the drop paths skip the label-map walk.
+#[derive(Clone)]
+pub struct OverloadRejectCounters {
+    /// `TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS` semaphore exhausted.
+    pub tcp_inflight: IntCounter,
+    /// Per-listener `TOWONEL_EDGE_MAX_UDP_SESSIONS_PER_LISTENER` cap hit.
+    pub udp_session: IntCounter,
+    /// Agent iroh-connection permit pool exhausted.
+    pub iroh_agent: IntCounter,
 }
 
 impl EdgeMetrics {
@@ -99,13 +109,23 @@ impl EdgeMetrics {
                 "Requests where no session was registered for the agent at lookup time \
                  (excludes the case where a session existed but its open_bi failed)",
             ),
-            connections_rejected_overload: register_counter(
-                &r,
-                "towonel_edge_connections_rejected_overload_total",
-                "TCP connections dropped because the edge inflight-connection cap was \
-                 reached. Sustained values mean an accept-time DoS or an under-sized \
-                 EDGE_MAX_INFLIGHT_CONNECTIONS.",
-            ),
+            connections_rejected_overload: {
+                let vec = register_counter_vec(
+                    &r,
+                    "towonel_edge_connections_rejected_overload_total",
+                    "Connections/sessions dropped because an edge concurrency cap was \
+                     saturated, by which cap fired (tcp_inflight = global inflight \
+                     semaphore, udp_session = per-listener UDP session cap, \
+                     iroh_agent = agent permit pool). Sustained values mean an \
+                     accept-time DoS or an under-sized cap.",
+                    &["reason"],
+                );
+                OverloadRejectCounters {
+                    tcp_inflight: vec.with_label_values(&[overload_reject_reason::TCP_INFLIGHT]),
+                    udp_session: vec.with_label_values(&[overload_reject_reason::UDP_SESSION]),
+                    iroh_agent: vec.with_label_values(&[overload_reject_reason::IROH_AGENT]),
+                }
+            },
             tenant_bytes: register_counter_vec(
                 &r,
                 "towonel_edge_tenant_bytes_total",
@@ -160,6 +180,12 @@ pub mod session_reject_reason {
     pub const UNKNOWN_AGENT: &str = "unknown_agent";
     pub const HANDSHAKE_ERROR: &str = "handshake_error";
     pub const PER_TENANT_LIMIT: &str = "per_tenant_limit";
+}
+
+pub mod overload_reject_reason {
+    pub const TCP_INFLIGHT: &str = "tcp_inflight";
+    pub const UDP_SESSION: &str = "udp_session";
+    pub const IROH_AGENT: &str = "iroh_agent";
 }
 
 #[derive(Serialize)]

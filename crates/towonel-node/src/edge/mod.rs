@@ -74,7 +74,8 @@ fn max_udp_sessions_from_env() -> usize {
 
 /// Hard cap on simultaneously in-flight TCP connections. Each accept holds a
 /// permit for the lifetime of the per-connection task; on overload, new
-/// accepts close the socket and bump `connections_rejected_overload`. 50k
+/// accepts close the socket and bump `connections_rejected_overload`
+/// (`reason="tcp_inflight"`). 50k
 /// matches the typical default ulimit -n of a Linux box and is comfortably
 /// above realistic steady-state load. Override with the
 /// `TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS` env var.
@@ -386,7 +387,7 @@ async fn iroh_accept_loop(
             return;
         };
         let Ok(permit) = Arc::clone(&agent_permits).try_acquire_owned() else {
-            metrics.connections_rejected_overload.inc();
+            metrics.connections_rejected_overload.iroh_agent.inc();
             drop(incoming);
             continue;
         };
@@ -647,7 +648,7 @@ async fn accept_loop(
         let Ok(permit) = Arc::clone(&ctx.connection_permits).try_acquire_owned() else {
             // Counter is the canonical signal here; logging per drop on a
             // sustained accept-DoS would itself become a hot path.
-            ctx.metrics.connections_rejected_overload.inc();
+            ctx.metrics.connections_rejected_overload.tcp_inflight.inc();
             drop(tcp_stream);
             continue;
         };
@@ -732,7 +733,7 @@ struct ConnCtx {
     /// `OwnedSemaphorePermit` is acquired per accept and held for the
     /// lifetime of the spawned `handle_*_connection` task. When the cap is
     /// reached new accepts drop the connection and increment
-    /// `metrics.connections_rejected_overload`.
+    /// `metrics.connections_rejected_overload.tcp_inflight`.
     connection_permits: Arc<tokio::sync::Semaphore>,
 }
 
@@ -1340,7 +1341,7 @@ async fn tcp_accept_loop(
             }
         };
         let Ok(permit) = Arc::clone(&ctx.connection_permits).try_acquire_owned() else {
-            ctx.metrics.connections_rejected_overload.inc();
+            ctx.metrics.connections_rejected_overload.tcp_inflight.inc();
             debug!(%peer_addr, service = %binding.service, "edge inflight cap reached; dropping accepted tcp service connection");
             drop(tcp_stream);
             continue;
@@ -1632,7 +1633,7 @@ async fn udp_listen_loop(
                 Some(tx) if !tx.is_closed() => tx.clone(),
                 _ => {
                     if map.len() >= session_cap {
-                        ctx.metrics.connections_rejected_overload.inc();
+                        ctx.metrics.connections_rejected_overload.udp_session.inc();
                         continue;
                     }
                     let (tx, rx) = mpsc::channel::<bytes::Bytes>(UDP_SESSION_QUEUE);
