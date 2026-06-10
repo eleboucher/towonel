@@ -44,16 +44,9 @@ pub const MAX_UDP_DATAGRAM: usize = 65_535;
 /// Zero-copy forward from an iroh `RecvStream` to any `AsyncWrite` via
 /// `read_chunk` (bypasses an intermediate `BufReader` memcpy).
 ///
-/// An optional `prefix` (e.g. PROXY v2 header) is coalesced with the first
-/// QUIC chunk into a single `write_all`, so with `TCP_NODELAY` set the peer
-/// sees one segment instead of two back-to-back tiny ones. Pass `Vec::new()`
-/// when no prefix is needed — the `is_empty` branch elides the extra copy.
-///
 /// Returns the byte total alongside the result so a partway failure still
-/// reports its count — `tokio::io::copy*` discards its total on error. The
-/// total excludes `prefix` (framing, not tunnel payload).
+/// reports its count — `tokio::io::copy*` discards its total on error.
 pub async fn forward_quic_to_writer<W>(
-    mut prefix: Vec<u8>,
     recv: &mut iroh::endpoint::RecvStream,
     writer: &mut W,
 ) -> (u64, std::io::Result<()>)
@@ -64,27 +57,12 @@ where
     loop {
         match recv.read_chunk(COPY_BUF_SIZE).await {
             Ok(Some(chunk)) => {
-                let write = if prefix.is_empty() {
-                    writer.write_all(&chunk).await
-                } else {
-                    prefix.extend_from_slice(&chunk);
-                    let res = writer.write_all(&prefix).await;
-                    prefix = Vec::new();
-                    res
-                };
-                if let Err(e) = write {
+                if let Err(e) = writer.write_all(&chunk).await {
                     return (total, Err(e));
                 }
                 total = total.saturating_add(chunk.len() as u64);
             }
-            Ok(None) => {
-                if !prefix.is_empty()
-                    && let Err(e) = writer.write_all(&prefix).await
-                {
-                    return (total, Err(e));
-                }
-                return (total, Ok(()));
-            }
+            Ok(None) => return (total, Ok(())),
             Err(e) => return (total, Err(std::io::Error::other(e))),
         }
     }

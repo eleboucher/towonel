@@ -596,20 +596,23 @@ fn record_copy_results(
 }
 
 async fn forward_plain(
-    origin: TcpStream,
+    mut origin: TcpStream,
     proxy: ProxyProtocol,
     addrs: ClientAddrs,
     quic_recv: &mut iroh::endpoint::RecvStream,
     quic_send: &mut iroh::endpoint::SendStream,
     metrics: &AgentMetrics,
 ) -> anyhow::Result<()> {
+    // Written eagerly (not coalesced with the first client chunk) so a
+    // server-speaks-first origin isn't left waiting for its PROXY header
+    // while the client waits for the origin's banner.
+    write_proxy_header(&mut origin, proxy, addrs).await?;
+
     let (origin_read, mut origin_write) = origin.into_split();
     let mut origin_read = io::BufReader::with_capacity(COPY_BUF_SIZE, origin_read);
 
-    let proxy_prefix = encode_proxy_header(proxy, addrs)?;
-
     let q2o = async {
-        let res = forward_quic_to_writer(proxy_prefix, quic_recv, &mut origin_write).await;
+        let res = forward_quic_to_writer(quic_recv, &mut origin_write).await;
         drop(origin_write.shutdown().await);
         res
     };
@@ -671,7 +674,7 @@ async fn handle_tcp_stream(
         let mut origin_read = io::BufReader::with_capacity(COPY_BUF_SIZE, origin_read);
 
         let q2o = async {
-            let res = forward_quic_to_writer(Vec::new(), &mut quic_recv, &mut origin_write).await;
+            let res = forward_quic_to_writer(&mut quic_recv, &mut origin_write).await;
             drop(origin_write.shutdown().await);
             res
         };
@@ -814,25 +817,24 @@ async fn forward_tls(
     // sees a normal handshake after consuming the header.
     write_proxy_header(&mut origin, proxy, addrs).await?;
 
-    let sni_for_log = format!("{server_name:?}");
     let connector = tokio_rustls::TlsConnector::from(tls_config);
     let tls_stream = match tokio::time::timeout(
         ORIGIN_TLS_HANDSHAKE_TIMEOUT,
-        connector.connect(server_name, origin),
+        connector.connect(server_name.clone(), origin),
     )
     .await
     {
         Ok(r) => {
-            r.with_context(|| format!("TLS handshake with origin failed (SNI: {sni_for_log})"))?
+            r.with_context(|| format!("TLS handshake with origin failed (SNI: {server_name:?})"))?
         }
-        Err(_) => anyhow::bail!("TLS handshake with origin timed out (SNI: {sni_for_log})"),
+        Err(_) => anyhow::bail!("TLS handshake with origin timed out (SNI: {server_name:?})"),
     };
 
     let (tls_read, mut tls_write) = tokio::io::split(tls_stream);
     let mut tls_read = io::BufReader::with_capacity(COPY_BUF_SIZE, tls_read);
 
     let q2o = async {
-        let res = forward_quic_to_writer(Vec::new(), quic_recv, &mut tls_write).await;
+        let res = forward_quic_to_writer(quic_recv, &mut tls_write).await;
         drop(tls_write.shutdown().await);
         res
     };
