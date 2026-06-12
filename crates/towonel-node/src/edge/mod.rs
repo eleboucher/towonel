@@ -1606,6 +1606,18 @@ async fn udp_listen_loop(
     // Per-datagram hot path: resolve the tenant's counter child once.
     let tenant_bytes_in = ctx.metrics.tenant_counters(&binding.tenant).bytes_in;
 
+    // Per-listener drop counters, resolved once so the drop paths skip the
+    // label-map walk.
+    let tenant_label = binding.tenant.to_string();
+    let udp_sessions_rejected = ctx
+        .metrics
+        .udp_sessions_rejected
+        .with_label_values(&[&tenant_label, &binding.service]);
+    let udp_datagrams_dropped = ctx
+        .metrics
+        .udp_datagrams_dropped
+        .with_label_values(&[&tenant_label, &binding.service]);
+
     let mut chunk = bytes::BytesMut::with_capacity(UDP_RECV_CHUNK);
     loop {
         // `recv_buf_from` appends into spare capacity, so keep at least one
@@ -1634,6 +1646,7 @@ async fn udp_listen_loop(
                 _ => {
                     if map.len() >= session_cap {
                         ctx.metrics.connections_rejected_overload.udp_session.inc();
+                        udp_sessions_rejected.inc();
                         continue;
                     }
                     let (tx, rx) = mpsc::channel::<bytes::Bytes>(UDP_SESSION_QUEUE);
@@ -1665,6 +1678,7 @@ async fn udp_listen_loop(
         };
 
         if tx.try_send(datagram).is_err() {
+            udp_datagrams_dropped.inc();
             debug!(
                 service = %binding.service,
                 %peer_addr,

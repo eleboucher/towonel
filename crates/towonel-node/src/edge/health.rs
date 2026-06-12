@@ -29,6 +29,11 @@ pub struct EdgeMetrics {
     /// Connections / sessions dropped because an edge concurrency cap was
     /// saturated, split by which cap fired.
     pub connections_rejected_overload: OverloadRejectCounters,
+    /// Per-listener UDP drops, labelled `{tenant, service}` to attribute the
+    /// otherwise-global `connections_rejected_overload` to a listener. Bounded
+    /// by the active UDP-listener count.
+    pub udp_sessions_rejected: IntCounterVec,
+    pub udp_datagrams_dropped: IntCounterVec,
     /// Per-tenant mirrors of the global series above, labelled with the
     /// hex-encoded `TenantId`. Bounded by the active tenant count; the
     /// console scopes these server-side for the tenant dashboard.
@@ -60,6 +65,26 @@ pub struct OverloadRejectCounters {
     pub udp_session: IntCounter,
     /// Agent iroh-connection permit pool exhausted.
     pub iroh_agent: IntCounter,
+}
+
+impl OverloadRejectCounters {
+    fn register(r: &Registry) -> Self {
+        let vec = register_counter_vec(
+            r,
+            "towonel_edge_connections_rejected_overload_total",
+            "Connections/sessions dropped because an edge concurrency cap was \
+             saturated, by which cap fired (tcp_inflight = global inflight \
+             semaphore, udp_session = per-listener UDP session cap, \
+             iroh_agent = agent permit pool). Sustained values mean an \
+             accept-time DoS or an under-sized cap.",
+            &["reason"],
+        );
+        Self {
+            tcp_inflight: vec.with_label_values(&[overload_reject_reason::TCP_INFLIGHT]),
+            udp_session: vec.with_label_values(&[overload_reject_reason::UDP_SESSION]),
+            iroh_agent: vec.with_label_values(&[overload_reject_reason::IROH_AGENT]),
+        }
+    }
 }
 
 impl EdgeMetrics {
@@ -109,23 +134,21 @@ impl EdgeMetrics {
                 "Requests where no session was registered for the agent at lookup time \
                  (excludes the case where a session existed but its open_bi failed)",
             ),
-            connections_rejected_overload: {
-                let vec = register_counter_vec(
-                    &r,
-                    "towonel_edge_connections_rejected_overload_total",
-                    "Connections/sessions dropped because an edge concurrency cap was \
-                     saturated, by which cap fired (tcp_inflight = global inflight \
-                     semaphore, udp_session = per-listener UDP session cap, \
-                     iroh_agent = agent permit pool). Sustained values mean an \
-                     accept-time DoS or an under-sized cap.",
-                    &["reason"],
-                );
-                OverloadRejectCounters {
-                    tcp_inflight: vec.with_label_values(&[overload_reject_reason::TCP_INFLIGHT]),
-                    udp_session: vec.with_label_values(&[overload_reject_reason::UDP_SESSION]),
-                    iroh_agent: vec.with_label_values(&[overload_reject_reason::IROH_AGENT]),
-                }
-            },
+            connections_rejected_overload: OverloadRejectCounters::register(&r),
+            udp_sessions_rejected: register_counter_vec(
+                &r,
+                "towonel_edge_udp_sessions_rejected_total",
+                "New UDP sessions refused at the per-listener \
+                 TOWONEL_EDGE_MAX_UDP_SESSIONS_PER_LISTENER cap, by listener.",
+                &["tenant", "service"],
+            ),
+            udp_datagrams_dropped: register_counter_vec(
+                &r,
+                "towonel_edge_udp_datagrams_dropped_total",
+                "Datagrams dropped on an established UDP session because its send \
+                 queue was full (the QUIC pump fell behind), by listener.",
+                &["tenant", "service"],
+            ),
             tenant_bytes: register_counter_vec(
                 &r,
                 "towonel_edge_tenant_bytes_total",
