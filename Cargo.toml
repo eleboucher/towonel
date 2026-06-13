@@ -1,11 +1,13 @@
 [package]
 name = "towonel"
 version.workspace = true
+rust-version.workspace = true
 edition = "2024"
 publish = false
 
 [workspace.package]
 version = "0.0.1"
+rust-version = "1.95"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -87,7 +89,7 @@ allow_attributes = "warn"
 allow_attributes_without_reason = "warn"
 
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
   "crates/towonel-common",
   "crates/towonel-agent",
