@@ -183,6 +183,64 @@ pub async fn cmd_invite_list(
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct InviteDetail {
+    invite_id: String,
+    name: String,
+    hostnames: Vec<String>,
+    status: String,
+    tenant_id: String,
+    expires_at_ms: Option<u64>,
+    created_at_ms: u64,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    failover_regions: Vec<String>,
+    #[serde(default)]
+    owner_email: Option<String>,
+}
+
+pub async fn cmd_invite_get(
+    hub_url: Option<String>,
+    api_key: Option<String>,
+    id: String,
+) -> anyhow::Result<()> {
+    let hub_url = resolve_hub_url(hub_url);
+    let api_key = resolve_operator_key(api_key)?;
+
+    let url = format!("{}/v1/invites/{id}", hub_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .bearer_auth(&api_key)
+        .send()
+        .await
+        .with_context(|| format!("failed to GET {url}"))?;
+
+    let body = check_response(resp).await?;
+    let invite: InviteDetail = serde_json::from_slice(&body)?;
+
+    println!("Invite \"{}\"", invite.name);
+    println!("  Invite ID:  {}", invite.invite_id);
+    println!("  Tenant ID:  {}", invite.tenant_id);
+    println!("  Status:     {}", invite.status);
+    println!("  Hostnames:  {}", invite.hostnames.join(", "));
+    if let Some(r) = invite.region.as_deref() {
+        println!("  Region:     {r}");
+    }
+    if !invite.failover_regions.is_empty() {
+        println!("  Failover:   {}", invite.failover_regions.join(", "));
+    }
+    if let Some(email) = invite.owner_email.as_deref() {
+        println!("  Owner:      {email}");
+    }
+    println!("  Created:    {}", invite.created_at_ms);
+    match invite.expires_at_ms {
+        Some(ts) => println!("  Expires:    {ts}"),
+        None => println!("  Expires:    never"),
+    }
+    Ok(())
+}
+
 pub async fn cmd_invite_revoke(
     hub_url: Option<String>,
     api_key: Option<String>,
@@ -201,5 +259,89 @@ pub async fn cmd_invite_revoke(
 
     check_response(resp).await?;
     println!("Revoked invite {id}");
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct AddHostnamesReq<'a> {
+    hostnames: &'a [String],
+}
+
+#[derive(serde::Deserialize)]
+struct AddHostnamesResp {
+    hostnames: Vec<String>,
+}
+
+pub async fn cmd_invite_add_hostnames(
+    hub_url: Option<String>,
+    api_key: Option<String>,
+    id: String,
+    hostnames: Vec<String>,
+) -> anyhow::Result<()> {
+    if hostnames.is_empty() {
+        return Err(anyhow!("--hostnames must have at least one entry"));
+    }
+    let hub_url = resolve_hub_url(hub_url);
+    let api_key = resolve_operator_key(api_key)?;
+
+    let url = format!(
+        "{}/v1/invites/{id}/hostnames",
+        hub_url.trim_end_matches('/')
+    );
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .bearer_auth(&api_key)
+        .header(reqwest::header::CONTENT_TYPE, JSON_CONTENT_TYPE)
+        .json(&AddHostnamesReq {
+            hostnames: &hostnames,
+        })
+        .send()
+        .await
+        .with_context(|| format!("failed to POST {url}"))?;
+
+    let body = check_response(resp).await?;
+    let parsed: AddHostnamesResp = serde_json::from_slice(&body)?;
+
+    println!(
+        "Added hostnames to invite {id}: {}",
+        parsed.hostnames.join(", ")
+    );
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct RemoveHostnameResp {
+    remaining_hostnames: Vec<String>,
+}
+
+pub async fn cmd_invite_remove_hostname(
+    hub_url: Option<String>,
+    api_key: Option<String>,
+    id: String,
+    hostname: String,
+) -> anyhow::Result<()> {
+    let hub_url = resolve_hub_url(hub_url);
+    let api_key = resolve_operator_key(api_key)?;
+
+    let url = format!(
+        "{}/v1/invites/{id}/hostnames/{hostname}",
+        hub_url.trim_end_matches('/')
+    );
+    let resp = reqwest::Client::new()
+        .delete(&url)
+        .bearer_auth(&api_key)
+        .send()
+        .await
+        .with_context(|| format!("failed to DELETE {url}"))?;
+
+    let body = check_response(resp).await?;
+    let parsed: RemoveHostnameResp = serde_json::from_slice(&body)?;
+
+    println!("Removed hostname {hostname} from invite {id}");
+    if parsed.remaining_hostnames.is_empty() {
+        println!("  Remaining: (none)");
+    } else {
+        println!("  Remaining: {}", parsed.remaining_hostnames.join(", "));
+    }
     Ok(())
 }

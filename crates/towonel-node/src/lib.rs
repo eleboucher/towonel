@@ -82,6 +82,16 @@ enum Command {
         #[command(subcommand)]
         action: AcmeAction,
     },
+    /// Operator-only: list the edges registered with the hub.
+    Edge {
+        #[command(subcommand)]
+        action: EdgeAction,
+    },
+    /// Operator-only: inspect and update hub-wide settings.
+    Settings {
+        #[command(subcommand)]
+        action: SettingsAction,
+    },
 }
 
 #[derive(Subcommand)]
@@ -238,11 +248,63 @@ enum PortAction {
         #[arg(long)]
         tenant_id: String,
     },
+    /// List all port reservations across every tenant. Operator-only.
+    ListAll {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Show a page of free ports in the auto-pick range.
+    Available {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// `tcp` or `udp`.
+        #[arg(long)]
+        proto: String,
+        /// How many free ports to return (1..=200, default 20).
+        #[arg(long)]
+        count: Option<u16>,
+    },
 }
 
 #[derive(Subcommand)]
 enum AcmeAction {
     Account,
+}
+
+#[derive(Subcommand)]
+enum EdgeAction {
+    /// List the edges registered with the hub.
+    List {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SettingsAction {
+    /// Show the per-user port quota.
+    GetPortQuota {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+    },
+    /// Set the per-user port quota.
+    SetPortQuota {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// New quota value (>= 0).
+        #[arg(long)]
+        value: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -296,6 +358,16 @@ enum InviteAction {
         #[arg(long)]
         api_key: Option<String>,
     },
+    /// Show a single invite's details. Operator-only.
+    Get {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// The `invite_id` as printed by `invite list` (base64url).
+        #[arg(long)]
+        id: String,
+    },
     /// Revoke a pending invite. Operator-only.
     Revoke {
         #[arg(long)]
@@ -305,6 +377,32 @@ enum InviteAction {
         /// The `invite_id` as printed by `invite list` (base64url).
         #[arg(long)]
         id: String,
+    },
+    /// Add hostname patterns to an existing invite. Operator-only.
+    AddHostnames {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// The `invite_id` as printed by `invite list` (base64url).
+        #[arg(long)]
+        id: String,
+        /// Comma-separated hostname patterns to add.
+        #[arg(long, value_delimiter = ',')]
+        hostnames: Vec<String>,
+    },
+    /// Remove a hostname pattern from an existing invite. Operator-only.
+    RemoveHostname {
+        #[arg(long)]
+        hub_url: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// The `invite_id` as printed by `invite list` (base64url).
+        #[arg(long)]
+        id: String,
+        /// The hostname pattern to remove.
+        #[arg(long)]
+        hostname: String,
     },
 }
 
@@ -396,11 +494,28 @@ pub async fn run() -> anyhow::Result<()> {
             InviteAction::List { hub_url, api_key } => {
                 admin::invite::cmd_invite_list(hub_url, api_key).await
             }
+            InviteAction::Get {
+                hub_url,
+                api_key,
+                id,
+            } => admin::invite::cmd_invite_get(hub_url, api_key, id).await,
             InviteAction::Revoke {
                 hub_url,
                 api_key,
                 id,
             } => admin::invite::cmd_invite_revoke(hub_url, api_key, id).await,
+            InviteAction::AddHostnames {
+                hub_url,
+                api_key,
+                id,
+                hostnames,
+            } => admin::invite::cmd_invite_add_hostnames(hub_url, api_key, id, hostnames).await,
+            InviteAction::RemoveHostname {
+                hub_url,
+                api_key,
+                id,
+                hostname,
+            } => admin::invite::cmd_invite_remove_hostname(hub_url, api_key, id, hostname).await,
         },
         Some(Command::User { action }) => match action {
             UserAction::Create {
@@ -438,9 +553,33 @@ pub async fn run() -> anyhow::Result<()> {
                 api_key,
                 tenant_id,
             } => admin::port::cmd_port_list(hub_url, api_key, tenant_id).await,
+            PortAction::ListAll { hub_url, api_key } => {
+                admin::port::cmd_port_list_all(hub_url, api_key).await
+            }
+            PortAction::Available {
+                hub_url,
+                api_key,
+                proto,
+                count,
+            } => admin::port::cmd_port_available(hub_url, api_key, proto, count).await,
         },
         Some(Command::Acme { action }) => match action {
             AcmeAction::Account => admin::acme::cmd_acme_account().await,
+        },
+        Some(Command::Edge { action }) => match action {
+            EdgeAction::List { hub_url, api_key } => {
+                admin::edge::cmd_edge_list(hub_url, api_key).await
+            }
+        },
+        Some(Command::Settings { action }) => match action {
+            SettingsAction::GetPortQuota { hub_url, api_key } => {
+                admin::settings::cmd_get_port_quota(hub_url, api_key).await
+            }
+            SettingsAction::SetPortQuota {
+                hub_url,
+                api_key,
+                value,
+            } => admin::settings::cmd_set_port_quota(hub_url, api_key, value).await,
         },
     }
 }

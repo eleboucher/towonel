@@ -3,9 +3,11 @@
 //! (URL/key resolution, response checking) live here.
 
 pub mod acme;
+pub mod edge;
 pub mod entry;
 pub mod invite;
 pub mod port;
+pub mod settings;
 pub mod signup_invite;
 pub mod tenant;
 pub mod user;
