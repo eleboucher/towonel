@@ -15,3 +15,7 @@
 *.sqlite
 *.sqlite-journal
 /.dev/
+
+# Vendored Helm chart dependencies (fetched via `helm dependency build`);
+# Chart.lock is committed to pin the resolved version.
+/charts/*/charts/

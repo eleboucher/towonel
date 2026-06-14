@@ -1,0 +1,58 @@
+suite: agent direct connect
+templates:
+  - common.yaml.tpl
+set:
+  directConnect.enabled: true
+tests:
+  - it: mounts the service account token for autodiscovery
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: true
+
+  - it: wires autodiscovery env and the iroh container port
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_K8S_AUTODISCOVER
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: iroh
+            containerPort: 51820
+            protocol: UDP
+
+  - it: exposes a NodePort service for the iroh UDP port
+    documentSelector:
+      path: spec.type
+      value: NodePort
+    asserts:
+      - isKind:
+          of: Service
+      - contains:
+          path: spec.ports
+          content:
+            name: iroh
+            port: 51820
+            protocol: UDP
+            targetPort: iroh
+
+  - it: grants node read RBAC
+    documentSelector:
+      path: kind
+      value: ClusterRole
+    asserts:
+      - contains:
+          path: rules
+          content:
+            apiGroups: [""]
+            resources: ["nodes"]
+            verbs: ["get"]

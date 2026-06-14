@@ -3,9 +3,8 @@ apiVersion: v2
 name: towonel-agent
 description: A Helm chart for the towonel agent - origin-side connector for towonel tunnels
 type: application
-# Floor matching the chart's surface: restricted Pod Security (seccompProfile)
-# and the optional monitoring CRDs (ServiceMonitor, PrometheusRule, GrafanaDashboard).
-kubeVersion: ">=1.25.0-0"
+# Floor matching the bjw-s common 5.x library dependency.
+kubeVersion: ">=1.31.0-0"
 version: 0.0.0
 appVersion: "0.0.0"
 home: https://codeberg.org/towonel/towonel
@@ -17,5 +16,9 @@ keywords:
   - towonel
   - tunnel
   - agent
+dependencies:
+  - name: common
+    repository: https://bjw-s-labs.github.io/helm-charts
+    version: 5.0.1
 annotations:
   category: Networking

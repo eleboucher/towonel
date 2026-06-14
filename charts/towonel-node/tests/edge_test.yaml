@@ -1,0 +1,95 @@
+suite: node edge role
+templates:
+  - common.yaml.tpl
+set:
+  hub.enabled: false
+tests:
+  - it: renders a hostNetwork DaemonSet
+    documentSelector:
+      path: kind
+      value: DaemonSet
+    asserts:
+      - isKind:
+          of: DaemonSet
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: true
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: ClusterFirstWithHostNet
+
+  - it: flips the role env to edge and drops the hub listeners
+    documentSelector:
+      path: kind
+      value: DaemonSet
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_EDGE_ENABLED
+            value: "true"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_EDGE_LISTEN_ADDR
+            value: "[::]:443"
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_HUB_LISTEN_ADDR
+          any: true
+
+  - it: drops allowPrivilegeEscalation so the file-cap bind works
+    documentSelector:
+      path: kind
+      value: DaemonSet
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+      - contains:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add
+          content: NET_BIND_SERVICE
+
+  - it: exposes the public edge container ports
+    documentSelector:
+      path: kind
+      value: DaemonSet
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: edge
+            containerPort: 443
+            protocol: TCP
+
+  - it: mounts an emptyDir data dir and bumps memory headroom
+    documentSelector:
+      path: kind
+      value: DaemonSet
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            mountPath: /data
+          any: true
+      - equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 2Gi
+
+  - it: serves only the edge ports on the Service
+    documentSelector:
+      path: kind
+      value: Service
+    asserts:
+      - contains:
+          path: spec.ports
+          content:
+            name: edge
+            port: 443
+            protocol: TCP
+            targetPort: edge
+      - notContains:
+          path: spec.ports
+          content:
+            name: hub-api
+          any: true

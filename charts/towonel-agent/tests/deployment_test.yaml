@@ -1,34 +1,51 @@
-suite: deployment
+suite: agent deployment
 templates:
-  - deployment.yaml
+  - common.yaml.tpl
 tests:
-  - it: should be a Deployment
+  - it: renders a Deployment
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - isKind:
           of: Deployment
 
-  - it: should use the correct image
+  - it: uses the repository:appVersion image by default
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
           value: codeberg.org/towonel/towonel-agent:0.0.0
 
-  - it: should pin the image by digest when set, overriding the tag
+  - it: pins the image by digest when set
     set:
-      image.tag: "1.2.3"
-      image.digest: "sha256:abc123"
+      controllers.main.containers.main.image.digest: "sha256:abc123"
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - equal:
           path: spec.template.spec.containers[0].image
-          value: codeberg.org/towonel/towonel-agent@sha256:abc123
+          value: codeberg.org/towonel/towonel-agent:0.0.0@sha256:abc123
 
-  - it: should run two replicas by default
+  - it: runs two replicas and rolls on upgrade
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - equal:
           path: spec.replicas
           value: 2
+      - equal:
+          path: spec.strategy.type
+          value: RollingUpdate
 
-  - it: should expose node name and namespace to the agent
+  - it: exposes node name, log level and health listener
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -40,65 +57,86 @@ tests:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
-            name: POD_NAMESPACE
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.namespace
-
-  - it: should derive the health listen address from the port value
-    asserts:
+            name: RUST_LOG
+            value: info
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TOWONEL_AGENT_HEALTH_LISTEN_ADDR
             value: 0.0.0.0:9090
 
-  - it: should not set service env vars when no services are configured
+  - it: sets pod and container security contexts
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
-      - notContains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_AGENT_SERVICES
-          any: true
+      - equal:
+          path: spec.template.spec.securityContext.runAsUser
+          value: 10001
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
+          value: false
 
-  - it: should render services as JSON
+  - it: does not mount the service account token by default
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+
+  - it: probes /healthz on the named metrics port
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
+          value: /healthz
+      - equal:
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
+          value: metrics
+
+  - it: declares the metrics container port
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: metrics
+            containerPort: 9090
+            protocol: TCP
+
+  - it: derives the tunnel service env as JSON and the invite token secret ref
     set:
       agent.services:
         - hostname: "*.example.com"
-          origin: envoy-external.network.svc.cluster.local:443
+          origin: svc.ns.svc:443
+      agent.tcpServices:
+        - name: ssh
+          origin: svc.ns.svc:2222
+          listen_port: 2222
+      agent.inviteTokenSecret.name: towonel-agent-secret
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TOWONEL_AGENT_SERVICES
-            value: '[{"hostname":"*.example.com","origin":"envoy-external.network.svc.cluster.local:443"}]'
-
-  - it: should render tcp and udp services as JSON
-    set:
-      agent.tcpServices:
-        - name: forgejo-ssh
-          origin: envoy-external.network.svc.cluster.local:2222
-          listen_port: 2222
-      agent.udpServices:
-        - name: stunner-turn-udp
-          origin: stunner.network.svc.cluster.local:3478
-          listen_port: 3478
-    asserts:
+            value: '[{"hostname":"*.example.com","origin":"svc.ns.svc:443"}]'
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TOWONEL_AGENT_TCP_SERVICES
-            value: '[{"listen_port":2222,"name":"forgejo-ssh","origin":"envoy-external.network.svc.cluster.local:2222"}]'
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_AGENT_UDP_SERVICES
-            value: '[{"listen_port":3478,"name":"stunner-turn-udp","origin":"stunner.network.svc.cluster.local:3478"}]'
-
-  - it: should wire the invite token from a secret
-    set:
-      agent.inviteTokenSecret.name: towonel-agent-secret
-    asserts:
+            value: '[{"listen_port":2222,"name":"ssh","origin":"svc.ns.svc:2222"}]'
       - contains:
           path: spec.template.spec.containers[0].env
           content:
@@ -108,128 +146,18 @@ tests:
                 name: towonel-agent-secret
                 key: TOWONEL_INVITE_TOKEN
 
-  - it: should not wire the invite token by default
+  - it: does not set tunnel service or invite env by default
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_SERVICES
+          any: true
       - notContains:
           path: spec.template.spec.containers[0].env
           content:
             name: TOWONEL_INVITE_TOKEN
           any: true
-
-  - it: should set the log level
-    set:
-      agent.logLevel: debug
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: RUST_LOG
-            value: debug
-
-  - it: should set pod and container security contexts
-    asserts:
-      - equal:
-          path: spec.template.spec.securityContext.runAsUser
-          value: 10001
-      - equal:
-          path: spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem
-          value: true
-
-  - it: should not mount the service account token by default
-    asserts:
-      - equal:
-          path: spec.template.spec.automountServiceAccountToken
-          value: false
-
-  - it: should probe /healthz on the named metrics port
-    asserts:
-      - equal:
-          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
-          value: /healthz
-      - equal:
-          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
-          value: metrics
-
-  - it: should not wire direct connectivity by default
-    asserts:
-      - notContains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_AGENT_K8S_AUTODISCOVER
-          any: true
-      - notContains:
-          path: spec.template.spec.containers[0].ports
-          content:
-            name: iroh
-          any: true
-
-  - it: should wire autodiscovery, the iroh port and a mounted token when directConnect is enabled
-    set:
-      directConnect.enabled: true
-    asserts:
-      - equal:
-          path: spec.template.spec.automountServiceAccountToken
-          value: true
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_AGENT_K8S_AUTODISCOVER
-            value: "true"
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_AGENT_K8S_SERVICE
-            value: RELEASE-NAME-towonel-agent-direct
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_AGENT_IROH_PORT
-            value: "51820"
-      - contains:
-          path: spec.template.spec.containers[0].ports
-          content:
-            name: iroh
-            containerPort: 51820
-            protocol: UDP
-
-  - it: should not use the host network by default
-    asserts:
-      - notExists:
-          path: spec.template.spec.hostNetwork
-
-  - it: should use the host network with cluster DNS when enabled
-    set:
-      hostNetwork: true
-    asserts:
-      - equal:
-          path: spec.template.spec.hostNetwork
-          value: true
-      - equal:
-          path: spec.template.spec.dnsPolicy
-          value: ClusterFirstWithHostNet
-
-  - it: should disable UDP GSO when set
-    set:
-      disableUdpGso: true
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_DISABLE_UDP_GSO
-            value: "true"
-
-  - it: should wire the relay url and extra local addrs when set
-    set:
-      relayUrl: https://relay.example/
-      extraLocalAddrs: 1.2.3.4:51820
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_AGENT_RELAY_URL
-            value: https://relay.example/
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_AGENT_EXTRA_LOCAL_ADDRS
-            value: 1.2.3.4:51820

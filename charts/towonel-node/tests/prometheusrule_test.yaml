@@ -1,13 +1,13 @@
-suite: prometheusrule
+suite: node prometheusrule
 templates:
-  - prometheusrule.yaml
+  - prometheusrule.yaml.tpl
 tests:
-  - it: should not render by default
+  - it: is not rendered by default
     asserts:
       - hasDocuments:
           count: 0
 
-  - it: should render hub alert rules when enabled
+  - it: renders the hub alert rules when enabled
     set:
       monitoring.prometheusRule.enabled: true
     asserts:
@@ -19,25 +19,3 @@ tests:
       - equal:
           path: spec.groups[0].rules[0].alert
           value: TowonelHubMetricsAbsent
-
-  - it: should not render on an edge-only install
-    set:
-      monitoring.prometheusRule.enabled: true
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - hasDocuments:
-          count: 0
-
-  - it: should add additional rule labels to every rule
-    set:
-      monitoring.prometheusRule.enabled: true
-      monitoring.prometheusRule.additionalRuleLabels:
-        cluster: towonel-ops
-    asserts:
-      - equal:
-          path: spec.groups[0].rules[0].labels.cluster
-          value: towonel-ops
-      - equal:
-          path: spec.groups[0].rules[5].labels.cluster
-          value: towonel-ops

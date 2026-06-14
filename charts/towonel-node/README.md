@@ -43,34 +43,41 @@ passed through `env`/`envFrom`.
 
 ## Requirements
 
-Kubernetes: `>=1.25.0-0`
+Kubernetes: `>=1.31.0-0`
+
+| Repository | Name | Version |
+|------------|------|---------|
+| https://bjw-s-labs.github.io/helm-charts | common | 5.0.1 |
 
 ## Values
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| affinity | object | `{}` | Affinity rules for pod scheduling. |
-| dnsPolicy | string | `""` | DNS policy. Empty picks the role default (ClusterFirstWithHostNet when the edge is enabled, ClusterFirst otherwise). |
-| edge.bindAddress | string | `"[::]"` | Bind address for the public TLS and plain-HTTP listeners. "[::]" is dual-stack: serves both IPv4 + IPv6. |
+| controllers.main.annotations | object | `{}` |  |
+| controllers.main.containers.main.envFrom | list | `[]` |  |
+| controllers.main.containers.main.image.digest | string | `""` | Pin the image by digest (sha256:...); the release pipeline fills it. |
+| controllers.main.containers.main.image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
+| controllers.main.containers.main.image.repository | string | `"codeberg.org/towonel/towonel-node"` | Image repository. |
+| controllers.main.containers.main.image.tag | string | `"{{ .Chart.AppVersion }}"` | Image tag; defaults to the chart appVersion. |
+| controllers.main.containers.main.securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"add":["NET_BIND_SERVICE"],"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container securityContext (read-only root filesystem, drops ALL capabilities, keeps NET_BIND_SERVICE for privileged listeners). allowPrivilegeEscalation is dropped automatically when the edge is enabled — NoNewPrivs would block the file-cap bind of 443/80. |
+| controllers.main.replicas | int | `1` | Replicas (Deployment only; only one hub replica is the active leader). |
+| defaultPodOptions | object | `{"automountServiceAccountToken":false,"enableServiceLinks":false,"securityContext":{"fsGroup":10001,"runAsGroup":10001,"runAsNonRoot":true,"runAsUser":10001,"seccompProfile":{"type":"RuntimeDefault"}},"terminationGracePeriodSeconds":30}` | Pod-wide defaults applied to every controller. hostNetwork + dnsPolicy are set automatically when the edge is enabled. |
+| defaultPodOptions.automountServiceAccountToken | bool | `false` | The node does not talk to the cluster API. |
+| defaultPodOptions.securityContext | object | `{"fsGroup":10001,"runAsGroup":10001,"runAsNonRoot":true,"runAsUser":10001,"seccompProfile":{"type":"RuntimeDefault"}}` | Pod-level securityContext: non-root uid/gid 10001. The edge binds its privileged host ports (443/80) as this non-root user via the binary's file capabilities, so it never runs as root. |
+| defaultPodOptions.terminationGracePeriodSeconds | int | `30` | Grace period for in-flight connections on shutdown. |
+| edge.bindAddress | string | `"[::]"` | Bind address for the public TLS and plain-HTTP listeners. "[::]" is dual-stack. |
 | edge.dataDir | string | `"/data"` | Data directory backed by an emptyDir volume (TOWONEL_DATA_DIR). |
 | edge.enabled | bool | `true` | Run the public edge (TOWONEL_EDGE_ENABLED). Switches the workload to a hostNetwork DaemonSet; pin it to the right nodes with nodeSelector/affinity. |
 | edge.healthBindAddress | string | `"0.0.0.0"` | Bind address for the edge health/metrics listener. |
-| edge.httpPort | int | `80` | Plain HTTP port for ACME HTTP-01 and redirects (TOWONEL_EDGE_HTTP_LISTEN_ADDR). |
-| edge.httpsPort | int | `443` | Public TLS port (TOWONEL_EDGE_LISTEN_ADDR). |
-| edge.metricsPort | int | `9090` | Port serving edge health and Prometheus metrics (TOWONEL_EDGE_HEALTH_LISTEN_ADDR). |
-| env | list | `[]` | Extra environment variables passed to the container (k8s EnvVar list). Deployment-specific configuration (DB DSN, public URLs, region, OTEL) goes here. |
-| envFrom | list | `[]` | Extra envFrom sources (e.g. secrets created by ExternalSecret). |
-| fullnameOverride | string | `""` | Override the full release name. |
-| hub.apiPort | int | `8443` | Port the user/operator HTTP API listens on (TOWONEL_HUB_LISTEN_ADDR). |
+| edge.httpPort | int | `80` | Plain HTTP port for ACME HTTP-01 and redirects. |
+| edge.httpsPort | int | `443` | Public TLS port. |
+| edge.metricsPort | int | `9090` | Port serving edge health and Prometheus metrics. |
+| global.fullnameOverride | string | `""` | Override the full release name. |
+| global.nameOverride | string | `""` | Override the chart name used in resource names. |
+| hub.apiPort | int | `8443` | Port the user/operator HTTP API listens on. |
 | hub.enabled | bool | `true` | Run the hub control plane (TOWONEL_HUB_ENABLED). |
-| hub.linkPort | int | `51444` | Port edges dial for the hub link (TOWONEL_HUB_LINK_LISTEN_ADDR). |
-| hub.metricsPort | int | `9091` | Port serving hub health and Prometheus metrics (TOWONEL_HUB_HEALTH_LISTEN_ADDR). |
-| image.digest | string | `""` | Pin the image by digest (sha256:...); when set, overrides the tag. The release pipeline fills it with the published image's digest. |
-| image.pullPolicy | string | `"IfNotPresent"` | Image pull policy. |
-| image.repository | string | `"codeberg.org/towonel/towonel-node"` | Image repository. |
-| image.tag | string | `""` | Overrides the image tag; defaults to the chart appVersion. |
-| imagePullSecrets | list | `[]` | Image pull secrets for private registries. |
-| livenessProbe | object | `{}` | Liveness probe. Empty picks the role default (see startupProbe). |
+| hub.linkPort | int | `51444` | Port edges dial for the hub link. |
+| hub.metricsPort | int | `9091` | Port serving hub health and Prometheus metrics. |
 | monitoring.dashboards.annotations | object | `{}` | Annotations added to the dashboard ConfigMap. |
 | monitoring.dashboards.enabled | bool | `false` | Render the Grafana dashboard ConfigMap (for grafana-operator or the kube-prometheus-stack sidecar). The dashboard covers hub and edge metrics. |
 | monitoring.dashboards.grafanaOperator.allowCrossNamespaceImport | bool | `true` | If true allows for a Grafana in any namespace to access this GrafanaDashboard. |
@@ -82,41 +89,12 @@ Kubernetes: `>=1.25.0-0`
 | monitoring.dashboards.namespace | string | `""` | Namespace for the dashboard objects; defaults to the release namespace. |
 | monitoring.prometheusRule.additionalRuleLabels | object | `{}` | Extra labels added to every alert rule (e.g. cluster). |
 | monitoring.prometheusRule.annotations | object | `{}` | PrometheusRule annotations. |
-| monitoring.prometheusRule.enabled | bool | `false` | Create a PrometheusRule with the hub alerting rules (rendered only when the hub is enabled). |
+| monitoring.prometheusRule.enabled | bool | `false` | Create a PrometheusRule with the hub alerting rules. |
 | monitoring.prometheusRule.labels | object | `{}` | PrometheusRule labels. |
-| monitoring.serviceMonitor.annotations | object | `{}` | ServiceMonitor annotations. |
-| monitoring.serviceMonitor.enabled | bool | `false` | Create a Prometheus Operator ServiceMonitor with an endpoint per enabled role (requires its CRDs). |
-| monitoring.serviceMonitor.interval | string | `"30s"` | Scrape interval. |
-| monitoring.serviceMonitor.labels | object | `{}` | ServiceMonitor labels. |
-| monitoring.serviceMonitor.metricRelabelings | list | `[]` | Prometheus metric relabelings. |
-| monitoring.serviceMonitor.path | string | `"/metrics"` | Metrics path. |
-| monitoring.serviceMonitor.relabelings | list | `[]` | Prometheus relabelings (applied before scraping). |
-| monitoring.serviceMonitor.scrapeTimeout | string | `"10s"` | Scrape timeout. |
-| nameOverride | string | `""` | Override the chart name used in resource names. |
-| nodeSelector | object | `{}` | Node selector for pod scheduling. |
-| podAnnotations | object | `{}` | Annotations added to the pod. |
-| podLabels | object | `{}` | Labels added to the pod. |
-| podSecurityContext | object | `{}` | Pod-level securityContext. Empty picks the role default: non-root uid/gid 10001 for both roles. The edge binds its privileged host ports (443/80) as this non-root user via the binary's file capabilities. |
-| readinessProbe | object | `{}` | Readiness probe. Empty picks the role default (/health on edge-metrics when the edge is enabled, /v1/readyz on hub-api otherwise). |
-| replicaCount | int | `1` | Number of replicas (Deployment only; only one hub replica is the active leader). |
-| resources | object | `{}` | Pod resource requests/limits. Empty picks the role default: 500m/256Mi requests + 2Gi limit when the edge is enabled, 100m/256Mi requests + 512Mi limit otherwise. |
-| securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"add":["NET_BIND_SERVICE"],"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container securityContext (read-only root filesystem, drops ALL capabilities, keeps NET_BIND_SERVICE for the edge's privileged listeners). allowPrivilegeEscalation:false is dropped automatically when the edge is enabled — NoNewPrivs would block the file-cap bind of 443/80. |
-| service.annotations | object | `{}` | Annotations for the Service. |
-| service.enabled | bool | `true` | Create a Service for the enabled listeners. |
-| service.type | string | `"ClusterIP"` | Service type. |
-| serviceAccount.annotations | object | `{}` | Annotations for the ServiceAccount. |
-| serviceAccount.automount | bool | `false` | Automount the API token (off by default: the node does not talk to the cluster API). |
-| serviceAccount.create | bool | `true` | Create a ServiceAccount. |
-| serviceAccount.name | string | `""` | ServiceAccount name; generated from the release name if empty. |
-| startupProbe | object | `{}` | Startup probe. Empty picks the role default (/health on the edge-metrics port when the edge is enabled, /v1/health on hub-api otherwise). |
-| strategy | object | `{}` | Deployment update strategy (hub-only). Empty defaults to Recreate, because the hub is active/passive: a surged pod can only pass /v1/readyz once it wins the Postgres advisory lock the old leader holds, so the old pod must terminate first. The default RollingUpdate (maxUnavailable:0) deadlocks the rollout. |
-| terminationGracePeriodSeconds | int | `30` | Grace period for in-flight connections on shutdown. |
-| tolerations | list | `[]` | Tolerations for pod scheduling. |
-| updateStrategy | object | `{}` | Update strategy (DaemonSet only). |
-| volumeMounts | list | `[]` | Additional volume mounts on the container. |
-| volumes | list | `[]` | Additional volumes on the workload (e.g. postgres client certificates). |
-| workload.annotations | object | `{}` | Annotations added to the workload (e.g. reloader.stakater.com/auto). |
-| workload.kind | string | `""` | Workload kind: Deployment or DaemonSet. Empty picks the role default (DaemonSet when the edge is enabled, Deployment otherwise). |
+| service | object | `{"main":{"controller":"main","primary":true,"type":"ClusterIP"}}` | Service exposing the enabled listeners (ports derived from the roles). |
+| serviceMonitor | object | `{"main":{"enabled":false}}` | Prometheus Operator ServiceMonitor. Disabled by default; set enabled:true (requires the ServiceMonitor CRD). Endpoints are derived from the enabled roles. |
+| workload.kind | string | `""` | Workload kind: deployment or daemonset. Empty picks the role default (daemonset when the edge is enabled, deployment otherwise). |
+| workload.strategy | string | `""` | Deployment update strategy (hub-only). Empty defaults to Recreate, because the hub is active/passive: a surged pod only passes /v1/readyz once it wins the Postgres advisory lock the old leader holds, so the old pod must terminate first. RollingUpdate (maxUnavailable:0) would deadlock the rollout. |
 
 ---
 

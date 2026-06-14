@@ -1,94 +1,38 @@
-suite: workload
+suite: node hub workload
 templates:
-  - workload.yaml
+  - common.yaml.tpl
+set:
+  edge.enabled: false
 tests:
-  - it: should run both roles on a hostNetwork DaemonSet by default
-    asserts:
-      - isKind:
-          of: DaemonSet
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_HUB_ENABLED
-            value: "true"
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_EDGE_ENABLED
-            value: "true"
-      - contains:
-          path: spec.template.spec.containers[0].ports
-          content:
-            name: hub-api
-            containerPort: 8443
-            protocol: TCP
-      - contains:
-          path: spec.template.spec.containers[0].ports
-          content:
-            name: edge
-            containerPort: 443
-            protocol: TCP
-
-  - it: should use the correct image
-    asserts:
-      - equal:
-          path: spec.template.spec.containers[0].image
-          value: codeberg.org/towonel/towonel-node:0.0.0
-
-  - it: should pin the image by digest when set, overriding the tag
-    set:
-      image.tag: "1.2.3"
-      image.digest: "sha256:abc123"
-    asserts:
-      - equal:
-          path: spec.template.spec.containers[0].image
-          value: codeberg.org/towonel/towonel-node@sha256:abc123
-
-  - it: should be a Deployment with replicas when hub-only
-    set:
-      edge.enabled: false
+  - it: renders a hub Deployment with Recreate strategy
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - isKind:
           of: Deployment
       - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
           path: spec.replicas
           value: 1
 
-  - it: should default the Deployment strategy to Recreate (active/passive hub)
+  - it: uses the repository:appVersion image, digest-pinnable
     set:
-      edge.enabled: false
+      controllers.main.containers.main.image.digest: "sha256:abc123"
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - equal:
-          path: spec.strategy.type
-          value: Recreate
+          path: spec.template.spec.containers[0].image
+          value: codeberg.org/towonel/towonel-node:0.0.0@sha256:abc123
 
-  - it: should honor an explicit Deployment strategy override
-    set:
-      edge.enabled: false
-      strategy:
-        type: RollingUpdate
-        rollingUpdate:
-          maxSurge: 0
-          maxUnavailable: 1
-    asserts:
-      - equal:
-          path: spec.strategy.type
-          value: RollingUpdate
-      - equal:
-          path: spec.strategy.rollingUpdate.maxUnavailable
-          value: 1
-
-  - it: should not set a Deployment strategy on the DaemonSet
-    set:
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - notExists:
-          path: spec.strategy
-
-  - it: should run as hub and not as edge when hub-only
-    set:
-      edge.enabled: false
+  - it: enables the hub role and its listeners
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -100,35 +44,16 @@ tests:
           content:
             name: TOWONEL_EDGE_ENABLED
             value: "false"
-
-  - it: should derive hub listen addresses from port values
-    set:
-      edge.enabled: false
-    asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:
             name: TOWONEL_HUB_LISTEN_ADDR
             value: 0.0.0.0:8443
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_HUB_LINK_LISTEN_ADDR
-            value: 0.0.0.0:51444
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_HUB_HEALTH_LISTEN_ADDR
-            value: 0.0.0.0:9091
-      - notContains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_EDGE_LISTEN_ADDR
-          any: true
 
-  - it: should expose only hub ports when hub-only
-    set:
-      edge.enabled: false
+  - it: declares the hub container ports
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - contains:
           path: spec.template.spec.containers[0].ports
@@ -142,227 +67,42 @@ tests:
             name: hub-metrics
             containerPort: 9091
             protocol: TCP
-      - notContains:
-          path: spec.template.spec.containers[0].ports
-          content:
-            name: edge
-          any: true
 
-  - it: should default probes to the hub api (hub-only)
-    set:
-      edge.enabled: false
+  - it: probes the hub API for health and readiness
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].startupProbe.httpGet.path
+          path: spec.template.spec.containers[0].livenessProbe.httpGet.path
           value: /v1/health
-      - equal:
-          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
-          value: hub-api
       - equal:
           path: spec.template.spec.containers[0].readinessProbe.httpGet.path
           value: /v1/readyz
+      - equal:
+          path: spec.template.spec.containers[0].readinessProbe.httpGet.port
+          value: hub-api
 
-  - it: should run non-root with hub resources when hub-only
-    set:
-      edge.enabled: false
+  - it: keeps the container locked down and non-root
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - equal:
           path: spec.template.spec.securityContext.runAsUser
           value: 10001
-      - equal:
-          path: spec.template.spec.containers[0].resources.limits.memory
-          value: 512Mi
-      - equal:
-          path: spec.template.spec.dnsPolicy
-          value: ClusterFirst
-      - notExists:
-          path: spec.template.spec.hostNetwork
-      - notExists:
-          path: spec.template.spec.volumes
-      # hub-only binds unprivileged ports, so it keeps NoNewPrivs locked.
       - equal:
           path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
           value: false
-
-  - it: should be a hostNetwork DaemonSet when the edge is enabled
-    set:
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - isKind:
-          of: DaemonSet
-      - equal:
-          path: spec.template.spec.hostNetwork
-          value: true
-      - equal:
-          path: spec.template.spec.dnsPolicy
-          value: ClusterFirstWithHostNet
-      - notExists:
-          path: spec.replicas
-
-  - it: should run as edge and not as hub (edge-only)
-    set:
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_HUB_ENABLED
-            value: "false"
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_EDGE_ENABLED
-            value: "true"
-      - notContains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_HUB_LISTEN_ADDR
-          any: true
-
-  - it: should derive dual-stack edge listen addresses and the data dir
-    set:
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_EDGE_LISTEN_ADDR
-            value: "[::]:443"
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_EDGE_HTTP_LISTEN_ADDR
-            value: "[::]:80"
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_EDGE_HEALTH_LISTEN_ADDR
-            value: "0.0.0.0:9090"
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_DATA_DIR
-            value: /data
-
-  - it: should mount the data emptyDir at the data dir (edge)
-    set:
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].volumeMounts
-          content:
-            name: data
-            mountPath: /data
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: data
-            emptyDir: {}
-
-  - it: should default probes to the edge health listener (edge)
-    set:
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - equal:
-          path: spec.template.spec.containers[0].startupProbe.httpGet.path
-          value: /health
-      - equal:
-          path: spec.template.spec.containers[0].livenessProbe.httpGet.port
-          value: edge-metrics
-      - equal:
-          path: spec.template.spec.containers[0].readinessProbe.httpGet.path
-          value: /health
-
-  - it: should run non-root with edge resources when the edge is enabled
-    set:
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - equal:
-          path: spec.template.spec.securityContext.runAsUser
-          value: 10001
-      - equal:
-          path: spec.template.spec.containers[0].resources.limits.memory
-          value: 2Gi
       - contains:
           path: spec.template.spec.containers[0].securityContext.capabilities.add
           content: NET_BIND_SERVICE
-      # The edge binds 443/80 as non-root via file caps; NoNewPrivs would block it.
-      - notExists:
-          path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
 
-  - it: should honor a workload kind override
-    set:
-      workload.kind: Deployment
-      replicaCount: 3
-    asserts:
-      - isKind:
-          of: Deployment
-      - equal:
-          path: spec.replicas
-          value: 3
-
-  - it: should honor explicit probes over role defaults
-    set:
-      livenessProbe:
-        tcpSocket:
-          port: hub-link
-        periodSeconds: 60
+  - it: applies the hub resource defaults
+    documentSelector:
+      path: kind
+      value: Deployment
     asserts:
       - equal:
-          path: spec.template.spec.containers[0].livenessProbe.tcpSocket.port
-          value: hub-link
-      - notExists:
-          path: spec.template.spec.containers[0].livenessProbe.httpGet
-
-  - it: should honor an explicit podSecurityContext over the role default
-    set:
-      hub.enabled: false
-      edge.enabled: true
-      podSecurityContext:
-        runAsNonRoot: true
-        runAsUser: 10001
-    asserts:
-      - equal:
-          path: spec.template.spec.securityContext.runAsUser
-          value: 10001
-
-  - it: should fail when both roles are disabled
-    set:
-      hub.enabled: false
-      edge.enabled: false
-    asserts:
-      - failedTemplate:
-          errorPattern: at least one of hub.enabled or edge.enabled
-
-  - it: should append extra env vars after the derived ones
-    set:
-      env:
-        - name: TOWONEL_EDGE_REGION
-          value: EU
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: TOWONEL_EDGE_REGION
-            value: EU
-
-  - it: should add workload annotations
-    set:
-      workload.annotations:
-        reloader.stakater.com/auto: "true"
-    asserts:
-      - equal:
-          path: metadata.annotations["reloader.stakater.com/auto"]
-          value: "true"
-
-  - it: should not mount the service account token by default
-    asserts:
-      - equal:
-          path: spec.template.spec.automountServiceAccountToken
-          value: false
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 512Mi

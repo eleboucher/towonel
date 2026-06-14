@@ -1,12 +1,8 @@
-{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as {{ include "towonel-node.kind" . }} {{ include "towonel-node.fullname" . }}.
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as {{ .Values.controllers.main.type }} {{ include "bjw-s.common.lib.chart.names.fullname" . }}.
 
-Enabled roles:
-{{- if .Values.hub.enabled }}
-  - hub: API on :{{ .Values.hub.apiPort }}, edge link on :{{ .Values.hub.linkPort }}, metrics on :{{ .Values.hub.metricsPort }}
-{{- end }}
-{{- if .Values.edge.enabled }}
-  - edge: TLS on {{ .Values.edge.bindAddress }}:{{ .Values.edge.httpsPort }}, HTTP on :{{ .Values.edge.httpPort }}, metrics on :{{ .Values.edge.metricsPort }} (hostNetwork)
-{{- end }}
+Role is set via the TOWONEL_HUB_ENABLED / TOWONEL_EDGE_ENABLED env and the
+configured listeners/ports. The chart defaults to a hub Deployment; apply the
+edge overlay (values-edge.yaml) for a hostNetwork DaemonSet edge.
 
 Values reference:
 https://codeberg.org/towonel/towonel/src/branch/main/charts/towonel-node/README.md

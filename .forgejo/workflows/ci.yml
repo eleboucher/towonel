@@ -134,6 +134,12 @@ jobs:
           install_release "helm-schema_${HELM_SCHEMA_VERSION}_Linux_x86_64.tar.gz" \
             "https://github.com/dadav/helm-schema/releases/download/${HELM_SCHEMA_VERSION}" \
             checksums.txt helm-schema
+      - name: Build chart dependencies
+        run: |
+          set -euo pipefail
+          for chart in charts/*/; do
+            helm dependency build "$chart"
+          done
       - name: Lint charts
         run: |
           set -euo pipefail

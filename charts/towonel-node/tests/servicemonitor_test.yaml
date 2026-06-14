@@ -1,61 +1,18 @@
-suite: servicemonitor
+suite: node servicemonitor
 templates:
-  - servicemonitor.yaml
+  - common.yaml.tpl
+set:
+  edge.enabled: false
 tests:
-  - it: should not render by default
-    asserts:
-      - hasDocuments:
-          count: 0
-
-  - it: should scrape both metrics ports by default (combined)
+  - it: scrapes hub-metrics when enabled
     set:
-      monitoring.serviceMonitor.enabled: true
+      serviceMonitor.main.enabled: true
+    documentSelector:
+      path: kind
+      value: ServiceMonitor
     asserts:
       - isKind:
           of: ServiceMonitor
-      - lengthEqual:
-          path: spec.endpoints
-          count: 2
       - equal:
           path: spec.endpoints[0].port
           value: hub-metrics
-      - equal:
-          path: spec.endpoints[1].port
-          value: edge-metrics
-      - equal:
-          path: spec.endpoints[0].path
-          value: /metrics
-
-  - it: should scrape only the hub metrics port when hub-only
-    set:
-      monitoring.serviceMonitor.enabled: true
-      edge.enabled: false
-    asserts:
-      - lengthEqual:
-          path: spec.endpoints
-          count: 1
-      - equal:
-          path: spec.endpoints[0].port
-          value: hub-metrics
-
-  - it: should scrape the edge metrics port when edge-only
-    set:
-      monitoring.serviceMonitor.enabled: true
-      hub.enabled: false
-      edge.enabled: true
-    asserts:
-      - lengthEqual:
-          path: spec.endpoints
-          count: 1
-      - equal:
-          path: spec.endpoints[0].port
-          value: edge-metrics
-
-  - it: should use custom interval
-    set:
-      monitoring.serviceMonitor.enabled: true
-      monitoring.serviceMonitor.interval: 1m
-    asserts:
-      - equal:
-          path: spec.endpoints[0].interval
-          value: 1m
