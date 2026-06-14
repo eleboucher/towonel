@@ -348,9 +348,11 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "${NODE_DIGEST}" ] && [ -n "${AGENT_DIGEST}" ] || { echo "build produced no digest" >&2; exit 1; }
+          # The image digest lives at controllers.main.containers.main.image.digest;
+          # match any indentation so the pin survives values.yaml restructuring.
           pin() {
-            sed -i "s|^  digest: \"\"\$|  digest: \"$2\"|" "charts/$1/values.yaml"
-            grep -q "^  digest: \"$2\"\$" "charts/$1/values.yaml"
+            sed -i "s|^\( *\)digest: \"\"\$|\1digest: \"$2\"|" "charts/$1/values.yaml"
+            grep -q "digest: \"$2\"\$" "charts/$1/values.yaml"
           }
           pin towonel-node "${NODE_DIGEST}"
           pin towonel-agent "${AGENT_DIGEST}"
@@ -363,6 +365,7 @@ jobs:
           : > chart-digests.txt
           for chart in charts/*/; do
             NAME="$(basename "$chart")"
+            helm dependency build "$chart"
             helm package "$chart" --version "${VERSION}" --app-version "${VERSION}"
             OUTPUT="$(helm push "${NAME}-${VERSION}.tgz" "oci://codeberg.org/towonel/charts" 2>&1)"
             echo "$OUTPUT"

@@ -1,64 +1,19 @@
----
+# yaml-language-server: $schema=values.schema.json
 # Default values for towonel-agent — origin-side connector for towonel tunnels.
+#
+# This chart renders via the bjw-s `common` library, but keeps a friendly
+# `agent` config block (plus relayUrl / directConnect / hostNetwork) whose values
+# are derived into the container env, ports, Service and RBAC by templates/_config.tpl
+# before common renders. Everything else uses common's native schema and can be
+# overridden directly (controllers / containers / service / ...).
 
-# -- Number of agent replicas (two give edge-session redundancy).
-replicaCount: 2
+global:
+  # -- Override the chart name used in resource names.
+  nameOverride: ""
+  # -- Override the full release name.
+  fullnameOverride: ""
 
-image:
-  # -- Image repository.
-  repository: codeberg.org/towonel/towonel-agent
-  # -- Image pull policy.
-  pullPolicy: IfNotPresent
-  # -- Overrides the image tag; defaults to the chart appVersion.
-  tag: ""
-  # -- Pin the image by digest (sha256:...); when set, overrides the tag.
-  # The release pipeline fills it with the published image's digest.
-  digest: ""
-
-# -- Image pull secrets for private registries.
-imagePullSecrets: []
-
-# -- Override the chart name used in resource names.
-nameOverride: ""
-# -- Override the full release name.
-fullnameOverride: ""
-
-serviceAccount:
-  # -- Create a ServiceAccount.
-  create: true
-  # -- Automount the API token (off by default: the agent does not talk to the cluster API).
-  automount: false
-  # -- Annotations for the ServiceAccount.
-  annotations: {}
-  # -- ServiceAccount name; generated from the release name if empty.
-  name: ""
-
-# -- Annotations added to the Deployment (e.g. reloader.stakater.com/auto).
-deploymentAnnotations: {}
-
-# -- Annotations added to the pod.
-podAnnotations: {}
-# -- Labels added to the pod.
-podLabels: {}
-
-# -- Pod-level securityContext (runs as non-root uid/gid 10001).
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 10001
-  runAsGroup: 10001
-  fsGroup: 10001
-  seccompProfile:
-    type: RuntimeDefault
-
-# -- Container securityContext (no privilege escalation, read-only root
-# filesystem, drops ALL capabilities).
-securityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  capabilities:
-    drop:
-      - ALL
-
+# Friendly agent configuration (derived into the container env / ports).
 agent:
   # -- Log level (RUST_LOG).
   logLevel: info
@@ -85,93 +40,20 @@ agent:
     # -- Key inside the Secret.
     key: TOWONEL_INVITE_TOKEN
 
-# -- Extra environment variables passed to the container (k8s EnvVar list).
-env: []
-
-# -- Extra envFrom sources.
-envFrom: []
-
-# -- Startup probe (on the named metrics port).
-startupProbe:
-  httpGet:
-    path: /healthz
-    port: metrics
-  initialDelaySeconds: 2
-  periodSeconds: 2
-  failureThreshold: 30
-
-# -- Liveness probe.
-livenessProbe:
-  httpGet:
-    path: /healthz
-    port: metrics
-  initialDelaySeconds: 10
-  periodSeconds: 30
-  timeoutSeconds: 3
-  failureThreshold: 3
-
-# -- Readiness probe.
-readinessProbe:
-  httpGet:
-    path: /healthz
-    port: metrics
-  initialDelaySeconds: 3
-  periodSeconds: 10
-  timeoutSeconds: 3
-  failureThreshold: 3
-
-# -- Pod resource requests/limits.
-resources:
-  requests:
-    cpu: 50m
-    memory: 128Mi
-  limits:
-    memory: 256Mi
-
-# -- Grace period for in-flight streams on shutdown.
-terminationGracePeriodSeconds: 30
-
-# -- Additional volumes on the Deployment.
-volumes: []
-
-# -- Additional volume mounts on the container.
-volumeMounts: []
-
-# -- Node selector for pod scheduling.
-nodeSelector: {}
-
-# -- Tolerations for pod scheduling.
-tolerations: []
-
-# -- Affinity rules for pod scheduling.
-affinity: {}
-
-# Service configuration for the metrics endpoint.
-service:
-  # -- Service type.
-  type: ClusterIP
-  # -- Annotations for the Service.
-  annotations: {}
-
 # -- Relay URL(s), comma-separated (TOWONEL_AGENT_RELAY_URL). Empty uses the hub-advertised relay.
 relayUrl: ""
-
 # -- Reachable local addresses advertised to edges, comma-separated host:port (TOWONEL_AGENT_EXTRA_LOCAL_ADDRS).
 extraLocalAddrs: ""
-
-# -- Run the agent on the host network. Works around pod datapaths that break
-# QUIC UDP sends (e.g. Cilium netkit). dnsPolicy switches to
-# ClusterFirstWithHostNet so cluster-internal origins still resolve.
-hostNetwork: false
-
-# -- Disable UDP segmentation offload (TOWONEL_DISABLE_UDP_GSO). Lighter
-# alternative to hostNetwork for pod datapaths that drop offloaded sends.
+# -- Disable UDP segmentation offload (TOWONEL_DISABLE_UDP_GSO) for pod datapaths
+# that drop offloaded sends.
 disableUdpGso: false
+# -- Run the agent on the host network (workaround for pod datapaths that break
+# QUIC UDP sends). dnsPolicy switches to ClusterFirstWithHostNet.
+hostNetwork: false
 
 # Relay-less direct connectivity: bind a fixed iroh UDP port, expose it as a
 # NodePort, and advertise the node IP + nodePort via autodiscovery (also grants
-# Node/Service read RBAC and mounts the token). The node address must be
-# reachable from the edge.
+# Node/Service read RBAC and mounts the token).
 directConnect:
   # -- Enable relay-less direct connectivity (NodePort + node autodiscovery).
   enabled: false
@@ -185,25 +67,113 @@ directConnect:
   # -- Annotations for the direct (NodePort) Service.
   annotations: {}
 
-monitoring:
-  serviceMonitor:
-    # -- Create a Prometheus Operator ServiceMonitor (requires its CRDs).
-    enabled: false
-    # -- Scrape interval.
-    interval: 30s
-    # -- Scrape timeout.
-    scrapeTimeout: 10s
-    # -- Metrics path.
-    path: /metrics
-    # -- ServiceMonitor labels.
-    labels: {}
-    # -- ServiceMonitor annotations.
-    annotations: {}
-    # -- Prometheus metric relabelings.
-    metricRelabelings: []
-    # -- Prometheus relabelings (applied before scraping).
-    relabelings: []
+# -- Pod-wide defaults applied to every controller.
+defaultPodOptions:
+  enableServiceLinks: false
+  # -- The agent does not talk to the cluster API unless directConnect is enabled.
+  automountServiceAccountToken: false
+  # -- Grace period for in-flight streams on shutdown.
+  terminationGracePeriodSeconds: 30
+  # -- Pod-level securityContext (runs as non-root uid/gid 10001).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
 
+controllers:
+  main:
+    type: deployment
+    # -- Rolling update keeps an agent serving during upgrades (stateless, 2 replicas).
+    strategy: RollingUpdate
+    # -- Number of agent replicas (two give edge-session redundancy).
+    replicas: 2
+    annotations: {}
+    containers:
+      main:
+        image:
+          # -- Image repository.
+          repository: codeberg.org/towonel/towonel-agent
+          # -- Image tag; defaults to the chart appVersion.
+          tag: "{{ .Chart.AppVersion }}"
+          # -- Pin the image by digest (sha256:...); the release pipeline fills it.
+          digest: ""
+          # -- Image pull policy.
+          pullPolicy: IfNotPresent
+        # -- Container securityContext (no privilege escalation, read-only root
+        # filesystem, drops ALL capabilities).
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        # env and ports are derived from the agent config by templates/_config.tpl.
+        probes:
+          startup:
+            enabled: true
+            type: HTTP
+            path: /healthz
+            port: metrics
+            spec:
+              initialDelaySeconds: 2
+              periodSeconds: 2
+              failureThreshold: 30
+          liveness:
+            enabled: true
+            type: HTTP
+            path: /healthz
+            port: metrics
+            spec:
+              initialDelaySeconds: 10
+              periodSeconds: 30
+              timeoutSeconds: 3
+              failureThreshold: 3
+          readiness:
+            enabled: true
+            type: HTTP
+            path: /healthz
+            port: metrics
+            spec:
+              initialDelaySeconds: 3
+              periodSeconds: 10
+              timeoutSeconds: 3
+              failureThreshold: 3
+        # -- Pod resource requests/limits.
+        resources:
+          requests:
+            cpu: 50m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+
+# -- ClusterIP Service exposing the metrics endpoint (port derived from agent.healthPort).
+service:
+  main:
+    controller: main
+    primary: true
+    ports:
+      metrics:
+        port: 9090
+        protocol: TCP
+        targetPort: metrics
+
+# -- Prometheus Operator ServiceMonitor. Disabled by default; set enabled:true
+# (requires the ServiceMonitor CRD).
+serviceMonitor:
+  main:
+    enabled: false
+    endpoints:
+      - port: metrics
+        interval: 30s
+        scrapeTimeout: 10s
+        path: /metrics
+
+# Chart-specific monitoring extras rendered by standalone templates
+# (common has no first-class PrometheusRule/GrafanaDashboard).
+monitoring:
   prometheusRule:
     # -- Create a PrometheusRule with the agent alerting rules.
     enabled: false
@@ -235,5 +205,3 @@ monitoring:
       resyncPeriod: "10m"
       # -- Selector labels for the Grafana instance. Must be set when enabled.
       matchLabels: {}
-      # matchLabels:
-      #   dashboards: grafana

@@ -1,27 +1,21 @@
-suite: service
+suite: agent service
 templates:
-  - service.yaml
+  - common.yaml.tpl
 tests:
-  - it: should expose the metrics port
+  - it: renders a ClusterIP Service exposing the metrics port
+    documentSelector:
+      path: kind
+      value: Service
     asserts:
       - isKind:
           of: Service
+      - equal:
+          path: spec.type
+          value: ClusterIP
       - contains:
           path: spec.ports
           content:
             name: metrics
             port: 9090
-            targetPort: metrics
             protocol: TCP
-
-  - it: should follow a custom health port
-    set:
-      agent.healthPort: 9999
-    asserts:
-      - contains:
-          path: spec.ports
-          content:
-            name: metrics
-            port: 9999
             targetPort: metrics
-            protocol: TCP

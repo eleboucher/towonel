@@ -2,10 +2,10 @@
 apiVersion: grafana.integreatly.org/v1beta1
 kind: GrafanaDashboard
 metadata:
-  name: {{ include "towonel-node.fullname" . }}-dashboard
+  name: {{ include "bjw-s.common.lib.chart.names.fullname" . }}-dashboard
   namespace: {{ .Values.monitoring.dashboards.namespace | default .Release.Namespace }}
   labels:
-    {{- include "towonel-node.labels" . | nindent 4 }}
+    {{- include "bjw-s.common.lib.metadata.allLabels" . | nindent 4 }}
 spec:
   allowCrossNamespaceImport: {{ .Values.monitoring.dashboards.grafanaOperator.allowCrossNamespaceImport }}
   resyncPeriod: {{ .Values.monitoring.dashboards.grafanaOperator.resyncPeriod | default "10m" | quote }}
@@ -20,6 +20,6 @@ spec:
       {{- fail "monitoring.dashboards.grafanaOperator.matchLabels must be set when grafanaOperator is enabled" }}
     {{- end }}
   configMapRef:
-    name: {{ include "towonel-node.fullname" . }}-dashboard
+    name: {{ include "bjw-s.common.lib.chart.names.fullname" . }}-dashboard
     key: towonel-node.json
 {{- end }}

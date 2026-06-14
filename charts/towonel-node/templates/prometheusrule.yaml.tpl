@@ -1,11 +1,11 @@
-{{- if and .Values.monitoring.prometheusRule.enabled .Values.hub.enabled }}
+{{- if .Values.monitoring.prometheusRule.enabled }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: {{ include "towonel-node.fullname" . }}
+  name: {{ include "bjw-s.common.lib.chart.names.fullname" . }}
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "towonel-node.labels" . | nindent 4 }}
+    {{- include "bjw-s.common.lib.metadata.allLabels" . | nindent 4 }}
     {{- with .Values.monitoring.prometheusRule.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

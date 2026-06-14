@@ -1,216 +1,134 @@
----
+# yaml-language-server: $schema=values.schema.json
 # Default values for towonel-node — the towonel hub/edge node.
 #
-# One towonel-node process can run the hub control plane, the public edge,
-# or both (hub.enabled / edge.enabled) — both by default, the single-node
-# topology. The chart derives the workload kind, networking, listeners,
-# probes and resource defaults from the enabled roles: hub-only renders a
-# Deployment; an enabled edge renders a hostNetwork DaemonSet that binds
-# the public 443/80 listeners directly on each node.
+# This chart renders via the bjw-s `common` library, but keeps a friendly
+# hub/edge config block whose values are derived into the workload kind, role
+# env, listeners, container/Service ports, probes, resources, securityContext,
+# hostNetwork and data volume by templates/_config.tpl before common renders.
+# App-level config (DB DSN, public URLs, OIDC, OTEL), envFrom, persistence and
+# scheduling use common's native schema and can be set directly.
+#
+# Defaults enable both roles (the single-node topology): an enabled edge renders
+# a hostNetwork DaemonSet binding the public 443/80 listeners; hub-only renders a
+# Deployment. Split the roles by disabling one of hub.enabled / edge.enabled.
+
+global:
+  # -- Override the chart name used in resource names.
+  nameOverride: ""
+  # -- Override the full release name.
+  fullnameOverride: ""
 
 hub:
   # -- Run the hub control plane (TOWONEL_HUB_ENABLED).
   enabled: true
-  # -- Port the user/operator HTTP API listens on (TOWONEL_HUB_LISTEN_ADDR).
+  # -- Port the user/operator HTTP API listens on.
   apiPort: 8443
-  # -- Port edges dial for the hub link (TOWONEL_HUB_LINK_LISTEN_ADDR).
+  # -- Port edges dial for the hub link.
   linkPort: 51444
-  # -- Port serving hub health and Prometheus metrics (TOWONEL_HUB_HEALTH_LISTEN_ADDR).
+  # -- Port serving hub health and Prometheus metrics.
   metricsPort: 9091
 
 edge:
   # -- Run the public edge (TOWONEL_EDGE_ENABLED). Switches the workload to a
   # hostNetwork DaemonSet; pin it to the right nodes with nodeSelector/affinity.
   enabled: true
-  # -- Bind address for the public TLS and plain-HTTP listeners.
-  # "[::]" is dual-stack: serves both IPv4 + IPv6.
+  # -- Bind address for the public TLS and plain-HTTP listeners. "[::]" is dual-stack.
   bindAddress: "[::]"
   # -- Bind address for the edge health/metrics listener.
   healthBindAddress: 0.0.0.0
-  # -- Public TLS port (TOWONEL_EDGE_LISTEN_ADDR).
+  # -- Public TLS port.
   httpsPort: 443
-  # -- Plain HTTP port for ACME HTTP-01 and redirects (TOWONEL_EDGE_HTTP_LISTEN_ADDR).
+  # -- Plain HTTP port for ACME HTTP-01 and redirects.
   httpPort: 80
-  # -- Port serving edge health and Prometheus metrics (TOWONEL_EDGE_HEALTH_LISTEN_ADDR).
+  # -- Port serving edge health and Prometheus metrics.
   metricsPort: 9090
   # -- Data directory backed by an emptyDir volume (TOWONEL_DATA_DIR).
   dataDir: /data
 
-image:
-  # -- Image repository.
-  repository: codeberg.org/towonel/towonel-node
-  # -- Image pull policy.
-  pullPolicy: IfNotPresent
-  # -- Overrides the image tag; defaults to the chart appVersion.
-  tag: ""
-  # -- Pin the image by digest (sha256:...); when set, overrides the tag.
-  # The release pipeline fills it with the published image's digest.
-  digest: ""
-
-# -- Image pull secrets for private registries.
-imagePullSecrets: []
-# - name: my-registry-secret
-
-# -- Override the chart name used in resource names.
-nameOverride: ""
-# -- Override the full release name.
-fullnameOverride: ""
-
-serviceAccount:
-  # -- Create a ServiceAccount.
-  create: true
-  # -- Automount the API token (off by default: the node does not talk to the cluster API).
-  automount: false
-  # -- Annotations for the ServiceAccount.
-  annotations: {}
-  # -- ServiceAccount name; generated from the release name if empty.
-  name: ""
-
 workload:
-  # -- Workload kind: Deployment or DaemonSet. Empty picks the role default
-  # (DaemonSet when the edge is enabled, Deployment otherwise).
+  # -- Workload kind: deployment or daemonset. Empty picks the role default
+  # (daemonset when the edge is enabled, deployment otherwise).
   kind: ""
-  # -- Annotations added to the workload (e.g. reloader.stakater.com/auto).
-  annotations: {}
+  # -- Deployment update strategy (hub-only). Empty defaults to Recreate, because
+  # the hub is active/passive: a surged pod only passes /v1/readyz once it wins
+  # the Postgres advisory lock the old leader holds, so the old pod must
+  # terminate first. RollingUpdate (maxUnavailable:0) would deadlock the rollout.
+  strategy: ""
 
-# -- Number of replicas (Deployment only; only one hub replica is the active leader).
-replicaCount: 1
+# -- Pod-wide defaults applied to every controller. hostNetwork + dnsPolicy are
+# set automatically when the edge is enabled.
+defaultPodOptions:
+  enableServiceLinks: false
+  # -- The node does not talk to the cluster API.
+  automountServiceAccountToken: false
+  # -- Grace period for in-flight connections on shutdown.
+  terminationGracePeriodSeconds: 30
+  # -- Pod-level securityContext: non-root uid/gid 10001. The edge binds its
+  # privileged host ports (443/80) as this non-root user via the binary's file
+  # capabilities, so it never runs as root.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
 
-# -- Update strategy (DaemonSet only).
-updateStrategy: {}
-# updateStrategy:
-#   type: RollingUpdate
-#   rollingUpdate:
-#     maxUnavailable: 1
-
-# -- Deployment update strategy (hub-only). Empty defaults to Recreate, because
-# the hub is active/passive: a surged pod can only pass /v1/readyz once it wins
-# the Postgres advisory lock the old leader holds, so the old pod must terminate
-# first. The default RollingUpdate (maxUnavailable:0) deadlocks the rollout.
-strategy: {}
-# strategy:
-#   type: RollingUpdate
-#   rollingUpdate:
-#     maxSurge: 0
-#     maxUnavailable: 1
-
-# -- DNS policy. Empty picks the role default (ClusterFirstWithHostNet when
-# the edge is enabled, ClusterFirst otherwise).
-dnsPolicy: ""
-
-# -- Annotations added to the pod.
-podAnnotations: {}
-# -- Labels added to the pod.
-podLabels: {}
-
-# -- Pod-level securityContext. Empty picks the role default: non-root
-# uid/gid 10001 for both roles. The edge binds its privileged host ports
-# (443/80) as this non-root user via the binary's file capabilities.
-podSecurityContext: {}
-
-# -- Container securityContext (read-only root filesystem, drops ALL
-# capabilities, keeps NET_BIND_SERVICE for the edge's privileged listeners).
-# allowPrivilegeEscalation:false is dropped automatically when the edge is
-# enabled — NoNewPrivs would block the file-cap bind of 443/80.
-securityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  capabilities:
-    drop:
-      - ALL
-    add:
-      - NET_BIND_SERVICE
-
-# -- Extra environment variables passed to the container (k8s EnvVar list).
-# Deployment-specific configuration (DB DSN, public URLs, region, OTEL) goes here.
-env: []
-# - name: TOWONEL_HUB_DB_DRIVER
-#   value: postgres
-# - name: TOWONEL_EDGE_REGION
-#   value: EU
-# - name: TOWONEL_EDGE_HUB_LINK_ADDR
-#   value: towonel-node.towonel.svc.cluster.local:51444
-
-# -- Extra envFrom sources (e.g. secrets created by ExternalSecret).
-envFrom: []
-# - secretRef:
-#     name: towonel-secret
-
-# -- Startup probe. Empty picks the role default (/health on the edge-metrics
-# port when the edge is enabled, /v1/health on hub-api otherwise).
-startupProbe: {}
-
-# -- Liveness probe. Empty picks the role default (see startupProbe).
-livenessProbe: {}
-
-# -- Readiness probe. Empty picks the role default (/health on edge-metrics
-# when the edge is enabled, /v1/readyz on hub-api otherwise).
-readinessProbe: {}
-
-# -- Pod resource requests/limits. Empty picks the role default:
-# 500m/256Mi requests + 2Gi limit when the edge is enabled,
-# 100m/256Mi requests + 512Mi limit otherwise.
-resources: {}
-
-# -- Grace period for in-flight connections on shutdown.
-terminationGracePeriodSeconds: 30
-
-# -- Additional volumes on the workload (e.g. postgres client certificates).
-volumes: []
-# - name: postgres-certs
-#   secret:
-#     secretName: postgres-towonel-hub-cert
-#     defaultMode: 0600
-
-# -- Additional volume mounts on the container.
-volumeMounts: []
-# - name: postgres-certs
-#   mountPath: /var/run/secrets/postgresql
-
-# -- Node selector for pod scheduling.
-nodeSelector: {}
-# nodeSelector:
-#   towonel.dev/region: na
-
-# -- Tolerations for pod scheduling.
-tolerations: []
-# - operator: Exists
-
-# -- Affinity rules for pod scheduling.
-affinity: {}
-
-# Service configuration. Ports follow the enabled roles' listener ports.
-service:
-  # -- Create a Service for the enabled listeners.
-  enabled: true
-  # -- Service type.
-  type: ClusterIP
-  # -- Annotations for the Service.
-  annotations: {}
-
-monitoring:
-  serviceMonitor:
-    # -- Create a Prometheus Operator ServiceMonitor with an endpoint per
-    # enabled role (requires its CRDs).
-    enabled: false
-    # -- Scrape interval.
-    interval: 30s
-    # -- Scrape timeout.
-    scrapeTimeout: 10s
-    # -- Metrics path.
-    path: /metrics
-    # -- ServiceMonitor labels.
-    labels: {}
-    # -- ServiceMonitor annotations.
+controllers:
+  main:
+    # type and strategy are derived from the hub/edge roles by _config.tpl.
+    # -- Replicas (Deployment only; only one hub replica is the active leader).
+    replicas: 1
     annotations: {}
-    # -- Prometheus metric relabelings.
-    metricRelabelings: []
-    # -- Prometheus relabelings (applied before scraping).
-    relabelings: []
+    containers:
+      main:
+        image:
+          # -- Image repository.
+          repository: codeberg.org/towonel/towonel-node
+          # -- Image tag; defaults to the chart appVersion.
+          tag: "{{ .Chart.AppVersion }}"
+          # -- Pin the image by digest (sha256:...); the release pipeline fills it.
+          digest: ""
+          # -- Image pull policy.
+          pullPolicy: IfNotPresent
+        # -- Container securityContext (read-only root filesystem, drops ALL
+        # capabilities, keeps NET_BIND_SERVICE for privileged listeners).
+        # allowPrivilegeEscalation is dropped automatically when the edge is
+        # enabled — NoNewPrivs would block the file-cap bind of 443/80.
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+            add:
+              - NET_BIND_SERVICE
+        # env, ports, probes and resources are derived from the hub/edge roles.
+        # App config (DB DSN, public URLs, OIDC, OTEL) merges in here as a map:
+        # env:
+        #   TOWONEL_HUB_DB_DRIVER: postgres
+        envFrom: []
+        # - secretRef:
+        #     name: towonel-hub-secret
 
+# -- Service exposing the enabled listeners (ports derived from the roles).
+service:
+  main:
+    controller: main
+    primary: true
+    type: ClusterIP
+
+# -- Prometheus Operator ServiceMonitor. Disabled by default; set enabled:true
+# (requires the ServiceMonitor CRD). Endpoints are derived from the enabled roles.
+serviceMonitor:
+  main:
+    enabled: false
+
+# Chart-specific monitoring extras rendered by standalone templates
+# (common has no first-class PrometheusRule/GrafanaDashboard).
+monitoring:
   prometheusRule:
-    # -- Create a PrometheusRule with the hub alerting rules
-    # (rendered only when the hub is enabled).
+    # -- Create a PrometheusRule with the hub alerting rules.
     enabled: false
     # -- PrometheusRule annotations.
     annotations: {}
@@ -240,5 +158,3 @@ monitoring:
       resyncPeriod: "10m"
       # -- Selector labels for the Grafana instance. Must be set when enabled.
       matchLabels: {}
-      # matchLabels:
-      #   dashboards: grafana

@@ -1,10 +1,8 @@
-{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as Deployment {{ include "towonel-agent.fullname" . }} ({{ .Values.replicaCount }} replicas).
+{{ .Chart.Name }} {{ .Chart.AppVersion }} deployed as Deployment {{ include "bjw-s.common.lib.chart.names.fullname" . }} ({{ .Values.controllers.main.replicas }} replicas).
 
-{{- if not .Values.agent.inviteTokenSecret.name }}
-
-WARNING: agent.inviteTokenSecret.name is not set; without an invite token
-the agent cannot register with the hub.
-{{- end }}
+Set the invite token (TOWONEL_INVITE_TOKEN) and the tunnel services
+(TOWONEL_AGENT_SERVICES / _TCP_SERVICES / _UDP_SERVICES) via the container env;
+without an invite token the agent cannot register with the hub.
 
 Values reference:
 https://codeberg.org/towonel/towonel/src/branch/main/charts/towonel-agent/README.md
