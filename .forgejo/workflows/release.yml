@@ -362,6 +362,7 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
+          helm repo add bjw-s https://bjw-s-labs.github.io/helm-charts
           : > chart-digests.txt
           for chart in charts/*/; do
             NAME="$(basename "$chart")"
