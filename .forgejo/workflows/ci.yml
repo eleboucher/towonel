@@ -137,6 +137,7 @@ jobs:
       - name: Build chart dependencies
         run: |
           set -euo pipefail
+          helm repo add bjw-s https://bjw-s-labs.github.io/helm-charts
           for chart in charts/*/; do
             helm dependency build "$chart"
           done
