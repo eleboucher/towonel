@@ -603,6 +603,11 @@ async fn session_prune_loop(state: Arc<api::AppState>) {
             Ok(_) => {}
             Err(e) => tracing::warn!(error = %e, "session prune failed"),
         }
+        match state.db.prune_expired_login_challenges(now).await {
+            Ok(n) if n > 0 => tracing::debug!(pruned = n, "pruned expired login challenges"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "login challenge prune failed"),
+        }
     }
 }
 
