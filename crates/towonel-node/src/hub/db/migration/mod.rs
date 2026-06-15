@@ -33,6 +33,9 @@ pub struct Migrator;
 
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
+    // Apply order is Vec position, not the timestamp in each module name; some
+    // entries are deliberately out of timestamp order (tenants_table_with_fk
+    // runs after the June migrations). Append at the end; never reorder.
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
             Box::new(m20260422_000000_initial::Migration),
