@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -17,9 +17,11 @@ impl MigrationTrait for Migration {
             ));
         }
 
-        normalize_users(db, backend).await?;
-        normalize_signup_invites(db, backend).await?;
-        normalize_oauth_identity_emails(db, backend).await?;
+        let txn = db.begin().await?;
+        normalize_users(&txn, backend).await?;
+        normalize_signup_invites(&txn, backend).await?;
+        normalize_oauth_identity_emails(&txn, backend).await?;
+        txn.commit().await?;
         Ok(())
     }
 
