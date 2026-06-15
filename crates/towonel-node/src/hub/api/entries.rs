@@ -13,10 +13,11 @@ use towonel_common::time::now_ms;
 use super::super::db::port_reservations::PortProtocol;
 use super::super::metrics::reject_reason;
 use super::{
-    AppState, PROTOCOL_VERSION, Pagination, apply_port_index_delta, cbor_response, error_response,
-    hostname_not_owned, internal_error, invalid_request, invalid_signature, json_ok, json_ok_paged,
-    paginate, remove_tenant_from_port_index, sequence_conflict, tenant_not_allowed,
-    trigger_route_rebuild, unsupported_op, unsupported_version,
+    AppState, MAX_CLOCK_SKEW_MS, PROTOCOL_VERSION, Pagination, apply_port_index_delta,
+    cbor_response, constant_time_eq, error_response, hostname_not_owned, internal_error,
+    invalid_request, invalid_signature, json_ok, json_ok_paged, paginate,
+    remove_tenant_from_port_index, sequence_conflict, tenant_not_allowed, trigger_route_rebuild,
+    unauthorized, unsupported_op, unsupported_version,
 };
 
 #[derive(Serialize)]
@@ -405,14 +406,56 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
     })
 }
 
+/// `Some(rejection)` when the caller may not read tenant `tenant_id`'s
+/// entries, `None` otherwise. Accepts the operator API key (`Bearer`) or an
+/// ML-DSA signature proving possession of the tenant key (`Signature`).
+fn authorize_tenant_read(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    tenant_id: &TenantId,
+) -> Option<Response> {
+    let Some(auth) = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return Some(unauthorized("missing Authorization header"));
+    };
+
+    if let Some(token) = auth.strip_prefix("Bearer ")
+        && constant_time_eq(token.as_bytes(), state.operator_api_key.as_bytes())
+    {
+        return None;
+    }
+
+    let policy = state.policy.load();
+    match towonel_common::auth::verify_tenant_request_header(
+        auth,
+        towonel_common::auth::TENANT_REQUEST_AUTH_DOMAIN,
+        towonel_common::time::now_ms(),
+        MAX_CLOCK_SKEW_MS,
+        |tid| policy.pq_public_key(tid).cloned(),
+    ) {
+        Ok(signer) if &signer == tenant_id => None,
+        Ok(_) => Some(unauthorized(
+            "signature tenant does not match requested tenant",
+        )),
+        Err(msg) => Some(unauthorized(msg)),
+    }
+}
+
 pub(super) async fn get_tenant_entries(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
     let tenant_id: TenantId = match id.parse() {
         Ok(t) => t,
         Err(e) => return invalid_request(format!("invalid tenant_id: {e}")),
     };
+
+    if let Some(resp) = authorize_tenant_read(&state, &headers, &tenant_id) {
+        return resp;
+    }
 
     let entries = match state.db.get_entries(&tenant_id).await {
         Ok(v) => v,

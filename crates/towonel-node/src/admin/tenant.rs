@@ -92,7 +92,7 @@ pub async fn cmd_tenant_leave(
     let tenant_id = keypair.id();
     let pq_pubkey = keypair.public_key();
 
-    let entries = fetch_entries(&hub_url, &tenant_id).await?;
+    let entries = fetch_entries(&hub_url, &keypair).await?;
     let mut latest_seq = 0u64;
     let mut owned_hostnames: std::collections::HashSet<String> =
         std::collections::HashSet::default();

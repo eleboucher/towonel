@@ -1953,7 +1953,17 @@ async fn upsert_agent_is_idempotent() {
 
     // Verify only one UpsertAgent entry was inserted
     let entries_url = format!("{}/v1/tenants/{}/entries", hub.base_url, tenant.id());
-    let resp = client.get(&entries_url).send().await.unwrap();
+    let auth = towonel_common::auth::sign_tenant_request_header(
+        &tenant,
+        towonel_common::auth::TENANT_REQUEST_AUTH_DOMAIN,
+        towonel_common::time::now_ms(),
+    );
+    let resp = client
+        .get(&entries_url)
+        .header(reqwest::header::AUTHORIZATION, auth)
+        .send()
+        .await
+        .unwrap();
     let entries: Vec<SignedConfigEntry> =
         ciborium::from_reader(resp.bytes().await.unwrap().as_ref()).unwrap();
 
@@ -1968,6 +1978,71 @@ async fn upsert_agent_is_idempotent() {
     assert_eq!(
         upsert_agent_count, 1,
         "only one UpsertAgent entry should be in the database"
+    );
+}
+
+#[tokio::test]
+async fn get_tenant_entries_requires_tenant_signature_or_operator_key() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "auth-tenant", &["a.auth.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let url = format!("{}/v1/tenants/{}/entries", hub.base_url, tenant.id());
+
+    // Unauthenticated: rejected (the whole point — tenant_id is public).
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "unauthenticated entries read must be rejected"
+    );
+
+    // Operator key: accepted.
+    let resp = client
+        .get(&url)
+        .bearer_auth(OPERATOR_KEY)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "operator key should be accepted");
+
+    // Valid tenant signature: accepted.
+    let auth = towonel_common::auth::sign_tenant_request_header(
+        &tenant,
+        towonel_common::auth::TENANT_REQUEST_AUTH_DOMAIN,
+        towonel_common::time::now_ms(),
+    );
+    let resp = client
+        .get(&url)
+        .header(reqwest::header::AUTHORIZATION, auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "valid tenant signature should be accepted"
+    );
+
+    // Another tenant's (valid) signature must not read this tenant's entries.
+    let other = create_invite(&hub, &client, "other-tenant", &["b.other.test"]).await;
+    let other_kp = tenant_from_token(&other);
+    let bad = towonel_common::auth::sign_tenant_request_header(
+        &other_kp,
+        towonel_common::auth::TENANT_REQUEST_AUTH_DOMAIN,
+        towonel_common::time::now_ms(),
+    );
+    let resp = client
+        .get(&url)
+        .header(reqwest::header::AUTHORIZATION, bad)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        401,
+        "a different tenant's signature must not read this tenant"
     );
 }
 

@@ -108,8 +108,14 @@ pub async fn fetch_latest_sequence(
         hub_url.trim_end_matches('/'),
         kp.id(),
     );
+    let auth = towonel_common::auth::sign_tenant_request_header(
+        kp,
+        towonel_common::auth::TENANT_REQUEST_AUTH_DOMAIN,
+        towonel_common::time::now_ms(),
+    );
     let resp = client
         .get(&url)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .headers(towonel_common::telemetry::trace_headers())
         .send()
         .await

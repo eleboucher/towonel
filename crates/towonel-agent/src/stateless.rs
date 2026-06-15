@@ -400,9 +400,15 @@ async fn fetch_tenant_entries(ctx: &BootstrapContext) -> anyhow::Result<Vec<Sign
         ctx.hub_url.trim_end_matches('/'),
         ctx.tenant_kp.id(),
     );
+    let auth = towonel_common::auth::sign_tenant_request_header(
+        &ctx.tenant_kp,
+        towonel_common::auth::TENANT_REQUEST_AUTH_DOMAIN,
+        towonel_common::time::now_ms(),
+    );
     let resp = ctx
         .client
         .get(&url)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .send()
         .await
         .with_context(|| format!("failed to GET {url}"))?;

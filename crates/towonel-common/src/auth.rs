@@ -8,6 +8,10 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 
+use crate::identity::{
+    PQ_SIGNATURE_LEN, PqPublicKey, TenantId, TenantKeypair, verify_pq_signature,
+};
+
 /// Lowercase hex of `blake3(body)`.
 ///
 /// Used as the body-binding segment of the signed message so a captured
@@ -71,6 +75,70 @@ pub fn sign_auth_header<S: AuthSigner>(
     format!("Signature {node_id_hex}.{ts_ms}.{}", B64.encode(sig))
 }
 
+/// Auth domain for read-only tenant requests, signed with the tenant's
+/// ML-DSA key.
+///
+/// Used by `GET` tenant entries. Distinct from the ed25519 transport domains
+/// so a signature can't be replayed across schemes.
+pub const TENANT_REQUEST_AUTH_DOMAIN: &str = "towonel/tenant-request/v1";
+
+/// Canonical message a tenant-request signature covers:
+/// `"<domain>/<tenant_id_hex>/<ts_ms>"`. Read-only GETs carry no body.
+fn tenant_request_message(domain: &str, tenant_id: &TenantId, ts_ms: u64) -> String {
+    format!("{domain}/{tenant_id}/{ts_ms}")
+}
+
+/// Build `Authorization: Signature <tenant_id_hex>.<ts_ms>.<sig_b64>` proving
+/// possession of the tenant's ML-DSA key, for a read-only tenant request.
+#[must_use]
+pub fn sign_tenant_request_header(kp: &TenantKeypair, domain: &str, ts_ms: u64) -> String {
+    let tenant_id = kp.id();
+    let message = tenant_request_message(domain, &tenant_id, ts_ms);
+    let sig = kp.sign(message.as_bytes());
+    format!("Signature {tenant_id}.{ts_ms}.{}", B64.encode(sig))
+}
+
+/// Parse and verify a tenant-signed request header, returning the
+/// authenticated `TenantId`.
+///
+/// `lookup` resolves the tenant's ML-DSA public key (`None` ⇒ unknown tenant).
+/// Freshness-only (no nonce cache): fine for an idempotent read where a replay
+/// just re-reads authorized data.
+pub fn verify_tenant_request_header(
+    header_value: &str,
+    domain: &str,
+    now_ms_val: u64,
+    max_skew_ms: u64,
+    lookup: impl FnOnce(&TenantId) -> Option<PqPublicKey>,
+) -> Result<TenantId, &'static str> {
+    let rest = header_value
+        .strip_prefix("Signature ")
+        .ok_or("Authorization must be `Signature <tenant_id>.<ts>.<sig>`")?;
+    let mut parts = rest.splitn(3, '.');
+    let tenant_hex = parts.next().ok_or("missing tenant_id segment")?;
+    let ts_str = parts.next().ok_or("missing timestamp segment")?;
+    let sig_b64 = parts.next().ok_or("missing signature segment")?;
+
+    let tenant_id: TenantId = tenant_hex
+        .parse()
+        .map_err(|_e| "tenant_id is not 32 hex bytes")?;
+    let ts_ms: u64 = ts_str.parse().map_err(|_e| "timestamp is not a u64")?;
+    if now_ms_val.abs_diff(ts_ms) > max_skew_ms {
+        return Err("timestamp outside freshness window");
+    }
+    let sig: [u8; PQ_SIGNATURE_LEN] = B64
+        .decode(sig_b64)
+        .map_err(|_e| "signature is not base64url")?
+        .try_into()
+        .map_err(|_e| "signature has wrong length")?;
+    let pubkey = lookup(&tenant_id).ok_or("unknown tenant")?;
+    let message = tenant_request_message(domain, &tenant_id, ts_ms);
+    if !verify_pq_signature(&pubkey, message.as_bytes(), &sig) {
+        return Err("signature does not verify");
+    }
+    Ok(tenant_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,5 +170,52 @@ mod tests {
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0].len(), 64);
         assert_eq!(parts[1], "42");
+    }
+
+    #[test]
+    fn tenant_request_round_trip_and_rejections() {
+        let kp = TenantKeypair::generate();
+        let pubkey = kp.public_key().clone();
+        let header = sign_tenant_request_header(&kp, TENANT_REQUEST_AUTH_DOMAIN, 1000);
+
+        // Valid signature within the freshness window verifies to the signer.
+        let id =
+            verify_tenant_request_header(&header, TENANT_REQUEST_AUTH_DOMAIN, 1000, 60_000, |_| {
+                Some(pubkey.clone())
+            })
+            .expect("valid signature should verify");
+        assert_eq!(id, kp.id());
+
+        // Stale timestamp rejected.
+        verify_tenant_request_header(
+            &header,
+            TENANT_REQUEST_AUTH_DOMAIN,
+            1000 + 120_000,
+            60_000,
+            |_| Some(pubkey.clone()),
+        )
+        .unwrap_err();
+
+        // Wrong domain rejected (signature covers the domain).
+        verify_tenant_request_header(&header, "towonel/other/v1", 1000, 60_000, |_| {
+            Some(pubkey.clone())
+        })
+        .unwrap_err();
+
+        // Unknown tenant (lookup miss) rejected.
+        verify_tenant_request_header(&header, TENANT_REQUEST_AUTH_DOMAIN, 1000, 60_000, |_| None)
+            .unwrap_err();
+
+        // A different key's signature does not verify against this pubkey.
+        let other = TenantKeypair::generate();
+        let other_header = sign_tenant_request_header(&other, TENANT_REQUEST_AUTH_DOMAIN, 1000);
+        verify_tenant_request_header(
+            &other_header,
+            TENANT_REQUEST_AUTH_DOMAIN,
+            1000,
+            60_000,
+            |_| Some(pubkey.clone()),
+        )
+        .unwrap_err();
     }
 }

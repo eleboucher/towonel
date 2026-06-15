@@ -10,14 +10,21 @@ use super::{CBOR_CONTENT_TYPE, check_response, resolve_hub_url, resolve_tenant_k
 
 pub async fn fetch_entries(
     hub_url: &str,
-    tenant_id: &towonel_common::identity::TenantId,
+    keypair: &TenantKeypair,
 ) -> anyhow::Result<Vec<SignedConfigEntry>> {
+    let tenant_id = keypair.id();
     let url = format!(
         "{}/v1/tenants/{tenant_id}/entries",
         hub_url.trim_end_matches('/')
     );
+    let auth = towonel_common::auth::sign_tenant_request_header(
+        keypair,
+        towonel_common::auth::TENANT_REQUEST_AUTH_DOMAIN,
+        now_ms(),
+    );
     let resp = reqwest::Client::new()
         .get(&url)
+        .header(reqwest::header::AUTHORIZATION, auth)
         .header(reqwest::header::ACCEPT, CBOR_CONTENT_TYPE)
         .send()
         .await
@@ -71,10 +78,9 @@ pub async fn cmd_entry_submit(
     let hub_url = resolve_hub_url(hub_url);
     let key_path = resolve_tenant_key_path(key_path)?;
     let keypair = load_tenant_keypair(&key_path)?;
-    let tenant_id = keypair.id();
     let pq_pubkey = keypair.public_key();
 
-    let latest_seq = fetch_entries(&hub_url, &tenant_id)
+    let latest_seq = fetch_entries(&hub_url, &keypair)
         .await
         .unwrap_or_default()
         .iter()
@@ -126,7 +132,7 @@ pub async fn cmd_entry_list(
     let tenant_id = keypair.id();
     let pq_pubkey = keypair.public_key();
 
-    let entries = fetch_entries(&hub_url, &tenant_id).await?;
+    let entries = fetch_entries(&hub_url, &keypair).await?;
 
     if entries.is_empty() {
         println!("No entries found for tenant {tenant_id}");

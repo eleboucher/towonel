@@ -92,7 +92,13 @@ impl OpsClient {
             self.base.trim_end_matches('/'),
             tenant_id
         );
-        let resp = self.http.get(&url).send().await?;
+        // Entries reads now require auth; operators read with the operator key.
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await?;
         let status = resp.status();
         let body = resp.bytes().await?;
         if !status.is_success() {
