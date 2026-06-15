@@ -190,6 +190,18 @@ impl EdgeMetrics {
         map.get_or_insert_with(*tenant, || counters.clone()).clone()
     }
 
+    /// Drop a tenant's per-tenant series so tenant churn doesn't grow metric
+    /// cardinality without bound. Called when a tenant's last session ends.
+    pub fn evict_tenant(&self, tenant: &TenantId) {
+        let t = tenant.to_string();
+        // Err just means the label was never created; ignore it.
+        _ = self.tenant_active_sessions.remove_label_values(&[&t]);
+        _ = self.tenant_bytes.remove_label_values(&[&t, "in"]);
+        _ = self.tenant_bytes.remove_label_values(&[&t, "out"]);
+        _ = self.tenant_connections_total.remove_label_values(&[&t]);
+        self.tenant_children.pin().remove(tenant);
+    }
+
     /// Record forwarded bytes against the tenant's series. Call once per
     /// connection, not per chunk.
     pub fn record_tenant_bytes(&self, tenant: &TenantId, bytes_in: u64, bytes_out: u64) {

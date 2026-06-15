@@ -124,26 +124,35 @@ impl SessionRegistry {
         }
     }
 
-    /// Release an iroh connection slot for the tenant.
+    /// Release an iroh connection slot for the tenant. Callers hold the
+    /// membership lock, so the zero-transition cleanup races nothing.
     fn release_iroh(&self, tenant_id: &TenantId) {
-        if let Some(counter) = self.iroh_per_tenant.pin().get(tenant_id) {
-            let mut current = counter.load(Ordering::Relaxed);
-            while current > 0 {
-                match counter.compare_exchange_weak(
-                    current,
-                    current - 1,
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => {
-                        self.metrics
-                            .tenant_active_sessions
-                            .with_label_values(&[&tenant_id.to_string()])
-                            .dec();
-                        return;
+        let map = self.iroh_per_tenant.pin();
+        let Some(counter) = map.get(tenant_id) else {
+            return;
+        };
+        let mut current = counter.load(Ordering::Relaxed);
+        while current > 0 {
+            match counter.compare_exchange_weak(
+                current,
+                current - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    self.metrics
+                        .tenant_active_sessions
+                        .with_label_values(&[&tenant_id.to_string()])
+                        .dec();
+                    // Last slot: drop the counter and the tenant's metric
+                    // labels so churn doesn't leak entries.
+                    if current - 1 == 0 {
+                        map.remove(tenant_id);
+                        self.metrics.evict_tenant(tenant_id);
                     }
-                    Err(observed) => current = observed,
+                    return;
                 }
+                Err(observed) => current = observed,
             }
         }
     }
