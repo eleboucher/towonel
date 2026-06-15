@@ -46,8 +46,14 @@ impl MigrationTrait for Migration {
                 ))
                 .await?;
             }
-            _ => {
-                return Err(DbErr::Migration("irreversible on this backend".to_string()));
+            // SQLite (the primary backend) has no `ALTER COLUMN DROP DEFAULT`;
+            // dropping it would need a full table rebuild. The leftover
+            // `DEFAULT 'EU'` is benign and the up() NULL→'EU' backfill is
+            // irreversible regardless, so down() is a no-op here rather than a
+            // hard error that would break `migrate down` on the main backend.
+            DatabaseBackend::Sqlite => {}
+            DatabaseBackend::MySql => {
+                return Err(DbErr::Migration("unsupported backend".to_string()));
             }
         }
 
