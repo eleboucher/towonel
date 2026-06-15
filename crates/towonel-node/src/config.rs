@@ -91,6 +91,26 @@ pub fn redact_db_url(url: &str) -> String {
     if parsed.password().is_some() {
         _ = parsed.set_password(Some("***"));
     }
+    // libpq DSNs also accept the password as a query param (?password=,
+    // ?sslpassword=); scrub those too.
+    if parsed.query().is_some() {
+        const SECRET_QUERY_KEYS: &[&str] = &["password", "sslpassword"];
+        let scrubbed: Vec<(String, String)> = parsed
+            .query_pairs()
+            .map(|(k, v)| {
+                let value = if SECRET_QUERY_KEYS.iter().any(|s| k.eq_ignore_ascii_case(s)) {
+                    "***".to_string()
+                } else {
+                    v.into_owned()
+                };
+                (k.into_owned(), value)
+            })
+            .collect();
+        let mut serializer = parsed.query_pairs_mut();
+        serializer.clear();
+        serializer.extend_pairs(scrubbed);
+        drop(serializer);
+    }
     parsed.to_string()
 }
 
@@ -1082,6 +1102,29 @@ fn parse_json_opt<T: serde::de::DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_db_url_masks_userinfo_and_query_passwords() {
+        let out = redact_db_url("postgres://user:secret@db.example:5432/app?sslmode=require");
+        assert!(
+            out.contains("user:***@"),
+            "userinfo password not masked: {out}"
+        );
+        assert!(
+            out.contains("sslmode=require"),
+            "non-secret param dropped: {out}"
+        );
+
+        let out =
+            redact_db_url("postgresql://user@db.example/app?password=hunter2&sslpassword=k&x=1");
+        assert!(!out.contains("hunter2"), "query password leaked: {out}");
+        assert!(!out.contains("sslpassword=k"), "sslpassword leaked: {out}");
+        assert!(out.contains("password=%2A%2A%2A") || out.contains("password=***"));
+        assert!(out.contains("x=1"), "non-secret param dropped: {out}");
+
+        // Non-postgres strings pass through untouched.
+        assert_eq!(redact_db_url("/var/lib/hub.db"), "/var/lib/hub.db");
+    }
 
     #[test]
     fn canonical_ip_normalizes_ipv6_forms() {
