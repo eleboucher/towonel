@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use iroh::EndpointId;
 use iroh::endpoint::Connection;
@@ -44,6 +44,10 @@ pub struct SessionRegistry {
     metrics: EdgeMetrics,
     max_per_tenant: usize,
     iroh_per_tenant: papaya::HashMap<TenantId, AtomicUsize>,
+    /// Serializes membership transitions (`register` / `record_tenant` /
+    /// `remove_if_current`) so a supersede+reconnect can't race the
+    /// slot-release decision.
+    membership: Mutex<()>,
 }
 
 impl SessionRegistry {
@@ -55,10 +59,20 @@ impl SessionRegistry {
             metrics,
             max_per_tenant,
             iroh_per_tenant: papaya::HashMap::new(),
+            membership: Mutex::new(()),
         }
     }
 
+    /// Membership-lock guard, recovering from poisoning (a panic mid-mutation
+    /// leaves the papaya maps individually consistent).
+    fn lock_membership(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.membership
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn record_tenant(&self, agent_id: EndpointId, tenant_id: TenantId) -> bool {
+        let _membership = self.lock_membership();
         let tenants = self.tenants.pin();
         if tenants.contains_key(&agent_id) {
             return true;
@@ -145,6 +159,7 @@ impl SessionRegistry {
     }
 
     pub fn register(&self, session: &Arc<AgentSession>) {
+        let _membership = self.lock_membership();
         let agent_id = session.agent_id;
         // pin() returns a guard that must outlive the value insert() returns.
         let map = self.by_id.pin();
@@ -167,6 +182,7 @@ impl SessionRegistry {
     /// stale handler task must not evict a fresh reconnection. Returns
     /// `true` iff this call removed the session.
     pub fn remove_if_current(&self, session: &AgentSession) -> bool {
+        let _membership = self.lock_membership();
         let agent_id = session.agent_id;
         let stable_id = session.conn_stable_id();
         let map = self.by_id.pin();
@@ -175,14 +191,11 @@ impl SessionRegistry {
         });
         if let Ok(Some(_)) = result {
             self.metrics.active_sessions.dec();
-            // Only release the tenant binding/slot when no fresh session has
-            // taken this agent's place. On a supersede+reconnect race the new
-            // session reuses this binding (record_tenant early-returns on the
-            // existing entry), so removing it here would strand the live
-            // session with no tenant and an under-counted slot.
-            if self.by_id.pin().get(&agent_id).is_none()
-                && let Some(tenant_id) = self.tenants.pin().remove(&agent_id)
-            {
+            // The membership lock guarantees no `register` interleaved, so a
+            // matched removal means this was the live session — release its
+            // tenant binding/slot. A reconnect serializes after us and
+            // re-acquires its own.
+            if let Some(tenant_id) = self.tenants.pin().remove(&agent_id) {
                 self.release_iroh(tenant_id);
             }
             info!(agent = %agent_id.fmt_short(), "agent session removed");
