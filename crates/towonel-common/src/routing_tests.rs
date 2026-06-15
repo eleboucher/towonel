@@ -412,6 +412,64 @@ fn two_tenants_same_hostname_second_rejected() {
 }
 
 #[test]
+fn policy_gap_same_hostname_resolves_to_lowest_tenant() {
+    // If the ownership policy itself (incorrectly) grants the same hostname to
+    // two tenants, the materializer must resolve it deterministically to the
+    // lowest tenant_id (matching the listener tie-break), not silent
+    // last-write-wins.
+    let kp1 = TenantKeypair::generate();
+    let kp2 = TenantKeypair::generate();
+    let agent1 = AgentKeypair::generate();
+    let agent2 = AgentKeypair::generate();
+
+    let mut policy = OwnershipPolicy::new();
+    register(&mut policy, &kp1, &["shared.example.eu"]);
+    register(&mut policy, &kp2, &["shared.example.eu"]);
+
+    let entries = vec![
+        sign_entry(
+            &kp1,
+            1,
+            ConfigOp::UpsertHostname {
+                hostname: "shared.example.eu".into(),
+            },
+        ),
+        sign_entry(
+            &kp1,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent1.id(),
+            },
+        ),
+        sign_entry(
+            &kp2,
+            1,
+            ConfigOp::UpsertHostname {
+                hostname: "shared.example.eu".into(),
+            },
+        ),
+        sign_entry(
+            &kp2,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent2.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+
+    // Lowest tenant_id wins; the loser's agent must not serve the hostname.
+    let (winner, loser) = if kp1.id().as_bytes() <= kp2.id().as_bytes() {
+        (&agent1, &agent2)
+    } else {
+        (&agent2, &agent1)
+    };
+    let agents = table.lookup("shared.example.eu").unwrap();
+    assert!(agents.contains(&winner.id()));
+    assert!(!agents.contains(&loser.id()));
+}
+
+#[test]
 fn unknown_tenant_entries_skipped() {
     let known = TenantKeypair::generate();
     let unknown = TenantKeypair::generate();

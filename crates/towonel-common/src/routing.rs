@@ -399,6 +399,17 @@ fn materialize_tenant(
         return;
     }
     for hostname in &state.hostnames {
+        // A key already present means another (lower) tenant_id claimed this
+        // hostname. Keep the first claimant (matches the listener tie-break)
+        // rather than silently overwriting it.
+        if routes.contains_key(hostname) {
+            tracing::warn!(
+                tenant = %tenant_id,
+                hostname = %hostname,
+                "cross-tenant hostname collision; keeping earlier claimant"
+            );
+            continue;
+        }
         routes.insert(hostname.clone(), agents_ref.clone());
         if let Some(mode) = state.tls.get(hostname) {
             tls_policies.insert(hostname.clone(), *mode);
