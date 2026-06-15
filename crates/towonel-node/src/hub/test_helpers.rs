@@ -163,6 +163,7 @@ impl TestHub {
                 .expect("compute sentinel hash for tests"),
             twofa_attempt_limiter: super::api::new_twofa_attempt_limiter(),
             port_index: arc_swap::ArcSwap::from_pointee(super::api::PortIndex::default()),
+            port_reservations: arc_swap::ArcSwap::from_pointee(Vec::new()),
             live_edges: Arc::new(super::live_edges::LiveEdges::new()),
             live_agents: Arc::new(super::live_agents::LiveAgents::new()),
             route_rebuild_notify: Arc::new(tokio::sync::Notify::new()),

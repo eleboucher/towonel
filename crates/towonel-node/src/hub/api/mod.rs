@@ -229,6 +229,10 @@ pub struct AppState {
     /// claiming the port. Read by `find_port_conflict` under the
     /// per-protocol locks; refreshed by `rebuild_and_broadcast_routes`.
     pub port_index: ArcSwap<PortIndex>,
+    /// Cached port reservations for per-edge listener filtering. Refreshed on
+    /// each route rebuild so the per-edge broadcast fan-out reads this snapshot
+    /// instead of querying the DB once per edge per broadcast.
+    pub port_reservations: ArcSwap<Vec<super::db::port_reservations::PortReservationRow>>,
     /// Configured OIDC providers (one runtime per provider). Empty means
     /// no OIDC providers are advertised on `/v1/auth/providers`.
     pub oidc: OidcRuntimes,
@@ -351,6 +355,14 @@ pub async fn refresh_port_index(state: &Arc<AppState>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refresh the cached port-reservation snapshot read by per-edge listener
+/// filtering. One DB query shared across every edge's broadcast.
+pub async fn refresh_port_reservations(state: &Arc<AppState>) -> anyhow::Result<()> {
+    let reservations = state.db.list_port_reservations(None).await?;
+    state.port_reservations.store(Arc::new(reservations));
+    Ok(())
+}
+
 /// Apply one already-verified service op to the cached port index in place,
 /// avoiding a full-table replay on the write path. `rcu` retries on a
 /// concurrent store so a racing TCP and UDP claim — separate locks, shared
@@ -412,6 +424,12 @@ pub async fn rebuild_and_broadcast_routes(state: &Arc<AppState>) -> anyhow::Resu
     let policy_snapshot = state.policy.load_full();
     let entries = state.db.get_all_entries().await?;
     let live = state.live_agents.snapshot();
+
+    // Refresh the reservation snapshot before fan-out so every edge's
+    // listener filtering reads it instead of querying the DB per broadcast.
+    if let Err(e) = refresh_port_reservations(state).await {
+        tracing::warn!(error = %e, "failed to refresh port reservations before broadcast");
+    }
 
     let table = RouteTable::from_entries_with_liveness(&entries, &policy_snapshot, Some(&live));
     if state.route_tx.send(table).is_err() {

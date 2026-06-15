@@ -418,6 +418,7 @@ impl Hub {
             mailer: self.p.mailer.clone(),
             ports_require_reservation: self.p.ports_require_reservation,
             port_index: arc_swap::ArcSwap::from_pointee(api::PortIndex::default()),
+            port_reservations: arc_swap::ArcSwap::from_pointee(Vec::new()),
             oidc,
             webauthn,
             passkey_reg_states: api::new_passkey_reg_states(),

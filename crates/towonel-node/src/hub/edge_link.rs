@@ -356,7 +356,7 @@ async fn push_routes(
     snapshot_received.notified().await;
     // Initial snapshot so a fresh edge converges before the next mutation.
     if let Ok(mut initial) = build_current_route_table(&state).await {
-        filter_listeners_for_edge(&mut initial, &state, &public_ips).await;
+        filter_listeners_for_edge(&mut initial, &state, &public_ips);
         if writer_tx
             .send(HubToEdge::RouteSnapshot {
                 table: Box::new(initial),
@@ -370,7 +370,7 @@ async fn push_routes(
     loop {
         match route_rx.recv().await {
             Ok(mut table) => {
-                filter_listeners_for_edge(&mut table, &state, &public_ips).await;
+                filter_listeners_for_edge(&mut table, &state, &public_ips);
                 if writer_tx
                     .send(HubToEdge::RouteSnapshot {
                         table: Box::new(table),
@@ -394,18 +394,8 @@ fn canonical_ips(ips: &[String]) -> Vec<String> {
     ips.iter().map(|s| crate::config::canonical_ip(s)).collect()
 }
 
-async fn filter_listeners_for_edge(
-    table: &mut RouteTable,
-    state: &Arc<AppState>,
-    public_ips: &[String],
-) {
-    let reservations = match state.db.list_port_reservations(None).await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(error = %e, "failed to load port reservations for edge filtering");
-            return;
-        }
-    };
+fn filter_listeners_for_edge(table: &mut RouteTable, state: &Arc<AppState>, public_ips: &[String]) {
+    let reservations = state.port_reservations.load();
 
     table.retain_tcp_listeners(|port, _binding| {
         let assigned_ips: HashSet<&str> = reservations
