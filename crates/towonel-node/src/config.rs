@@ -747,6 +747,16 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
     if hub_enabled && let Some(url) = public_url.as_deref() {
         validate_hub_public_url(url)?;
     }
+    // The web account/passkey flow derives the WebAuthn RP ID and all
+    // The WebAuthn RP ID and credential/invite links derive from public_url;
+    // its listen-address fallback (0.0.0.0) yields unusable passkeys.
+    if hub_enabled && web_enabled.unwrap_or(false) && public_url.is_none() {
+        anyhow::bail!(
+            "TOWONEL_HUB_WEB_ENABLED=true requires TOWONEL_HUB_PUBLIC_URL to be set: \
+             the WebAuthn RP ID and credential/invite URLs are derived from it, and the \
+             listen-address fallback (e.g. 0.0.0.0) yields unusable passkeys"
+        );
+    }
     if let Some(addr) = link_listen_addr.as_deref() {
         validate_socket_addr("TOWONEL_HUB_LINK_LISTEN_ADDR", addr)?;
     }
