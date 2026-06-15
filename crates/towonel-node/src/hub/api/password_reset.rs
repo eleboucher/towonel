@@ -46,12 +46,20 @@ pub(super) async fn post_request(
     let email_key = email.to_lowercase();
 
     // OIDC-only users (empty hash) have no password to reset.
+    // Spawn the DB+SMTP work so the response time is independent of whether
+    // the email exists, closing the user-enumeration timing oracle.
     if let Ok(Some(user)) = state.db.find_user_by_email(email).await
         && user.disabled_at_ms.is_none()
         && !user.password_hash.is_empty()
-        && let Err(e) = issue_and_send_reset(&state, &user.id, &user.email).await
     {
-        warn!(error = %e, "issue_and_send_reset failed");
+        let state = Arc::clone(&state);
+        let user_id = user.id.clone();
+        let user_email = user.email;
+        tokio::spawn(async move {
+            if let Err(e) = issue_and_send_reset(&state, &user_id, &user_email).await {
+                warn!(error = %e, "issue_and_send_reset failed");
+            }
+        });
     }
 
     let counter = state
