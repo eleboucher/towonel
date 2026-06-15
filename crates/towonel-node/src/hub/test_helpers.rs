@@ -97,6 +97,10 @@ impl TestHub {
         Self::start_full(false, Vec::new()).await
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "test-only builder, line count is inconsequential"
+    )]
     async fn start_full(ports_require_reservation: bool, edge_public_ips: Vec<String>) -> Self {
         // Init once so test failures show the hub's `warn!`/`error!` lines.
         // Safe to call repeatedly; only the first wins.
@@ -179,6 +183,7 @@ impl TestHub {
             passkey_reg_states: super::api::new_passkey_reg_states(),
             passkey_auth_states: super::api::new_passkey_auth_states(),
             tls: None,
+            trusted_proxies: vec![],
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

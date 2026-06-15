@@ -236,6 +236,9 @@ pub struct AppState {
     pub passkey_reg_states: PasskeyRegStates,
     pub passkey_auth_states: PasskeyAuthStates,
     pub tls: Option<crate::config::TlsConfig>,
+    /// CIDRs allowed to set `X-Forwarded-For`. Empty = trust the direct peer
+    /// IP only (fail-closed default).
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 #[derive(Default, Clone)]
@@ -441,7 +444,11 @@ pub fn router_unlimited(state: Arc<AppState>) -> Router {
 fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
     let operator_routes = operator_routes(&state);
     let invites_routes = invites_routes();
-    let rate_limited_public = maybe_rate_limit(rate_limited_routes(state.web_enabled), rate_limit);
+    let rate_limited_public = maybe_rate_limit(
+        rate_limited_routes(state.web_enabled),
+        rate_limit,
+        state.trusted_proxies.clone().into(),
+    );
     let signed_public = signed_public_routes();
     let web_admin = web_admin_routes(state.web_enabled);
     // `/v1/health` is intentionally public — load balancers and uptime
@@ -635,8 +642,8 @@ fn signed_public_routes() -> Router<Arc<AppState>> {
         .route("/v1/agent/refresh", post(agent_refresh::post_refresh))
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ProxyAwareIpKeyExtractor;
+#[derive(Debug, Clone)]
+struct ProxyAwareIpKeyExtractor(Arc<[ipnet::IpNet]>);
 
 impl tower_governor::key_extractor::KeyExtractor for ProxyAwareIpKeyExtractor {
     type Key = String;
@@ -650,11 +657,15 @@ impl tower_governor::key_extractor::KeyExtractor for ProxyAwareIpKeyExtractor {
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0)
             .ok_or(tower_governor::GovernorError::UnableToExtractKey)?;
-        Ok(auth::client_ip_key(&peer, req.headers()))
+        Ok(auth::client_ip_key(&self.0, &peer, req.headers()))
     }
 }
 
-fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<Arc<AppState>> {
+fn maybe_rate_limit(
+    router: Router<Arc<AppState>>,
+    rate_limit: bool,
+    trusted_proxies: Arc<[ipnet::IpNet]>,
+) -> Router<Arc<AppState>> {
     if !rate_limit {
         return router;
     }
@@ -664,7 +675,7 @@ fn maybe_rate_limit(router: Router<Arc<AppState>>, rate_limit: bool) -> Router<A
             reason = "config builder values are constants; failure is a programmer error caught at startup"
         )]
         tower_governor::governor::GovernorConfigBuilder::default()
-            .key_extractor(ProxyAwareIpKeyExtractor)
+            .key_extractor(ProxyAwareIpKeyExtractor(trusted_proxies))
             .per_second(5)
             .burst_size(30)
             .finish()

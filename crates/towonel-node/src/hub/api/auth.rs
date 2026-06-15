@@ -219,7 +219,7 @@ pub(super) async fn post_login(
 ) -> Response {
     let bad_request = validate_email(&body.email).is_err() || body.password.is_empty();
     let email_key = db::users::normalize_email(&body.email);
-    let ip_key = client_ip_key(&peer, &headers);
+    let ip_key = client_ip_key(&state.trusted_proxies, &peer, &headers);
 
     // IP-keyed lockout is what actually blocks. Per-email is also counted
     // (audit/observability) but never blocks alone, so a third party can't
@@ -383,7 +383,7 @@ pub(super) async fn post_twofa_verify(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<TwoFaVerifyRequest>,
 ) -> Response {
-    let ip_key = client_ip_key(&peer, &headers);
+    let ip_key = client_ip_key(&state.trusted_proxies, &peer, &headers);
     if let Some(counter) = state.ip_login_limiter.get(&ip_key).await
         && counter.load(std::sync::atomic::Ordering::Relaxed) >= LOGIN_MAX_FAILURES
     {
@@ -498,9 +498,19 @@ pub(super) async fn reauth_rate_limited(state: &Arc<AppState>, ip_key: &str) -> 
 }
 
 /// Resolve the client IP used for the lockout counter.
-pub(super) fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) -> String {
-    if !peer_is_trusted_proxy(peer.ip()) {
-        return peer.ip().to_string();
+///
+/// `X-Forwarded-For` is honored only when the immediate TCP peer is inside an
+/// operator-configured trusted-proxy range (`TOWONEL_HUB_TRUSTED_PROXIES`).
+/// When the list is empty (the default) the peer IP is always used, so a peer
+/// from any range — including private/loopback — cannot spoof the lockout key.
+pub(super) fn client_ip_key(
+    trusted_proxies: &[ipnet::IpNet],
+    peer: &SocketAddr,
+    headers: &axum::http::HeaderMap,
+) -> String {
+    let peer_ip = peer.ip();
+    if !trusted_proxies.iter().any(|net| net.contains(&peer_ip)) {
+        return peer_ip.to_string();
     }
     if let Some(value) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok())
         && let Some(last) = value.rsplit(',').next()
@@ -510,14 +520,7 @@ pub(super) fn client_ip_key(peer: &SocketAddr, headers: &axum::http::HeaderMap) 
             return trimmed.to_string();
         }
     }
-    peer.ip().to_string()
-}
-
-const fn peer_is_trusted_proxy(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-        std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
-    }
+    peer_ip.to_string()
 }
 
 pub(super) async fn record_login_failure(state: &Arc<AppState>, email_key: &str, ip_key: &str) {
@@ -706,39 +709,50 @@ mod tests {
         h
     }
 
-    #[test]
-    fn ip_key_uses_peer_when_not_loopback() {
-        let h = headers_with_xff("8.8.8.8");
-        assert_eq!(client_ip_key(&peer("203.0.113.5"), &h), "203.0.113.5");
+    fn trusted(cidrs: &[&str]) -> Vec<ipnet::IpNet> {
+        cidrs.iter().map(|c| c.parse().unwrap()).collect()
     }
 
     #[test]
-    fn ip_key_uses_xff_when_peer_is_loopback() {
+    fn ip_key_ignores_xff_when_no_trusted_proxies_configured() {
+        // Default (empty list): even a private/loopback peer cannot spoof.
         let h = headers_with_xff("203.0.113.5");
-        assert_eq!(client_ip_key(&peer("127.0.0.1"), &h), "203.0.113.5");
+        assert_eq!(client_ip_key(&[], &peer("127.0.0.1"), &h), "127.0.0.1");
+        assert_eq!(client_ip_key(&[], &peer("10.42.0.7"), &h), "10.42.0.7");
+    }
+
+    #[test]
+    fn ip_key_uses_peer_when_peer_not_in_trusted_range() {
+        let t = trusted(&["10.0.0.0/8"]);
+        let h = headers_with_xff("203.0.113.5");
+        assert_eq!(client_ip_key(&t, &peer("8.8.8.8"), &h), "8.8.8.8");
+    }
+
+    #[test]
+    fn ip_key_uses_xff_when_peer_in_trusted_range() {
+        let t = trusted(&["10.0.0.0/8"]);
+        let h = headers_with_xff("203.0.113.5");
+        assert_eq!(client_ip_key(&t, &peer("10.42.0.7"), &h), "203.0.113.5");
     }
 
     #[test]
     fn ip_key_uses_last_xff_entry() {
+        let t = trusted(&["127.0.0.1/32"]);
         let h = headers_with_xff("198.51.100.10, 203.0.113.5");
-        assert_eq!(client_ip_key(&peer("127.0.0.1"), &h), "203.0.113.5");
+        assert_eq!(client_ip_key(&t, &peer("127.0.0.1"), &h), "203.0.113.5");
     }
 
     #[test]
     fn ip_key_falls_back_to_peer_when_xff_missing() {
+        let t = trusted(&["127.0.0.1/32"]);
         let h = HeaderMap::new();
-        assert_eq!(client_ip_key(&peer("127.0.0.1"), &h), "127.0.0.1");
+        assert_eq!(client_ip_key(&t, &peer("127.0.0.1"), &h), "127.0.0.1");
     }
 
     #[test]
-    fn ip_key_uses_xff_when_peer_is_private() {
-        let h = headers_with_xff("203.0.113.5");
-        assert_eq!(client_ip_key(&peer("10.42.0.7"), &h), "203.0.113.5");
-    }
-
-    #[test]
-    fn ip_key_handles_ipv6_loopback() {
+    fn ip_key_handles_ipv6_trusted_range() {
+        let t = trusted(&["::1/128"]);
         let h = headers_with_xff("2001:db8::1");
-        assert_eq!(client_ip_key(&peer("[::1]"), &h), "2001:db8::1");
+        assert_eq!(client_ip_key(&t, &peer("[::1]"), &h), "2001:db8::1");
     }
 }

@@ -288,7 +288,7 @@ pub(super) async fn post_disable(
     let Principal::User(ref user) = principal else {
         return user_required("2FA management is per-user");
     };
-    let ip_key = client_ip_key(&peer, &headers);
+    let ip_key = client_ip_key(&state.trusted_proxies, &peer, &headers);
     if let Some(resp) = reauth_rate_limited(&state, &ip_key).await {
         return resp;
     }

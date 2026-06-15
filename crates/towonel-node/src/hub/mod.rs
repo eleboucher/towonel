@@ -260,6 +260,7 @@ pub struct HubParams {
     pub oidc: crate::config::OidcConfig,
     pub mailer: Option<mail::SharedMailer>,
     pub webauthn_rp_id: Option<String>,
+    pub trusted_proxies: Vec<ipnet::IpNet>,
 }
 
 /// The hub: accepts signed config entries from tenants via an HTTP management
@@ -422,6 +423,7 @@ impl Hub {
             passkey_reg_states: api::new_passkey_reg_states(),
             passkey_auth_states: api::new_passkey_auth_states(),
             tls: self.p.tls.clone(),
+            trusted_proxies: self.p.trusted_proxies.clone(),
         });
 
         // Seed the port index from the DB before serving any upsert; the first

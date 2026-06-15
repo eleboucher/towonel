@@ -187,6 +187,12 @@ pub struct HubConfig {
     pub web_enabled: bool,
     /// `TOWONEL_HUB_PORTS_REQUIRE_RESERVATION`.
     pub ports_require_reservation: bool,
+    /// Reverse-proxy source ranges whose `X-Forwarded-For` is trusted when
+    /// keying rate-limit / login-lockout counters. Empty (the default) means
+    /// `X-Forwarded-For` is never honored and the immediate TCP peer is always
+    /// used — fail closed so a private-range peer can't spoof the key.
+    /// `TOWONEL_HUB_TRUSTED_PROXIES` (CSV CIDRs).
+    pub trusted_proxies: Vec<IpNet>,
     /// Active/passive leader election among hubs sharing one Postgres.
     /// `TOWONEL_HUB_LEADER_ELECTION` (default `true`). Ignored for `SQLite`
     /// (single instance is always leader).
@@ -367,6 +373,7 @@ struct RawEnv {
     hub_link_psk: Option<String>,
     hub_web_enabled: Option<bool>,
     hub_ports_require_reservation: Option<bool>,
+    hub_trusted_proxies: Option<String>,
     hub_oidc_codeberg_issuer: Option<String>,
     hub_oidc_codeberg_client_id: Option<String>,
     hub_oidc_codeberg_client_secret: Option<String>,
@@ -447,6 +454,7 @@ impl NodeConfig {
             hub_link_psk,
             hub_web_enabled,
             hub_ports_require_reservation,
+            hub_trusted_proxies,
             hub_oidc_codeberg_issuer,
             hub_oidc_codeberg_client_id,
             hub_oidc_codeberg_client_secret,
@@ -551,6 +559,7 @@ impl NodeConfig {
             tls: hub_tls,
             web_enabled: hub_web_enabled,
             ports_require_reservation: hub_ports_require_reservation,
+            trusted_proxies: hub_trusted_proxies,
             oidc,
             console_url,
             mail,
@@ -671,6 +680,7 @@ struct HubInputs<'a> {
     tls: Option<TlsConfig>,
     web_enabled: Option<bool>,
     ports_require_reservation: Option<bool>,
+    trusted_proxies: Option<String>,
     oidc: OidcConfig,
     console_url: Option<String>,
     mail: Option<MailConfig>,
@@ -705,6 +715,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         tls,
         web_enabled,
         ports_require_reservation,
+        trusted_proxies,
         oidc,
         console_url,
         mail,
@@ -799,6 +810,11 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         tls,
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
+        trusted_proxies: trusted_proxies
+            .as_deref()
+            .map(parse_cidr_list)
+            .transpose()?
+            .unwrap_or_default(),
         leader_election: leader_election.unwrap_or(true),
         leader_db_dsn,
         oidc,

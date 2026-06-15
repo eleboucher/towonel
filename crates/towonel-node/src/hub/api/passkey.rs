@@ -161,7 +161,7 @@ pub(super) async fn post_register_finish(
     let Principal::User(ref user) = principal else {
         return user_required("user session required");
     };
-    let ip_key = client_ip_key(&peer, &headers);
+    let ip_key = client_ip_key(&state.trusted_proxies, &peer, &headers);
     if let Some(resp) = reauth_rate_limited(&state, &ip_key).await {
         return resp;
     }
@@ -266,7 +266,7 @@ pub(super) async fn delete_passkey(
     let Principal::User(ref user) = principal else {
         return user_required("user session required");
     };
-    let ip_key = client_ip_key(&peer, &headers);
+    let ip_key = client_ip_key(&state.trusted_proxies, &peer, &headers);
     if let Some(resp) = reauth_rate_limited(&state, &ip_key).await {
         return resp;
     }
@@ -341,7 +341,7 @@ pub(super) async fn post_authenticate_begin(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<AuthenticateBeginRequest>,
 ) -> Response {
-    let ip_key = client_ip_key(&peer, &headers);
+    let ip_key = client_ip_key(&state.trusted_proxies, &peer, &headers);
     if let Some(counter) = state.ip_login_limiter.get(&ip_key).await
         && counter.load(std::sync::atomic::Ordering::Relaxed) >= LOGIN_MAX_FAILURES
     {
@@ -442,7 +442,7 @@ pub(super) async fn post_authenticate_finish(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<AuthenticateFinishRequest>,
 ) -> Response {
-    let ip_key = client_ip_key(&peer, &headers);
+    let ip_key = client_ip_key(&state.trusted_proxies, &peer, &headers);
     if let Some(counter) = state.ip_login_limiter.get(&ip_key).await
         && counter.load(std::sync::atomic::Ordering::Relaxed) >= LOGIN_MAX_FAILURES
     {
