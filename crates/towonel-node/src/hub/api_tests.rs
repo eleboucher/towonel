@@ -2635,6 +2635,47 @@ async fn owner_user_can_reserve_port() {
 }
 
 #[tokio::test]
+async fn delete_port_rejected_while_service_bound() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let cookie = signup_and_login_user(&hub, &client, "bind@example.test", "hunter22!").await;
+    let user_id = user_id_by_email(&hub, "bind@example.test").await;
+
+    let token = create_invite(&hub, &client, "tenant-bind", &["a.bind.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    hub.state
+        .db
+        .insert_tenant_ownership(super::db::tenant_ownership::NewTenantOwnership {
+            user_id: &user_id,
+            tenant_id: tenant.id().as_bytes(),
+            invite_id: &[2u8; 16],
+            display_name: "test",
+            now_ms: 1,
+        })
+        .await
+        .expect("insert_tenant_ownership");
+
+    // Simulate a live TCP service entry bound to the port for this tenant.
+    let mut index = super::api::PortIndex::default();
+    index.tcp.insert(22300, (tenant.id(), "web".to_string()));
+    hub.state.port_index.store(std::sync::Arc::new(index));
+
+    let resp = client
+        .delete(hub.url(&format!("/v1/tenants/{}/ports/tcp/22300", tenant.id())))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        409,
+        "releasing a reservation with a bound service must be rejected"
+    );
+}
+
+#[tokio::test]
 async fn user_port_quota_enforced() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();

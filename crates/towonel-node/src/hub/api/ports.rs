@@ -309,6 +309,28 @@ pub(super) async fn delete_port(
         return invalid_request("protocol must be \"tcp\" or \"udp\"");
     };
 
+    // Refuse to release the reservation while a service entry is still bound to
+    // this port. Dropping the reservation alone leaves the route live but
+    // unreserved, so another tenant could reserve a port we're still serving.
+    let index = state.port_index.load();
+    let bound = match protocol {
+        PortProtocol::Tcp => index.tcp.get(&port),
+        PortProtocol::Udp => index.udp.get(&port),
+    };
+    if let Some((bound_tenant, service)) = bound
+        && *bound_tenant == tenant_id
+    {
+        return conflict(
+            "port_in_use",
+            format!(
+                "{} port {port} is still bound to service `{service}`; delete the \
+                 service entry before releasing the reservation",
+                protocol.as_str(),
+            ),
+        );
+    }
+    drop(index);
+
     let reservations = match state
         .db
         .find_port_reservations(&tenant_id, port, protocol)
