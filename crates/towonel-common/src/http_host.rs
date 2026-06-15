@@ -26,8 +26,11 @@ pub fn extract_host_header(buf: &[u8]) -> Option<String> {
     let raw = std::str::from_utf8(value).ok()?.trim();
     let host = parse_authority_host(raw)?;
 
-    // Absolute-form target authority must agree with Host.
+    // Absolute-form target authority must agree with Host. Origin-form targets
+    // always begin with '/', so a leading '/' rules out absolute-form even when
+    // the path or query legitimately embeds a "://" (e.g. `?next=https://...`).
     if let Some(path) = req.path
+        && !path.starts_with('/')
         && let Some((_, scheme_rel)) = path.split_once("://")
         && let Some(authority) = scheme_rel.split(['/', '?', '#']).next()
         && !authority.is_empty()
@@ -97,5 +100,19 @@ mod tests {
     fn absolute_form_mismatched_authority_rejected() {
         let req = b"GET http://b.example.eu/path HTTP/1.1\r\nHost: a.example.eu\r\n\r\n";
         assert!(extract_host_header(req).is_none());
+    }
+
+    #[test]
+    fn origin_form_with_url_in_query_is_not_treated_as_absolute() {
+        let req = b"GET /click?next=https://evil.example/path HTTP/1.1\r\n\
+                    Host: a.example.eu\r\n\r\n";
+        assert_eq!(extract_host_header(req).as_deref(), Some("a.example.eu"));
+    }
+
+    #[test]
+    fn origin_form_with_url_in_path_is_not_treated_as_absolute() {
+        let req = b"GET /redirect/https://evil.example/ HTTP/1.1\r\n\
+                    Host: a.example.eu\r\n\r\n";
+        assert_eq!(extract_host_header(req).as_deref(), Some("a.example.eu"));
     }
 }
