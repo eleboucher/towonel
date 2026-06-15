@@ -197,17 +197,11 @@ async fn validate_service_op(
     }
 
     let upsert = match &payload.op {
-        ConfigOp::UpsertTcpService {
-            service,
-            listen_port,
-        } => Some((ServiceKind::Tcp, service.as_str(), *listen_port)),
-        ConfigOp::UpsertUdpService {
-            service,
-            listen_port,
-        } => Some((ServiceKind::Udp, service.as_str(), *listen_port)),
+        ConfigOp::UpsertTcpService { listen_port, .. } => Some((ServiceKind::Tcp, *listen_port)),
+        ConfigOp::UpsertUdpService { listen_port, .. } => Some((ServiceKind::Udp, *listen_port)),
         _ => None,
     };
-    if let Some((kind, service, listen_port)) = upsert {
+    if let Some((kind, listen_port)) = upsert {
         let r = kind.reasons();
         if let Err(e) = validate_listen_port(listen_port) {
             state.metrics.record_reject(r.invalid_port);
@@ -222,33 +216,51 @@ async fn validate_service_op(
         {
             return Err(resp);
         }
-        match find_port_conflict(
-            &state.port_index.load(),
-            kind,
-            listen_port,
-            &payload.tenant_id,
-            service,
-        ) {
-            None => {}
-            Some(PortConflict::OtherTenant { tenant }) => {
-                state.metrics.record_reject(r.port_claimed);
-                return Err(invalid_request(format!(
-                    "{} listen_port {listen_port} is already claimed by tenant {tenant}",
-                    r.label
-                )));
-            }
-            Some(PortConflict::SameTenantOtherService {
-                service: other_service,
-            }) => {
-                state.metrics.record_reject(r.port_claimed);
-                return Err(invalid_request(format!(
-                    "{} listen_port {listen_port} is already bound to service `{other_service}` for this tenant",
-                    r.label
-                )));
-            }
-        }
     }
     Ok(())
+}
+
+/// Cross-tenant port-uniqueness check against the cached index. Kept separate
+/// from [`validate_service_op`] so only this — plus the entry insert and the
+/// index update — runs under the per-protocol port lock.
+fn check_port_conflict(state: &AppState, payload: &ConfigPayload) -> Option<Response> {
+    let (kind, service, listen_port) = match &payload.op {
+        ConfigOp::UpsertTcpService {
+            service,
+            listen_port,
+        } => (ServiceKind::Tcp, service.as_str(), *listen_port),
+        ConfigOp::UpsertUdpService {
+            service,
+            listen_port,
+        } => (ServiceKind::Udp, service.as_str(), *listen_port),
+        _ => return None,
+    };
+    let r = kind.reasons();
+    match find_port_conflict(
+        &state.port_index.load(),
+        kind,
+        listen_port,
+        &payload.tenant_id,
+        service,
+    ) {
+        None => None,
+        Some(PortConflict::OtherTenant { tenant }) => {
+            state.metrics.record_reject(r.port_claimed);
+            Some(invalid_request(format!(
+                "{} listen_port {listen_port} is already claimed by tenant {tenant}",
+                r.label
+            )))
+        }
+        Some(PortConflict::SameTenantOtherService {
+            service: other_service,
+        }) => {
+            state.metrics.record_reject(r.port_claimed);
+            Some(invalid_request(format!(
+                "{} listen_port {listen_port} is already bound to service `{other_service}` for this tenant",
+                r.label
+            )))
+        }
+    }
 }
 
 /// `POST /v1/entries`
@@ -332,15 +344,8 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         }
     }
 
-    // Serialize cross-tenant uniqueness check + insert for service-port ops.
-    // TCP and UDP have separate locks because they share no port namespace at
-    // the OS level — there's no point making them contend.
-    let _port_guard = match &payload.op {
-        ConfigOp::UpsertTcpService { .. } => Some(state.tcp_port_lock.lock().await),
-        ConfigOp::UpsertUdpService { .. } => Some(state.udp_port_lock.lock().await),
-        _ => None,
-    };
-
+    // Validation + reservation lookup run outside the port lock; they don't
+    // race other upserts.
     if let Err(resp) = validate_service_op(&state, &payload).await {
         return resp;
     }
@@ -368,6 +373,18 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
                 return internal_error();
             }
         }
+    }
+
+    // Lock only the conflict-check → insert → index-update window so the
+    // cross-tenant port claim is atomic. TCP and UDP have separate locks
+    // because they share no port namespace at the OS level.
+    let _port_guard = match &payload.op {
+        ConfigOp::UpsertTcpService { .. } => Some(state.tcp_port_lock.lock().await),
+        ConfigOp::UpsertUdpService { .. } => Some(state.udp_port_lock.lock().await),
+        _ => None,
+    };
+    if let Some(resp) = check_port_conflict(&state, &payload) {
+        return resp;
     }
 
     let sequence = payload.sequence;
