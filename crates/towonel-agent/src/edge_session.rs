@@ -214,6 +214,15 @@ async fn dial_and_serve(
         .with_context(|| format!("connect to edge {} failed", contact.id.fmt_short()))?;
 
     let edge_label = contact.id.fmt_short().to_string();
+
+    // Validate the EdgeCred before counting the session live, so a rejected
+    // cred doesn't bump reconnects or flip the session gauge.
+    if let Some(cred) = edge_cred.load_full()
+        && let Err(e) = present_edge_cred(&conn, &edge_label, &cred).await
+    {
+        return Err(e);
+    }
+
     info!(edge = %edge_label, "edge session established");
     metrics
         .edge_session_reconnects
@@ -222,12 +231,6 @@ async fn dial_and_serve(
     // Marks the session live; resets the gauge and aborts the path watcher on
     // Drop, surviving a mid-session cancellation (see `EdgeSessionGuard`).
     let mut guard = EdgeSessionGuard::live(Arc::clone(metrics), edge_label.clone());
-
-    if let Some(cred) = edge_cred.load_full()
-        && let Err(e) = present_edge_cred(&conn, &edge_label, &cred).await
-    {
-        return Err(e);
-    }
 
     // iroh usually opens on the relay and upgrades to direct once holepunched.
     guard.path_watcher = Some(tokio::spawn(watch_paths(
