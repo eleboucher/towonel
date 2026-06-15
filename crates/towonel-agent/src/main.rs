@@ -359,7 +359,7 @@ async fn try_bring_up(
         .secret_key(ctx.iroh_secret_key())
         .transport_config(towonel_common::protocol::tunnel_transport_config())
         .relay_mode(relay_mode)
-        .ca_roots_config(iroh::tls::CaRootsConfig::insecure_skip_verify())
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .address_lookup(edge_lookup)
         .portmapper_config(PortmapperConfig::Disabled);
     let iroh_port: u16 = match std::env::var("TOWONEL_AGENT_IROH_PORT") {

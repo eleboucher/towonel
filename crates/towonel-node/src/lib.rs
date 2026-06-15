@@ -920,7 +920,7 @@ async fn build_edge(
         .relay_mode(towonel_common::relay::relay_mode_from_env(
             "TOWONEL_EDGE_RELAY_URL",
         ))
-        .ca_roots_config(iroh::tls::CaRootsConfig::insecure_skip_verify())
+        .ca_tls_config(iroh::tls::CaTlsConfig::insecure_skip_verify())
         .clear_ip_transports()
         .bind_addr(format!("0.0.0.0:{port}"))
         .map_err(|e| anyhow::anyhow!("invalid IPv4 iroh bind addr: {e}"))?
