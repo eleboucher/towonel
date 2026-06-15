@@ -89,7 +89,11 @@ impl SupervisorPool {
             .active
             .iter()
             .filter_map(|(id, sup)| {
-                let keep = matches!(desired.get(id), Some(addrs) if *addrs == sup.addrs.as_slice());
+                // Set comparison: hub snapshots aren't canonically ordered, so
+                // a reordered-but-equal address list must not respawn a healthy
+                // supervisor.
+                let keep =
+                    matches!(desired.get(id), Some(addrs) if same_addr_set(addrs, &sup.addrs));
                 (!keep).then_some(*id)
             })
             .collect();
@@ -139,6 +143,14 @@ impl SupervisorPool {
             sup.token.cancel();
         }
         self.tasks.shutdown().await;
+    }
+}
+
+/// Order-insensitive equality of two advertised-address lists.
+fn same_addr_set(a: &[String], b: &[String]) -> bool {
+    a.len() == b.len() && {
+        let set: std::collections::HashSet<&str> = a.iter().map(String::as_str).collect();
+        b.iter().all(|x| set.contains(x.as_str()))
     }
 }
 
