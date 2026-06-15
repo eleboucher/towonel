@@ -1001,9 +1001,16 @@ fn derive_edge_iroh_addresses(
     let derived: Vec<String> = public_addresses
         .iter()
         .filter_map(|entry| {
-            // rsplit_once so IPv6 `[::1]:443` strips only the trailing port.
-            let host = entry.rsplit_once(':').map_or(entry.as_str(), |(h, _)| h);
-            (!host.is_empty()).then(|| format!("{host}:{iroh_port}"))
+            let host = split_host(entry);
+            if host.is_empty() {
+                return None;
+            }
+            // A bare IPv6 literal must be bracketed before appending a port.
+            if !host.starts_with('[') && host.parse::<std::net::Ipv6Addr>().is_ok() {
+                Some(format!("[{host}]:{iroh_port}"))
+            } else {
+                Some(format!("{host}:{iroh_port}"))
+            }
         })
         .collect();
     if !derived.is_empty() {
@@ -1024,7 +1031,7 @@ fn extract_hosts_from_addresses(addresses: &[String]) -> Vec<String> {
     addresses
         .iter()
         .filter_map(|entry| {
-            let host = entry.rsplit_once(':').map_or(entry.as_str(), |(h, _)| h);
+            let host = split_host(entry);
             let host = host
                 .strip_prefix('[')
                 .and_then(|h| h.strip_suffix(']'))
@@ -1034,9 +1041,43 @@ fn extract_hosts_from_addresses(addresses: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Host part of a `host`/`host:port` entry, handling bracketed (`[::1]:443`)
+/// and bare (`2001:db8::1`) IPv6 literals.
+fn split_host(entry: &str) -> &str {
+    if entry.starts_with('[') {
+        return entry
+            .find("]:")
+            .map_or(entry, |i| entry.get(..=i).unwrap_or(entry));
+    }
+    // A bare IP literal carries no port; only split a real `host:port`.
+    if entry.parse::<std::net::IpAddr>().is_ok() {
+        return entry;
+    }
+    entry.rsplit_once(':').map_or(entry, |(h, _)| h)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::derive_edge_iroh_addresses;
+    use super::{derive_edge_iroh_addresses, extract_hosts_from_addresses};
+
+    #[test]
+    fn bracketed_ipv6_keeps_host_and_swaps_port() {
+        let got = derive_edge_iroh_addresses(&["[2001:db8::1]:443".to_string()], 51820, &[]);
+        assert_eq!(got, vec!["[2001:db8::1]:51820"]);
+    }
+
+    #[test]
+    fn bare_ipv6_is_not_mangled_and_gets_bracketed() {
+        let got = derive_edge_iroh_addresses(&["2001:db8::1".to_string()], 51820, &[]);
+        assert_eq!(got, vec!["[2001:db8::1]:51820"]);
+
+        let hosts = extract_hosts_from_addresses(&[
+            "2001:db8::1".to_string(),
+            "[2001:db8::2]:443".to_string(),
+            "1.2.3.4:443".to_string(),
+        ]);
+        assert_eq!(hosts, vec!["2001:db8::1", "2001:db8::2", "1.2.3.4"]);
+    }
 
     #[test]
     fn derives_from_advertised_hostnames() {
