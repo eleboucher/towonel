@@ -28,6 +28,7 @@ mod m20260619_000001_invites_hostnames_array;
 mod m20260620_000000_invites_region;
 mod m20260621_000000_user_api_keys;
 mod m20260622_000000_invites_region_default;
+mod m20260623_000000_drop_invites_hostnames_gin;
 
 pub struct Migrator;
 
@@ -66,6 +67,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260620_000000_invites_region::Migration),
             Box::new(m20260621_000000_user_api_keys::Migration),
             Box::new(m20260622_000000_invites_region_default::Migration),
+            Box::new(m20260623_000000_drop_invites_hostnames_gin::Migration),
         ]
     }
 }
