@@ -1990,6 +1990,8 @@ async fn mint_signup_invite(hub: &TestHub, client: &reqwest::Client) -> String {
 /// In practice the API handler awaits the mailer inline, but the helper is
 /// here so future async batching doesn't require touching every test.
 async fn snapshot_mails(hub: &TestHub) -> Vec<super::test_helpers::TestMail> {
+    // Mail sends are spawned as background tasks; sleep briefly so they can complete.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     hub.mailer.sent.lock().await.clone()
 }
 
