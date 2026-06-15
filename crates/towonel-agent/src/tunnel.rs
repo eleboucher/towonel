@@ -704,6 +704,18 @@ async fn handle_tcp_stream(
 }
 
 /// UDP sibling of [`handle_tcp_stream`]; payload framing per [`write_datagram_frame`].
+/// Returns `true` for ICMP-derived errors that are transient on a UDP socket:
+/// the origin may be momentarily unreachable but the session should survive.
+const fn is_transient_origin_error(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::HostUnreachable
+    )
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "matches the shape of handle_tcp_stream; bundling these adds noise without benefit"
@@ -751,8 +763,14 @@ async fn handle_udp_stream(
                 read = frame_reader.next(&mut quic_recv) => match read {
                     Ok(payload) => {
                         let n = payload.len() as u64;
-                        if let Err(e) = socket.send(payload).await {
-                            break Err(e.into());
+                        match socket.send(payload).await {
+                            Ok(_) => {}
+                            // ICMP-derived errors (port/net unreachable, reset): the origin
+                            // may recover, so drop this datagram and keep the session alive.
+                            Err(e) if is_transient_origin_error(e.kind()) => {
+                                debug!(error = %e, "transient origin error on send, dropping datagram");
+                            }
+                            Err(e) => break Err(e.into()),
                         }
                         bytes_e2o = bytes_e2o.saturating_add(n);
                     }
@@ -770,6 +788,11 @@ async fn handle_udp_stream(
                             break Err(e.into());
                         }
                         bytes_o2e = bytes_o2e.saturating_add(n as u64);
+                    }
+                    // ICMP-derived errors on recv: the origin is unreachable right now
+                    // but the client may retry; keep the QUIC stream open.
+                    Err(e) if is_transient_origin_error(e.kind()) => {
+                        debug!(error = %e, "transient origin error on recv, continuing");
                     }
                     Err(e) => break Err(e.into()),
                 },
