@@ -67,8 +67,8 @@ jobs:
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
-          cache-from: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-buildcache:node
-          cache-to: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-buildcache:node,mode=max,ignore-error=true
+          cache-from: type=registry,ref=codeberg.org/towonel/towonel-buildcache:node
+          cache-to: type=registry,ref=codeberg.org/towonel/towonel-buildcache:node,mode=max,ignore-error=true
       - name: Compute agent image metadata
         id: meta-agent
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -104,8 +104,8 @@ jobs:
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
-          cache-from: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-buildcache:agent
-          cache-to: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-buildcache:agent,mode=max,ignore-error=true
+          cache-from: type=registry,ref=codeberg.org/towonel/towonel-buildcache:agent
+          cache-to: type=registry,ref=codeberg.org/towonel/towonel-buildcache:agent,mode=max,ignore-error=true
       - name: Compute hub-caddy image metadata
         id: meta-hub-caddy
         uses: https://data.forgejo.org/docker/metadata-action@v6
@@ -141,5 +141,5 @@ jobs:
           secrets: |
             SCCACHE_AWS_ACCESS_KEY_ID=${{ secrets.SCCACHE_AWS_ACCESS_KEY_ID }}
             SCCACHE_AWS_SECRET_ACCESS_KEY=${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
-          cache-from: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-buildcache:hub-caddy
-          cache-to: type=registry,ref=registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-buildcache:hub-caddy,mode=max,ignore-error=true
+          cache-from: type=registry,ref=codeberg.org/towonel/towonel-buildcache:hub-caddy
+          cache-to: type=registry,ref=codeberg.org/towonel/towonel-buildcache:hub-caddy,mode=max,ignore-error=true
