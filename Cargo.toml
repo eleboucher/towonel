@@ -7,7 +7,7 @@ publish = false
 
 [workspace.package]
 version = "0.1.34"
-rust-version = "1.95"
+rust-version = "1.96"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

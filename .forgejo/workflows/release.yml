@@ -92,7 +92,7 @@ jobs:
         with:
           platforms: arm64
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/dtolnay/rust-toolchain@1.96.0
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-edit

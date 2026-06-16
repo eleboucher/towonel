@@ -26,10 +26,14 @@ jobs:
       - uses: https://data.forgejo.org/actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # Authenticate (and persist) with a user PAT so the tag push below is
+          # authored by that user. The automatic Actions token can write but
+          # its pushes never trigger another workflow (recursion guard), so
+          # release.yml would not start. Must be a user PAT with content:write.
+          token: ${{ secrets.CODEBERG_TOKEN }}
 
       - name: Setup Rust
-        uses: https://github.com/dtolnay/rust-toolchain@stable
+        uses: https://github.com/dtolnay/rust-toolchain@1.96.0
 
       - name: Install git-cliff
         env:
@@ -92,14 +96,11 @@ jobs:
 
       - name: Commit and push tag
         env:
-          CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
           git config user.name "forgejo-actions[bot]"
           git config user.email "actions@codeberg.org"
-          git remote set-url origin \
-            "https://x-access-token:${CODEBERG_TOKEN}@codeberg.org/${GITHUB_REPOSITORY}.git"
           git add Cargo.toml Cargo.lock
           git commit -m "chore(release): ${TAG}"
           git tag -a "${TAG}" -m "Release ${TAG}"
