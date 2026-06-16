@@ -23,7 +23,7 @@ jobs:
     runs-on: docker
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/dtolnay/rust-toolchain@1.95.0
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -38,7 +38,15 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/dtolnay/rust-toolchain@1.95.0
+      - uses: https://github.com/actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: sccache
@@ -56,17 +64,27 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.SCCACHE_AWS_SECRET_ACCESS_KEY }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/dtolnay/rust-toolchain@1.95.0
+      - uses: https://github.com/actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-nextest,sccache
       - run: cargo nextest run --workspace --all-features --no-fail-fast
+      - run: sccache --show-stats
+        if: always()
 
   deny:
     runs-on: docker
     steps:
       - uses: https://data.forgejo.org/actions/checkout@v6
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - uses: https://github.com/dtolnay/rust-toolchain@1.95.0
       - uses: https://github.com/taiki-e/install-action@v2
         with:
           tool: cargo-deny
