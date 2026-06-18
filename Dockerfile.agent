@@ -5,7 +5,7 @@ ARG BUILDARCH
 # renovate: datasource=github-releases depName=ziglang/zig
 ARG ZIG_VERSION=0.16.0
 # renovate: datasource=github-releases depName=rust-cross/cargo-zigbuild
-ARG CARGO_ZIGBUILD_VERSION=0.22.3
+ARG CARGO_ZIGBUILD_VERSION=0.23.0
 # renovate: datasource=github-releases depName=mozilla/sccache
 ARG SCCACHE_VERSION=0.15.0
 # renovate: datasource=crate depName=cargo-chef
