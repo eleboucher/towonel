@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.24
+# syntax=docker/dockerfile:1.25
 
 # Bundled hub image: towonel-node + Caddy (with the L4 plugin), supervised
 # by tini and a small bash entrypoint. Caddy binds the privileged ports
