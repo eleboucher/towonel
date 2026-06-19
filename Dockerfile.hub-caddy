@@ -21,7 +21,7 @@ ARG ZIG_VERSION=0.16.0
 # renovate: datasource=github-releases depName=rust-cross/cargo-zigbuild
 ARG CARGO_ZIGBUILD_VERSION=0.23.0
 # renovate: datasource=github-releases depName=mozilla/sccache
-ARG SCCACHE_VERSION=0.15.0
+ARG SCCACHE_VERSION=0.16.0
 # renovate: datasource=crate depName=cargo-chef
 ARG CARGO_CHEF_VERSION=0.1.77
 # sccache cannot cache incremental artifacts; release builds do not use them.
