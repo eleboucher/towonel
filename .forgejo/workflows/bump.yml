@@ -23,7 +23,7 @@ jobs:
       contents: write
     runs-on: docker
     steps:
-      - uses: https://data.forgejo.org/actions/checkout@v6
+      - uses: https://data.forgejo.org/actions/checkout@v7
         with:
           fetch-depth: 0
           # Authenticate (and persist) with a user PAT so the tag push below is
