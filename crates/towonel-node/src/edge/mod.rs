@@ -45,6 +45,12 @@ const PEEK_BUF_SIZE: usize = 16_384;
 const PEEK_MAX_ATTEMPTS: u32 = 20;
 const PEEK_RETRY_DELAY: Duration = Duration::from_millis(5);
 
+/// Wall-clock bound on the peek phase. `PEEK_MAX_ATTEMPTS` only caps retries
+/// between peeks; a peer that connects and sends nothing blocks the first
+/// `tcp.peek()` forever, pinning one accept task and socket FD per stalled
+/// connection — the same FD-exhaustion guarded by `PROXY_PROTOCOL_TIMEOUT`.
+const PEEK_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Bound on how long we'll wait for a trusted peer to deliver its PROXY v2
 /// header. Without this, a misconfigured Caddy or a noisy port-scanner inside
 /// the docker bridge could pin one accept task per stalled connection and
@@ -819,23 +825,33 @@ async fn pick_agent_and_open_stream(
 /// across multiple TCP segments. Returns once the record is complete or the
 /// attempt budget is exhausted.
 async fn peek_client_hello(tcp: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
-    for attempt in 0..PEEK_MAX_ATTEMPTS {
-        let n = tcp.peek(buf).await?;
-        let peeked = buf.get(..n).unwrap_or(buf);
-        if tls_record_complete(peeked) || n >= buf.len() {
-            return Ok(n);
+    let peek = async {
+        for attempt in 0..PEEK_MAX_ATTEMPTS {
+            let n = tcp.peek(buf).await?;
+            let peeked = buf.get(..n).unwrap_or(buf);
+            if tls_record_complete(peeked) || n >= buf.len() {
+                return Ok(n);
+            }
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "client closed before sending ClientHello",
+                ));
+            }
+            if attempt + 1 < PEEK_MAX_ATTEMPTS {
+                tokio::time::sleep(PEEK_RETRY_DELAY).await;
+            }
         }
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "client closed before sending ClientHello",
-            ));
-        }
-        if attempt + 1 < PEEK_MAX_ATTEMPTS {
-            tokio::time::sleep(PEEK_RETRY_DELAY).await;
-        }
-    }
-    tcp.peek(buf).await
+        tcp.peek(buf).await
+    };
+    tokio::time::timeout(PEEK_TIMEOUT, peek)
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "client did not send a complete ClientHello within the peek timeout",
+            ))
+        })
 }
 
 /// TLS record framing: `[content_type:1][version:2][length:2][fragment:length]`.
@@ -1120,23 +1136,33 @@ async fn handle_http_connection_inner(
 /// [`peek_client_hello`] for plain HTTP: peek until the full request head
 /// (`\r\n\r\n`) is visible.
 async fn peek_http_request(tcp: &TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
-    for attempt in 0..PEEK_MAX_ATTEMPTS {
-        let n = tcp.peek(buf).await?;
-        let peeked = buf.get(..n).unwrap_or(buf);
-        if peeked.windows(4).any(|w| w == b"\r\n\r\n") || n >= buf.len() {
-            return Ok(n);
+    let peek = async {
+        for attempt in 0..PEEK_MAX_ATTEMPTS {
+            let n = tcp.peek(buf).await?;
+            let peeked = buf.get(..n).unwrap_or(buf);
+            if peeked.windows(4).any(|w| w == b"\r\n\r\n") || n >= buf.len() {
+                return Ok(n);
+            }
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "client closed before sending HTTP request",
+                ));
+            }
+            if attempt + 1 < PEEK_MAX_ATTEMPTS {
+                tokio::time::sleep(PEEK_RETRY_DELAY).await;
+            }
         }
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "client closed before sending HTTP request",
-            ));
-        }
-        if attempt + 1 < PEEK_MAX_ATTEMPTS {
-            tokio::time::sleep(PEEK_RETRY_DELAY).await;
-        }
-    }
-    tcp.peek(buf).await
+        tcp.peek(buf).await
+    };
+    tokio::time::timeout(PEEK_TIMEOUT, peek)
+        .await
+        .unwrap_or_else(|_elapsed| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "client did not send a complete HTTP request within the peek timeout",
+            ))
+        })
 }
 
 async fn peek_http_hostname(tcp: &TcpStream) -> anyhow::Result<String> {
@@ -1864,6 +1890,28 @@ mod tests {
         let mut buf = [0u8; PEEK_BUF_SIZE];
         let err = peek_http_request(&server, &mut buf).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peek_http_request_times_out_on_silent_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; PEEK_BUF_SIZE];
+        let err = peek_http_request(&server, &mut buf).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn peek_client_hello_times_out_on_silent_client() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; PEEK_BUF_SIZE];
+        let err = peek_client_hello(&server, &mut buf).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[tokio::test]
