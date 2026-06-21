@@ -22,8 +22,8 @@ use towonel_common::invite::InviteToken;
 use tracing::{info, warn};
 
 use crate::hub_client::{
-    check_response, fetch_latest_sequence, is_rate_limited, is_sequence_conflict,
-    is_unsupported_op, retry_on_rate_limit, submit_entry,
+    check_response, fetch_latest_sequence, is_hostname_not_owned, is_rate_limited,
+    is_sequence_conflict, is_unsupported_op, retry_on_rate_limit, submit_entry,
 };
 
 /// Env var that carries the `tt_inv_2_...` token. Presence of this var is
@@ -203,7 +203,10 @@ pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
         + 1;
 
     for hostname in stale {
-        submit_with_retry(
+        // A hostname dropped from the invite is no longer owned, so the hub
+        // refuses to delete its orphaned entry. That cleanup is harmless to
+        // skip; failing here would wedge the agent in a restart loop.
+        match submit_with_retry(
             ctx,
             &mut next_seq,
             ConfigOp::DeleteHostname {
@@ -211,8 +214,14 @@ pub async fn publish_hostnames(ctx: &BootstrapContext) -> anyhow::Result<()> {
             },
             &format!("DeleteHostname {hostname}"),
         )
-        .await?;
-        info!(%hostname, "removed stale hostname");
+        .await
+        {
+            Ok(()) => info!(%hostname, "removed stale hostname"),
+            Err(e) if is_hostname_not_owned(&e) => {
+                warn!(%hostname, "hub refused stale hostname cleanup; skipping");
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     for hostname in missing {

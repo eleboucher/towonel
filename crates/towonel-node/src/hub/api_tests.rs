@@ -746,6 +746,30 @@ async fn tenant_cannot_claim_unapproved_hostname() {
     assert_eq!(json["error"]["code"], "hostname_not_owned");
 }
 
+#[tokio::test]
+async fn tenant_can_delete_unowned_hostname() {
+    // When a hostname is dropped from the invite it leaves an orphaned signed
+    // entry. The tenant must be able to delete it even though it's no longer
+    // owned, otherwise the cleanup can never succeed.
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::DeleteHostname {
+            hostname: "gone.example.com".into(),
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
 // POST /v1/bootstrap (v2: replaces /v1/invites/redeem)
 
 #[tokio::test]

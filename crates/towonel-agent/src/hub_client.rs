@@ -71,6 +71,15 @@ pub fn is_rate_limited(err: &anyhow::Error) -> bool {
         .is_some_and(|e| e.status == 429)
 }
 
+/// `true` if the hub rejected the entry with `hostname_not_owned`. Harmless for
+/// `DeleteHostname` cleanup of a hostname removed from the invite -- skip it
+/// rather than treating the rejection as fatal.
+#[must_use]
+pub fn is_hostname_not_owned(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<HubApiError>()
+        .is_some_and(|e| e.code == "hostname_not_owned")
+}
+
 pub async fn retry_on_rate_limit<T, F, Fut>(label: &str, f: F) -> anyhow::Result<T>
 where
     F: FnMut() -> Fut,
@@ -214,6 +223,28 @@ mod tests {
         }
         .into();
         assert!(is_rate_limited(&err));
+    }
+
+    #[test]
+    fn is_hostname_not_owned_matches_403() {
+        let err: anyhow::Error = HubApiError {
+            status: 403,
+            code: "hostname_not_owned".into(),
+            message: "tenant is not authorized for hostname: a.example.com".into(),
+        }
+        .into();
+        assert!(is_hostname_not_owned(&err));
+    }
+
+    #[test]
+    fn is_hostname_not_owned_rejects_other_codes() {
+        let err: anyhow::Error = HubApiError {
+            status: 409,
+            code: "sequence_conflict".into(),
+            message: String::new(),
+        }
+        .into();
+        assert!(!is_hostname_not_owned(&err));
     }
 
     #[test]

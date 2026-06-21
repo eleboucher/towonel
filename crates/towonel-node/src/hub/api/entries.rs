@@ -334,7 +334,11 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
             state.metrics.record_reject(reject_reason::INVALID_HOSTNAME);
             return invalid_request(format!("invalid hostname `{hostname}`: {e}"));
         }
-        if !policy.is_hostname_allowed(&payload.tenant_id, hostname) {
+        // DeleteHostname is never ownership-gated: a hostname removed from the
+        // invite is no longer owned, so gating its delete would orphan the
+        // tenant's own entry forever.
+        let enforce_ownership = !matches!(payload.op, ConfigOp::DeleteHostname { .. });
+        if enforce_ownership && !policy.is_hostname_allowed(&payload.tenant_id, hostname) {
             state
                 .metrics
                 .record_reject(reject_reason::HOSTNAME_NOT_OWNED);
