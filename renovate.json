@@ -10,6 +10,11 @@
       "description": "Keep rust-toolchain.toml and mise.toml in sync on Rust bumps",
       "matchDepNames": ["rust"],
       "groupName": "rust toolchain"
+    },
+    {
+      "description": "No breaking '!' on major updates; a dep/CI bump must not force a product major",
+      "matchUpdateTypes": ["major"],
+      "commitMessagePrefix": "{{semanticCommitType}}({{semanticCommitScope}}):"
     }
   ]
 }
