@@ -57,6 +57,25 @@ const PEEK_TIMEOUT: Duration = Duration::from_secs(10);
 /// exhaust FDs. Caddy's own listener wrapper defaults to 2s.
 const PROXY_PROTOCOL_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Keepalive on accepted client sockets so the kernel reaps a half-open peer
+/// (gone without FIN/RST) instead of leaving `pipe_tcp` blocked on it forever,
+/// leaking the socket FD. Idle peers that still ACK are untouched.
+const CLIENT_KEEPALIVE_IDLE: Duration = Duration::from_mins(1);
+const CLIENT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Set `TCP_NODELAY` + `SO_KEEPALIVE` on a freshly accepted client socket.
+fn configure_client_socket(stream: &TcpStream, peer_addr: std::net::SocketAddr) {
+    if let Err(e) = stream.set_nodelay(true) {
+        debug!(%peer_addr, error = %e, "failed to set TCP_NODELAY on client socket");
+    }
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(CLIENT_KEEPALIVE_IDLE)
+        .with_interval(CLIENT_KEEPALIVE_INTERVAL);
+    if let Err(e) = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+        debug!(%peer_addr, error = %e, "failed to set SO_KEEPALIVE on client socket");
+    }
+}
+
 /// Hard cap on UDP sessions per listener. UDP source addresses are
 /// trivially spoofable so an attacker could otherwise pin millions of
 /// `(src_ip, src_port)` sessions, each allocating a tokio task + QUIC
@@ -658,9 +677,7 @@ async fn accept_loop(
             drop(tcp_stream);
             continue;
         };
-        if let Err(e) = tcp_stream.set_nodelay(true) {
-            debug!(%peer_addr, error = %e, "failed to set TCP_NODELAY on client socket");
-        }
+        configure_client_socket(&tcp_stream, peer_addr);
         debug!(%peer_addr, "accepted TCP connection");
 
         let ctx = Arc::clone(&ctx);
@@ -1372,9 +1389,7 @@ async fn tcp_accept_loop(
             drop(tcp_stream);
             continue;
         };
-        if let Err(e) = tcp_stream.set_nodelay(true) {
-            debug!(%peer_addr, error = %e, "failed to set TCP_NODELAY on tcp service client");
-        }
+        configure_client_socket(&tcp_stream, peer_addr);
         debug!(%peer_addr, service = %binding.service, "accepted tcp service connection");
 
         let ctx = Arc::clone(&ctx);

@@ -32,6 +32,7 @@ backon = { workspace = true }
 fastrand = { workspace = true }
 prometheus = { workspace = true }
 tokio-util = { workspace = true }
+socket2 = { workspace = true }
 kube = { version = "4.0", default-features = false, features = [
   "client",
   "rustls-tls",

@@ -46,18 +46,39 @@ const ORIGIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// accepts the TCP but never completes TLS would otherwise stall the task.
 const ORIGIN_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Keepalive on origin sockets so the kernel reaps a half-open origin (gone
+/// without FIN/RST) instead of leaving the copy blocked on it forever, leaking
+/// the socket FD.
+const ORIGIN_KEEPALIVE_IDLE: Duration = Duration::from_mins(1);
+const ORIGIN_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Set `TCP_NODELAY` + `SO_KEEPALIVE` on a freshly connected origin socket.
+fn configure_origin_socket(stream: &TcpStream) {
+    if let Err(e) = stream.set_nodelay(true) {
+        warn!(error = %e, "failed to set TCP_NODELAY on origin socket");
+    }
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(ORIGIN_KEEPALIVE_IDLE)
+        .with_interval(ORIGIN_KEEPALIVE_INTERVAL);
+    if let Err(e) = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive) {
+        warn!(error = %e, "failed to set SO_KEEPALIVE on origin socket");
+    }
+}
+
 async fn tcp_connect_timeout<A>(addr: A) -> std::io::Result<TcpStream>
 where
     A: tokio::net::ToSocketAddrs,
 {
-    tokio::time::timeout(ORIGIN_CONNECT_TIMEOUT, TcpStream::connect(addr))
+    let stream = tokio::time::timeout(ORIGIN_CONNECT_TIMEOUT, TcpStream::connect(addr))
         .await
         .unwrap_or_else(|_elapsed| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "origin TCP connect timed out",
             ))
-        })
+        })?;
+    configure_origin_socket(&stream);
+    Ok(stream)
 }
 
 /// Bound DNS resolution so a slow/hostile resolver can't pin tasks.
@@ -516,9 +537,6 @@ async fn handle_stream(
                 return Err(e);
             }
         };
-        if let Err(e) = tcp_stream.set_nodelay(true) {
-            warn!(origin = %target.address, error = %e, "failed to set TCP_NODELAY on origin socket");
-        }
 
         // `:80` ingress is always cleartext, even if the route configured
         // `origin_server_name` for the `:443` path.
@@ -666,9 +684,6 @@ async fn handle_tcp_stream(
                 return Err(e);
             }
         };
-        if let Err(e) = origin.set_nodelay(true) {
-            warn!(origin = %target.address, error = %e, "failed to set TCP_NODELAY on tcp origin");
-        }
 
         let (origin_read, mut origin_write) = origin.into_split();
         let mut origin_read = io::BufReader::with_capacity(COPY_BUF_SIZE, origin_read);
