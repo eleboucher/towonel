@@ -49,6 +49,16 @@ tests:
           content:
             name: TOWONEL_HUB_LISTEN_ADDR
             value: 0.0.0.0:8443
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_HUB_RATE_LIMIT_PER_SEC
+            value: "5"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_HUB_RATE_LIMIT_BURST
+            value: "30"
 
   - it: declares the hub container ports
     documentSelector:

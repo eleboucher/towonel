@@ -213,6 +213,9 @@ pub struct HubConfig {
     /// used — fail closed so a private-range peer can't spoof the key.
     /// `TOWONEL_HUB_TRUSTED_PROXIES` (CSV CIDRs).
     pub trusted_proxies: Vec<IpNet>,
+    /// Per-IP rate limit on the public auth/bootstrap surface.
+    /// `TOWONEL_HUB_RATE_LIMIT_PER_SEC` / `TOWONEL_HUB_RATE_LIMIT_BURST`.
+    pub rate_limit: RateLimitConfig,
     /// Active/passive leader election among hubs sharing one Postgres.
     /// `TOWONEL_HUB_LEADER_ELECTION` (default `true`). Ignored for `SQLite`
     /// (single instance is always leader).
@@ -225,6 +228,22 @@ pub struct HubConfig {
     pub console_url: Option<String>,
     pub mail: Option<MailConfig>,
     pub webauthn_rp_id: Option<String>,
+}
+
+/// Per-IP rate limit for the public surface.
+#[derive(Debug, Clone, Copy)]
+pub struct RateLimitConfig {
+    pub per_second: u32,
+    pub burst: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            per_second: 5,
+            burst: 30,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -324,6 +343,24 @@ fn default_trusted_cidrs() -> Vec<IpNet> {
     .collect()
 }
 
+fn build_rate_limit(
+    per_second: Option<u32>,
+    burst: Option<u32>,
+) -> anyhow::Result<RateLimitConfig> {
+    let defaults = RateLimitConfig::default();
+    let cfg = RateLimitConfig {
+        per_second: per_second.unwrap_or(defaults.per_second),
+        burst: burst.unwrap_or(defaults.burst),
+    };
+    if cfg.per_second == 0 {
+        anyhow::bail!("TOWONEL_HUB_RATE_LIMIT_PER_SEC must be greater than 0");
+    }
+    if cfg.burst == 0 {
+        anyhow::bail!("TOWONEL_HUB_RATE_LIMIT_BURST must be greater than 0");
+    }
+    Ok(cfg)
+}
+
 fn parse_cidr_list(raw: &str) -> anyhow::Result<Vec<IpNet>> {
     raw.split(',')
         .map(str::trim)
@@ -394,6 +431,8 @@ struct RawEnv {
     hub_web_enabled: Option<bool>,
     hub_ports_require_reservation: Option<bool>,
     hub_trusted_proxies: Option<String>,
+    hub_rate_limit_per_sec: Option<u32>,
+    hub_rate_limit_burst: Option<u32>,
     hub_oidc_codeberg_issuer: Option<String>,
     hub_oidc_codeberg_client_id: Option<String>,
     hub_oidc_codeberg_client_secret: Option<String>,
@@ -475,6 +514,8 @@ impl NodeConfig {
             hub_web_enabled,
             hub_ports_require_reservation,
             hub_trusted_proxies,
+            hub_rate_limit_per_sec,
+            hub_rate_limit_burst,
             hub_oidc_codeberg_issuer,
             hub_oidc_codeberg_client_id,
             hub_oidc_codeberg_client_secret,
@@ -580,6 +621,8 @@ impl NodeConfig {
             web_enabled: hub_web_enabled,
             ports_require_reservation: hub_ports_require_reservation,
             trusted_proxies: hub_trusted_proxies,
+            rate_limit_per_sec: hub_rate_limit_per_sec,
+            rate_limit_burst: hub_rate_limit_burst,
             oidc,
             console_url,
             mail,
@@ -701,6 +744,8 @@ struct HubInputs<'a> {
     web_enabled: Option<bool>,
     ports_require_reservation: Option<bool>,
     trusted_proxies: Option<String>,
+    rate_limit_per_sec: Option<u32>,
+    rate_limit_burst: Option<u32>,
     oidc: OidcConfig,
     console_url: Option<String>,
     mail: Option<MailConfig>,
@@ -736,6 +781,8 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         web_enabled,
         ports_require_reservation,
         trusted_proxies,
+        rate_limit_per_sec,
+        rate_limit_burst,
         oidc,
         console_url,
         mail,
@@ -845,6 +892,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
             .map(parse_cidr_list)
             .transpose()?
             .unwrap_or_default(),
+        rate_limit: build_rate_limit(rate_limit_per_sec, rate_limit_burst)?,
         leader_election: leader_election.unwrap_or(true),
         leader_db_dsn,
         oidc,

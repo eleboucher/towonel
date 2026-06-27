@@ -30,6 +30,8 @@ allowPrivilegeEscalation (NoNewPrivs would block the file-cap bind of 443/80).
   {{- $_ := set $env "TOWONEL_HUB_LISTEN_ADDR" (printf "0.0.0.0:%v" $hub.apiPort) -}}
   {{- $_ := set $env "TOWONEL_HUB_LINK_LISTEN_ADDR" (printf "0.0.0.0:%v" $hub.linkPort) -}}
   {{- $_ := set $env "TOWONEL_HUB_HEALTH_LISTEN_ADDR" (printf "0.0.0.0:%v" $hub.metricsPort) -}}
+  {{- $_ := set $env "TOWONEL_HUB_RATE_LIMIT_PER_SEC" ($hub.rateLimitPerSecond | toString) -}}
+  {{- $_ := set $env "TOWONEL_HUB_RATE_LIMIT_BURST" ($hub.rateLimitBurst | toString) -}}
 {{- end -}}
 {{- if $edge.enabled -}}
   {{- $_ := set $env "TOWONEL_EDGE_LISTEN_ADDR" (printf "%s:%v" $edge.bindAddress $edge.httpsPort) -}}

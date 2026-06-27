@@ -78,6 +78,8 @@ Kubernetes: `>=1.31.0-0`
 | hub.enabled | bool | `true` | Run the hub control plane (TOWONEL_HUB_ENABLED). |
 | hub.linkPort | int | `51444` | Port edges dial for the hub link. |
 | hub.metricsPort | int | `9091` | Port serving hub health and Prometheus metrics. |
+| hub.rateLimitBurst | int | `30` | Per-IP burst allowance on the public API (TOWONEL_HUB_RATE_LIMIT_BURST). |
+| hub.rateLimitPerSecond | int | `5` | Per-IP requests/sec on the public API (TOWONEL_HUB_RATE_LIMIT_PER_SEC). |
 | monitoring.dashboards.annotations | object | `{}` | Annotations added to the dashboard ConfigMap. |
 | monitoring.dashboards.enabled | bool | `false` | Render the Grafana dashboard ConfigMap (for grafana-operator or the kube-prometheus-stack sidecar). The dashboard covers hub and edge metrics. |
 | monitoring.dashboards.grafanaOperator.allowCrossNamespaceImport | bool | `true` | If true allows for a Grafana in any namespace to access this GrafanaDashboard. |

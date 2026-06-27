@@ -27,6 +27,10 @@ hub:
   linkPort: 51444
   # -- Port serving hub health and Prometheus metrics.
   metricsPort: 9091
+  # -- Per-IP requests/sec on the public API (TOWONEL_HUB_RATE_LIMIT_PER_SEC).
+  rateLimitPerSecond: 5
+  # -- Per-IP burst allowance on the public API (TOWONEL_HUB_RATE_LIMIT_BURST).
+  rateLimitBurst: 30
 
 edge:
   # -- Run the public edge (TOWONEL_EDGE_ENABLED). Switches the workload to a

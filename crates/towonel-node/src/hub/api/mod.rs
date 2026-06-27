@@ -243,6 +243,8 @@ pub struct AppState {
     /// CIDRs allowed to set `X-Forwarded-For`. Empty = trust the direct peer
     /// IP only (fail-closed default).
     pub trusted_proxies: Vec<ipnet::IpNet>,
+    /// Per-IP rate limit applied to the public auth/bootstrap surface.
+    pub rate_limit: crate::config::RateLimitConfig,
 }
 
 #[derive(Default, Clone)]
@@ -466,6 +468,7 @@ fn build_router(state: Arc<AppState>, rate_limit: bool) -> Router {
         rate_limited_routes(state.web_enabled),
         rate_limit,
         state.trusted_proxies.clone().into(),
+        state.rate_limit,
     );
     let signed_public = signed_public_routes();
     let web_admin = web_admin_routes(state.web_enabled);
@@ -683,6 +686,7 @@ fn maybe_rate_limit(
     router: Router<Arc<AppState>>,
     rate_limit: bool,
     trusted_proxies: Arc<[ipnet::IpNet]>,
+    cfg: crate::config::RateLimitConfig,
 ) -> Router<Arc<AppState>> {
     if !rate_limit {
         return router;
@@ -690,12 +694,12 @@ fn maybe_rate_limit(
     let governor_conf = std::sync::Arc::new(
         #[expect(
             clippy::expect_used,
-            reason = "config builder values are constants; failure is a programmer error caught at startup"
+            reason = "per_second/burst are validated non-zero at config load; failure is a programmer error"
         )]
         tower_governor::governor::GovernorConfigBuilder::default()
             .key_extractor(ProxyAwareIpKeyExtractor(trusted_proxies))
-            .per_second(5)
-            .burst_size(30)
+            .per_second(u64::from(cfg.per_second))
+            .burst_size(cfg.burst)
             .finish()
             .expect("tower_governor config is valid"),
     );

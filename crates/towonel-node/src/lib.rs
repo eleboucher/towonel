@@ -828,6 +828,7 @@ async fn build_hub_params(
         mailer,
         webauthn_rp_id: config.hub.webauthn_rp_id.clone(),
         trusted_proxies: config.hub.trusted_proxies.clone(),
+        rate_limit: config.hub.rate_limit,
     })
 }
 

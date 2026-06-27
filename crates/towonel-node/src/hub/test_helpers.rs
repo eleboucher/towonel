@@ -185,6 +185,7 @@ impl TestHub {
             passkey_auth_states: super::api::new_passkey_auth_states(),
             tls: None,
             trusted_proxies: vec![],
+            rate_limit: crate::config::RateLimitConfig::default(),
         });
 
         let app = router_unlimited(state.clone()).merge(health_router(state.clone()));

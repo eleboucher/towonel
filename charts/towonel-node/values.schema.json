@@ -322,6 +322,18 @@
           "description": "Port serving hub health and Prometheus metrics.",
           "title": "metricsPort",
           "type": "integer"
+        },
+        "rateLimitBurst": {
+          "default": 30,
+          "description": "Per-IP burst allowance on the public API (TOWONEL_HUB_RATE_LIMIT_BURST).",
+          "title": "rateLimitBurst",
+          "type": "integer"
+        },
+        "rateLimitPerSecond": {
+          "default": 5,
+          "description": "Per-IP requests/sec on the public API (TOWONEL_HUB_RATE_LIMIT_PER_SEC).",
+          "title": "rateLimitPerSecond",
+          "type": "integer"
         }
       },
       "required": [],
