@@ -25,6 +25,8 @@ pub mod users;
 
 pub use types::*;
 
+use std::time::Duration;
+
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectOptions, ConnectionTrait, Database,
     DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
@@ -75,9 +77,25 @@ impl Db {
     /// migrations. `url` accepts `sqlite://...` or `postgres://...`.
     /// `max_open` and `max_idle` configure the connection pool.
     pub async fn open(url: &str, max_open: u32, max_idle: u32) -> anyhow::Result<Self> {
+        // Recycle connections so a backend/pooler restart can't leave a dead
+        // socket parked in the pool for reuse (what wedged the hub: unready,
+        // never self-recovering).
+        const MAX_LIFETIME: Duration = Duration::from_mins(30);
+        const IDLE_TIMEOUT: Duration = Duration::from_mins(10);
+        // Bound connect/acquire so a down DB fails fast (503 on /v1/readyz)
+        // instead of hanging.
+        const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+        const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(8);
+
         let mut opts = ConnectOptions::new(url.to_string());
         opts.max_connections(max_open)
             .min_connections(max_idle)
+            .max_lifetime(MAX_LIFETIME)
+            .idle_timeout(IDLE_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .acquire_timeout(ACQUIRE_TIMEOUT)
+            // Ping before handing out so a broken connection is replaced, not returned.
+            .test_before_acquire(true)
             .sqlx_logging_level(tracing::log::LevelFilter::Debug);
         let conn = Database::connect(opts).await?;
 
