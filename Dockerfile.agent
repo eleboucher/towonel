@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.25
 
-FROM --platform=$BUILDPLATFORM rust:1.96-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.97-bookworm AS chef
 ARG BUILDARCH
 # renovate: datasource=github-releases depName=ziglang/zig
 ARG ZIG_VERSION=0.16.0

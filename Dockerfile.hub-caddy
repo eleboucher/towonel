@@ -14,7 +14,7 @@ ARG CADDY_VERSION=2.11.4
 ARG CADDY_L4_VERSION=v0.1.1
 
 # ============================================================
-FROM --platform=$BUILDPLATFORM rust:1.96-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.97-bookworm AS chef
 ARG BUILDARCH
 # renovate: datasource=github-releases depName=ziglang/zig
 ARG ZIG_VERSION=0.16.0
