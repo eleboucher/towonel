@@ -3,8 +3,8 @@
     reason = "TryInto length-mismatch + AEAD decrypt errors must not leak detail"
 )]
 
+use aes_gcm::Aes256Gcm;
 use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
 use zeroize::Zeroizing;
 
 pub const KEK_LEN: usize = 32;
@@ -50,7 +50,7 @@ impl HubKek {
         let cipher = Aes256Gcm::new_from_slice(self.0.as_slice())
             .map_err(|e| anyhow::anyhow!("AES-256-GCM init: {e}"))?;
         let ciphertext = cipher
-            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+            .encrypt((&nonce_bytes).into(), plaintext)
             .map_err(|e| anyhow::anyhow!("seal: {e}"))?;
         let mut out = Vec::with_capacity(KEK_NONCE_LEN + ciphertext.len());
         out.extend_from_slice(&nonce_bytes);
@@ -65,7 +65,7 @@ impl HubKek {
         let cipher = Aes256Gcm::new_from_slice(self.0.as_slice())
             .map_err(|e| anyhow::anyhow!("AES-256-GCM init: {e}"))?;
         cipher
-            .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+            .decrypt(nonce_bytes.into(), ciphertext)
             .map_err(|_| anyhow::anyhow!("unseal failed — wrong KEK or corrupted blob"))
     }
 }

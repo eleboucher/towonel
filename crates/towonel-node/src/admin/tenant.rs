@@ -246,7 +246,7 @@ pub fn cmd_tenant_export_key(
     passphrase: Option<String>,
 ) -> anyhow::Result<()> {
     use aes_gcm::{
-        Aes256Gcm, Nonce,
+        Aes256Gcm,
         aead::{Aead, KeyInit},
     };
     use base64::Engine;
@@ -270,9 +270,8 @@ pub fn cmd_tenant_export_key(
     let enc_key = derive_key(passphrase.as_bytes(), &salt)?;
     let cipher = Aes256Gcm::new_from_slice(enc_key.as_slice())
         .map_err(|e| anyhow!("AES-256-GCM init failed: {e}"))?;
-    let nonce = Nonce::from_slice(&nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, seed.as_ref())
+        .encrypt((&nonce_bytes).into(), seed.as_ref())
         .map_err(|e| anyhow!("encryption failed: {e}"))?;
 
     let mut blob = Vec::with_capacity(ARGON2_SALT_LEN + AES_GCM_NONCE_LEN + ciphertext.len());
@@ -300,7 +299,7 @@ pub fn cmd_tenant_import_key(
     passphrase: Option<String>,
 ) -> anyhow::Result<()> {
     use aes_gcm::{
-        Aes256Gcm, Nonce,
+        Aes256Gcm,
         aead::{Aead, KeyInit},
     };
     use base64::Engine;
@@ -340,9 +339,11 @@ pub fn cmd_tenant_import_key(
     let enc_key = derive_key(passphrase.as_bytes(), salt)?;
     let cipher = Aes256Gcm::new_from_slice(enc_key.as_slice())
         .map_err(|e| anyhow!("AES-256-GCM init failed: {e}"))?;
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce: [u8; AES_GCM_NONCE_LEN] = nonce_bytes
+        .try_into()
+        .map_err(|_e| anyhow!("invalid nonce length"))?;
     let seed_bytes = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt((&nonce).into(), ciphertext)
         .map_err(|_e| anyhow!("decryption failed -- wrong passphrase?"))?;
 
     let seed: [u8; 32] = seed_bytes.as_slice().try_into().map_err(|_e| {

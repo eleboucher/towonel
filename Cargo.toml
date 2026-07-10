@@ -178,7 +178,7 @@ utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", default-features = false, features = [
   "axum",
 ] }
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 argon2 = "0.5"
 totp-rs = { version = "5", default-features = false }
 subtle = "2.6"
