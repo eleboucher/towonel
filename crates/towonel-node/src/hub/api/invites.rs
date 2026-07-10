@@ -482,6 +482,124 @@ pub(super) async fn get_invite(
     json_ok(summary)
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct RegionEdge {
+    /// iroh endpoint id of a live edge serving this region.
+    node_id: String,
+    /// Resolvable public IPs (A/AAAA) the edge advertises.
+    public_ips: Vec<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct RegionEndpoints {
+    /// Region label, e.g. `EU`, `CA`.
+    region: String,
+    /// `primary` for the invite's region, `failover` for each failover region.
+    role: &'static str,
+    /// Live edges currently serving this region (possibly empty).
+    edges: Vec<RegionEdge>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(super) struct InviteStatusResponse {
+    invite_id: String,
+    tenant_id: String,
+    /// Configured regions (primary first, then failover), each with its live edges.
+    regions: Vec<RegionEndpoints>,
+}
+
+/// Live edges serving `label`, case-insensitively (a region-less edge = default region).
+fn edges_in_region(
+    snapshot: &[super::super::live_edges::EdgeSnapshot],
+    label: &str,
+) -> Vec<RegionEdge> {
+    snapshot
+        .iter()
+        .filter_map(|(edge_id, _iroh, _caps, public_ips, region)| {
+            let in_region = region
+                .as_deref()
+                .unwrap_or(towonel_common::DEFAULT_REGION)
+                .eq_ignore_ascii_case(label);
+            if !in_region {
+                return None;
+            }
+            iroh::EndpointId::from_bytes(edge_id)
+                .ok()
+                .map(|node_id| RegionEdge {
+                    node_id: node_id.to_string(),
+                    public_ips: public_ips.clone(),
+                })
+        })
+        .collect()
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/invites/{id}/status",
+    tag = "invites",
+    params(("id" = String, Path, description = "Base64url invite id")),
+    responses(
+        (status = 200, description = "Per-region live edge endpoints for the tunnel", body = InviteStatusResponse),
+        (status = 400, description = "Invalid invite id"),
+        (status = 404, description = "Invite does not exist"),
+    ),
+    security(("operator_key" = []), ("session_cookie" = []), ("api_key" = [])),
+)]
+pub(super) async fn get_invite_status(
+    State(state): State<Arc<AppState>>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> Response {
+    let Some(invite_id) = parse_invite_id(&id) else {
+        return invalid_request("invite_id is not valid base64url");
+    };
+
+    let row = match state.db.get_invite(&invite_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return not_found("invite does not exist"),
+        Err(e) => {
+            warn!(error = %e, "get_invite failed");
+            return internal_error();
+        }
+    };
+
+    if let Err(resp) = check_invite_ownership(&state, &principal, &invite_id).await {
+        return resp;
+    }
+
+    // FQDN is not a hub concept — report region edges + public IPs; the operator does DNS.
+    let snapshot = state.live_edges.snapshot();
+    let primary = row
+        .region
+        .clone()
+        .unwrap_or_else(|| towonel_common::DEFAULT_REGION.to_string());
+
+    let mut regions: Vec<RegionEndpoints> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let ordered = std::iter::once((primary.as_str(), "primary")).chain(
+        row.failover_regions
+            .iter()
+            .map(|r| (r.as_str(), "failover")),
+    );
+    for (label, role) in ordered {
+        // Dedupe a failover region that repeats the primary.
+        if !seen.insert(label.to_uppercase()) {
+            continue;
+        }
+        regions.push(RegionEndpoints {
+            region: label.to_string(),
+            role,
+            edges: edges_in_region(&snapshot, label),
+        });
+    }
+
+    json_ok(InviteStatusResponse {
+        invite_id: B64.encode(row.invite_id),
+        tenant_id: row.tenant_id.to_string(),
+        regions,
+    })
+}
+
 #[utoipa::path(
     get,
     path = "/v1/users/{id}/invites",

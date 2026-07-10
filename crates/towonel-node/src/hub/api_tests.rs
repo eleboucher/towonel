@@ -897,6 +897,155 @@ fn inject_edge(hub: &TestHub, seed: u8, addr: &str, region: &str) -> String {
     node_id.to_string()
 }
 
+/// Like [`inject_edge`] but also advertises resolvable public IPs, which the
+/// invite status endpoint surfaces (bootstrap ignores them). Returns the
+/// edge's node-id string.
+fn inject_edge_with_ips(
+    hub: &TestHub,
+    seed: u8,
+    addr: &str,
+    public_ips: &[&str],
+    region: &str,
+) -> String {
+    let node_id = iroh::SecretKey::from([seed; 32]).public();
+    hub.state.live_edges.upsert(
+        *node_id.as_bytes(),
+        vec![addr.to_string()],
+        towonel_common::edge_link::EdgeCapabilities::default(),
+        public_ips.iter().map(|s| (*s).to_string()).collect(),
+        Some(region.to_string()),
+        towonel_common::time::now_ms(),
+    );
+    node_id.to_string()
+}
+
+// GET /v1/invites/{id}/status — per-region live edge endpoints (#38).
+
+#[tokio::test]
+async fn invite_status_groups_live_edges_by_configured_region() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let eu = inject_edge_with_ips(&hub, 2, "10.0.0.2:51820", &["203.0.113.2"], "EU");
+    let ca = inject_edge_with_ips(&hub, 3, "10.0.0.3:51820", &["198.51.100.3"], "CA");
+    // A live edge in a region the invite does not use: must be excluded.
+    let us = inject_edge_with_ips(&hub, 4, "10.0.0.4:51820", &["192.0.2.4"], "US");
+
+    let token =
+        create_invite_with_region(&hub, &client, "a", &["a.test"], Some("EU"), &["CA"]).await;
+
+    let (status, body) = get_json(
+        &client,
+        &hub.url(&format!(
+            "/v1/invites/{}/status",
+            B64.encode(token.invite_id)
+        )),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+
+    assert_eq!(status, 200, "status: {body}");
+    let regions = body["regions"].as_array().expect("regions array");
+    assert_eq!(regions.len(), 2, "only configured regions listed: {body}");
+
+    // Primary region first, then the failover region.
+    assert_eq!(regions[0]["region"], "EU");
+    assert_eq!(regions[0]["role"], "primary");
+    assert_eq!(regions[1]["region"], "CA");
+    assert_eq!(regions[1]["role"], "failover");
+
+    let eu_edges = regions[0]["edges"].as_array().unwrap();
+    assert_eq!(eu_edges.len(), 1);
+    assert_eq!(eu_edges[0]["node_id"], eu);
+    assert_eq!(eu_edges[0]["public_ips"][0], "203.0.113.2");
+
+    let ca_edges = regions[1]["edges"].as_array().unwrap();
+    assert_eq!(ca_edges.len(), 1);
+    assert_eq!(ca_edges[0]["node_id"], ca);
+    assert_eq!(ca_edges[0]["public_ips"][0], "198.51.100.3");
+
+    // The US edge (unconfigured region) appears nowhere.
+    let all_ids: Vec<String> = regions
+        .iter()
+        .flat_map(|r| r["edges"].as_array().unwrap())
+        .map(|e| e["node_id"].as_str().unwrap().to_string())
+        .collect();
+    assert!(!all_ids.contains(&us), "US edge excluded: {all_ids:?}");
+}
+
+#[tokio::test]
+async fn invite_status_lists_configured_region_with_no_live_edge() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    // Only an EU edge is live; the CA failover region has none.
+    inject_edge_with_ips(&hub, 2, "10.0.0.2:51820", &["203.0.113.2"], "EU");
+
+    let token =
+        create_invite_with_region(&hub, &client, "a", &["a.test"], Some("EU"), &["CA"]).await;
+
+    let (status, body) = get_json(
+        &client,
+        &hub.url(&format!(
+            "/v1/invites/{}/status",
+            B64.encode(token.invite_id)
+        )),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+
+    assert_eq!(status, 200, "status: {body}");
+    let regions = body["regions"].as_array().expect("regions array");
+    assert_eq!(regions.len(), 2);
+    assert_eq!(regions[1]["region"], "CA");
+    assert_eq!(regions[1]["role"], "failover");
+    assert!(
+        regions[1]["edges"].as_array().unwrap().is_empty(),
+        "CA has no live edge: {body}"
+    );
+}
+
+#[tokio::test]
+async fn invite_status_scoped_to_owner() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    let owner_cookie = signup_and_login_user(&hub, &client, "o@example.test", "hunter22!").await;
+    let other_cookie = signup_and_login_user(&hub, &client, "x@example.test", "hunter22!").await;
+
+    let create = client
+        .post(hub.url("/v1/invites"))
+        .header(reqwest::header::COOKIE, &owner_cookie)
+        .json(&json!({"name": "t", "hostnames": ["t.test"], "expires_in_secs": 3600}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), 200);
+    let invite_id = create.json::<Value>().await.unwrap()["invite_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = format!("/v1/invites/{invite_id}/status");
+
+    // The owning user can read their tunnel's per-region status.
+    let resp = client
+        .get(hub.url(&path))
+        .header(reqwest::header::COOKIE, &owner_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // A non-owner regular user gets 404 — no existence or edge-topology leak.
+    let resp = client
+        .get(hub.url(&path))
+        .header(reqwest::header::COOKIE, &other_cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
 /// Collect the `node_id`s returned in `iroh_endpoints`.
 fn endpoint_node_ids(body: &Value) -> Vec<String> {
     body["iroh_endpoints"]

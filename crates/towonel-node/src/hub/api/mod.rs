@@ -566,6 +566,7 @@ fn invites_routes() -> Router<Arc<AppState>> {
             "/v1/invites/{id}",
             get(invites::get_invite).delete(invites::delete_invite),
         )
+        .route("/v1/invites/{id}/status", get(invites::get_invite_status))
         .route(
             "/v1/invites/{id}/hostnames",
             post(invites::post_invite_hostnames),
