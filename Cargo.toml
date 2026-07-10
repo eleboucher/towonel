@@ -6,7 +6,7 @@ edition = "2024"
 publish = false
 
 [workspace.package]
-version = "1.0.1"
+version = "1.1.0"
 rust-version = "1.96"
 
 [workspace.lints.rust]
