@@ -207,6 +207,8 @@ pub struct HubConfig {
     pub web_enabled: bool,
     /// `TOWONEL_HUB_PORTS_REQUIRE_RESERVATION`.
     pub ports_require_reservation: bool,
+    /// Per-user port reservation quota. `0` means unlimited. `TOWONEL_HUB_USER_PORT_QUOTA`.
+    pub user_port_quota: i64,
     /// Reverse-proxy source ranges whose `X-Forwarded-For` is trusted when
     /// keying rate-limit / login-lockout counters. Empty (the default) means
     /// `X-Forwarded-For` is never honored and the immediate TCP peer is always
@@ -430,6 +432,7 @@ struct RawEnv {
     hub_link_psk: Option<String>,
     hub_web_enabled: Option<bool>,
     hub_ports_require_reservation: Option<bool>,
+    hub_user_port_quota: Option<i64>,
     hub_trusted_proxies: Option<String>,
     hub_rate_limit_per_sec: Option<u32>,
     hub_rate_limit_burst: Option<u32>,
@@ -513,6 +516,7 @@ impl NodeConfig {
             hub_link_psk,
             hub_web_enabled,
             hub_ports_require_reservation,
+            hub_user_port_quota,
             hub_trusted_proxies,
             hub_rate_limit_per_sec,
             hub_rate_limit_burst,
@@ -620,6 +624,7 @@ impl NodeConfig {
             tls: hub_tls,
             web_enabled: hub_web_enabled,
             ports_require_reservation: hub_ports_require_reservation,
+            user_port_quota: hub_user_port_quota,
             trusted_proxies: hub_trusted_proxies,
             rate_limit_per_sec: hub_rate_limit_per_sec,
             rate_limit_burst: hub_rate_limit_burst,
@@ -743,6 +748,7 @@ struct HubInputs<'a> {
     tls: Option<TlsConfig>,
     web_enabled: Option<bool>,
     ports_require_reservation: Option<bool>,
+    user_port_quota: Option<i64>,
     trusted_proxies: Option<String>,
     rate_limit_per_sec: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -780,6 +786,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         tls,
         web_enabled,
         ports_require_reservation,
+        user_port_quota,
         trusted_proxies,
         rate_limit_per_sec,
         rate_limit_burst,
@@ -887,6 +894,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         tls,
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
+        user_port_quota: user_port_quota.unwrap_or(0),
         trusted_proxies: trusted_proxies
             .as_deref()
             .map(parse_cidr_list)

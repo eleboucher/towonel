@@ -123,8 +123,6 @@ pub struct UserApiDoc;
         super::ports::list_ports,
         super::ports::delete_port,
         super::ports::get_available_ports,
-        super::app_settings::get_user_port_quota,
-        super::app_settings::put_user_port_quota,
         super::signup_invites::post_signup_invite,
         super::signup_invites::list_signup_invites,
         super::users::list_users,

@@ -1,6 +1,5 @@
 pub mod admin_actions;
 pub mod api_keys;
-pub mod app_settings;
 pub mod email_verification_tokens;
 pub mod entries;
 pub mod hub_init_canary;

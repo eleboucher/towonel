@@ -2925,14 +2925,8 @@ async fn delete_port_rejected_while_service_bound() {
 
 #[tokio::test]
 async fn user_port_quota_enforced() {
-    let hub = TestHub::start().await;
+    let hub = TestHub::start_with_quota(true, 2).await;
     let client = reqwest::Client::new();
-
-    hub.state
-        .db
-        .set_setting_int(super::db::app_settings::USER_PORT_QUOTA_KEY, 2, 1)
-        .await
-        .unwrap();
 
     let cookie = signup_and_login_user(&hub, &client, "quota@example.test", "hunter22!").await;
     let user_id = user_id_by_email(&hub, "quota@example.test").await;
@@ -2977,14 +2971,8 @@ async fn user_port_quota_enforced() {
 
 #[tokio::test]
 async fn operator_bearer_bypasses_quota() {
-    let hub = TestHub::start().await;
+    let hub = TestHub::start_with_quota(true, 0).await;
     let client = reqwest::Client::new();
-
-    hub.state
-        .db
-        .set_setting_int(super::db::app_settings::USER_PORT_QUOTA_KEY, 0, 1)
-        .await
-        .unwrap();
 
     let token = create_invite(&hub, &client, "op-tenant", &["a.op.test"]).await;
     let tenant = tenant_from_token(&token);
@@ -3077,40 +3065,6 @@ async fn available_ports_skips_reserved() {
 }
 
 #[tokio::test]
-async fn operator_can_read_and_update_quota_setting() {
-    let hub = TestHub::start().await;
-    let client = reqwest::Client::new();
-
-    let (status, body) = get_json(
-        &client,
-        &hub.url("/v1/settings/user-port-quota"),
-        Some(OPERATOR_KEY),
-    )
-    .await;
-    assert_eq!(status, 200);
-    assert_eq!(body["value"], 10);
-
-    let resp = client
-        .put(hub.url("/v1/settings/user-port-quota"))
-        .bearer_auth(OPERATOR_KEY)
-        .json(&json!({"value": 25}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["value"], 25);
-
-    let (_status, body) = get_json(
-        &client,
-        &hub.url("/v1/settings/user-port-quota"),
-        Some(OPERATOR_KEY),
-    )
-    .await;
-    assert_eq!(body["value"], 25);
-}
-
-#[tokio::test]
 async fn non_owner_user_gets_403_on_list_ports() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
@@ -3154,14 +3108,8 @@ async fn non_owner_user_gets_403_on_delete_port() {
 
 #[tokio::test]
 async fn concurrent_reserves_respect_quota() {
-    let hub = TestHub::start().await;
+    let hub = TestHub::start_with_quota(true, 3).await;
     let client = reqwest::Client::new();
-
-    hub.state
-        .db
-        .set_setting_int(super::db::app_settings::USER_PORT_QUOTA_KEY, 3, 1)
-        .await
-        .unwrap();
 
     let cookie = signup_and_login_user(&hub, &client, "race@example.test", "hunter22!").await;
     let user_id = user_id_by_email(&hub, "race@example.test").await;

@@ -12,7 +12,6 @@ use tracing::warn;
 use utoipa::ToSchema;
 
 use crate::hub::auth::middleware::Principal;
-use crate::hub::db::app_settings::{DEFAULT_USER_PORT_QUOTA, USER_PORT_QUOTA_KEY};
 use crate::hub::db::port_reservations::{NewPortReservation, PortProtocol, PortReservationRow};
 
 use super::{
@@ -156,6 +155,7 @@ pub(super) async fn post_port(
     };
 
     if let Some(user_id) = owner_user_id.as_deref()
+        && state.ports_require_reservation
         && let Err(resp) = enforce_user_port_quota(&state, user_id).await
     {
         return resp;
@@ -394,14 +394,10 @@ async fn authorize_tenant(
 }
 
 async fn enforce_user_port_quota(state: &Arc<AppState>, user_id: &str) -> Result<(), Response> {
-    let quota = match state.db.get_setting_int(USER_PORT_QUOTA_KEY).await {
-        Ok(Some(v)) => v,
-        Ok(None) => DEFAULT_USER_PORT_QUOTA,
-        Err(e) => {
-            warn!(error = %e, "get_setting_int user_port_quota failed");
-            return Err(internal_error());
-        }
-    };
+    let quota = state.user_port_quota;
+    if quota == 0 {
+        return Ok(());
+    }
     let used = match state.db.count_port_reservations_for_user(user_id).await {
         Ok(n) => n,
         Err(e) => {

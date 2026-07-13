@@ -1,7 +1,6 @@
 mod acme_account;
 mod agent_refresh;
 mod api_keys;
-mod app_settings;
 mod auth;
 mod bootstrap;
 mod entries;
@@ -224,6 +223,8 @@ pub struct AppState {
     pub web_enabled: bool,
     pub mailer: Option<super::mail::SharedMailer>,
     pub ports_require_reservation: bool,
+    /// Per-user port reservation quota. `0` means unlimited.
+    pub user_port_quota: i64,
     /// Port → (tenant, service) index, computed without the liveness filter
     /// so an offline agent's reservation still blocks another tenant from
     /// claiming the port. Read by `find_port_conflict` under the
@@ -533,10 +534,6 @@ fn operator_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/v1/tenants/{id}", delete(entries::delete_tenant))
         .route("/v1/ports", get(ports::list_all_ports))
         .route("/v1/edges", get(entries::list_edges))
-        .route(
-            "/v1/settings/user-port-quota",
-            get(app_settings::get_user_port_quota).put(app_settings::put_user_port_quota),
-        )
         .layer(middleware::from_extractor_with_state::<
             OperatorPrincipal,
             Arc<AppState>,

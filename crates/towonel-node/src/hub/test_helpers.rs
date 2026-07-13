@@ -88,20 +88,36 @@ impl TestHub {
     }
 
     pub(super) async fn start_with(ports_require_reservation: bool) -> Self {
-        Self::start_full(ports_require_reservation, vec!["127.0.0.1".to_string()]).await
+        Self::start_full(ports_require_reservation, 0, vec!["127.0.0.1".to_string()]).await
     }
 
     /// Start a hub whose edge advertises no public IPs, for exercising the
     /// "nothing to assign" path in port reservation.
     pub(super) async fn start_without_edge_ips() -> Self {
-        Self::start_full(false, Vec::new()).await
+        Self::start_full(false, 0, Vec::new()).await
+    }
+
+    pub(super) async fn start_with_quota(
+        ports_require_reservation: bool,
+        user_port_quota: i64,
+    ) -> Self {
+        Self::start_full(
+            ports_require_reservation,
+            user_port_quota,
+            vec!["127.0.0.1".to_string()],
+        )
+        .await
     }
 
     #[expect(
         clippy::too_many_lines,
         reason = "test-only builder, line count is inconsequential"
     )]
-    async fn start_full(ports_require_reservation: bool, edge_public_ips: Vec<String>) -> Self {
+    async fn start_full(
+        ports_require_reservation: bool,
+        user_port_quota: i64,
+        edge_public_ips: Vec<String>,
+    ) -> Self {
         // Init once so test failures show the hub's `warn!`/`error!` lines.
         // Safe to call repeatedly; only the first wins.
         use std::sync::Once;
@@ -170,6 +186,7 @@ impl TestHub {
             web_enabled: true,
             mailer: Some(Arc::clone(&mailer) as super::mail::SharedMailer),
             ports_require_reservation,
+            user_port_quota,
             oidc: super::api::OidcRuntimes::default(),
             webauthn: {
                 let origin =
