@@ -209,6 +209,9 @@ pub struct HubConfig {
     pub ports_require_reservation: bool,
     /// Per-user port reservation quota. `0` means unlimited. `TOWONEL_HUB_USER_PORT_QUOTA`.
     pub user_port_quota: i64,
+    /// Largest UDP port range (inclusive port count) a tenant may claim in one
+    /// `UpsertUdpServiceRange`. `TOWONEL_HUB_MAX_UDP_PORT_RANGE`.
+    pub max_udp_port_range: u16,
     /// Reverse-proxy source ranges whose `X-Forwarded-For` is trusted when
     /// keying rate-limit / login-lockout counters. Empty (the default) means
     /// `X-Forwarded-For` is never honored and the immediate TCP peer is always
@@ -433,6 +436,7 @@ struct RawEnv {
     hub_web_enabled: Option<bool>,
     hub_ports_require_reservation: Option<bool>,
     hub_user_port_quota: Option<i64>,
+    hub_max_udp_port_range: Option<u16>,
     hub_trusted_proxies: Option<String>,
     hub_rate_limit_per_sec: Option<u32>,
     hub_rate_limit_burst: Option<u32>,
@@ -517,6 +521,7 @@ impl NodeConfig {
             hub_web_enabled,
             hub_ports_require_reservation,
             hub_user_port_quota,
+            hub_max_udp_port_range,
             hub_trusted_proxies,
             hub_rate_limit_per_sec,
             hub_rate_limit_burst,
@@ -625,6 +630,7 @@ impl NodeConfig {
             web_enabled: hub_web_enabled,
             ports_require_reservation: hub_ports_require_reservation,
             user_port_quota: hub_user_port_quota,
+            max_udp_port_range: hub_max_udp_port_range,
             trusted_proxies: hub_trusted_proxies,
             rate_limit_per_sec: hub_rate_limit_per_sec,
             rate_limit_burst: hub_rate_limit_burst,
@@ -749,6 +755,7 @@ struct HubInputs<'a> {
     web_enabled: Option<bool>,
     ports_require_reservation: Option<bool>,
     user_port_quota: Option<i64>,
+    max_udp_port_range: Option<u16>,
     trusted_proxies: Option<String>,
     rate_limit_per_sec: Option<u32>,
     rate_limit_burst: Option<u32>,
@@ -787,6 +794,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         web_enabled,
         ports_require_reservation,
         user_port_quota,
+        max_udp_port_range,
         trusted_proxies,
         rate_limit_per_sec,
         rate_limit_burst,
@@ -895,6 +903,7 @@ fn build_hub_config(inputs: HubInputs<'_>) -> anyhow::Result<HubConfig> {
         web_enabled: web_enabled.unwrap_or(false),
         ports_require_reservation: ports_require_reservation.unwrap_or(false),
         user_port_quota: user_port_quota.unwrap_or(0),
+        max_udp_port_range: max_udp_port_range.unwrap_or(512),
         trusted_proxies: trusted_proxies
             .as_deref()
             .map(parse_cidr_list)

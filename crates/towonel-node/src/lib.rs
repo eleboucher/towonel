@@ -823,6 +823,7 @@ async fn build_hub_params(
         web_enabled: config.hub.web_enabled,
         ports_require_reservation: config.hub.ports_require_reservation,
         user_port_quota: config.hub.user_port_quota,
+        max_udp_port_range: config.hub.max_udp_port_range,
         leader_election: config.hub.leader_election,
         leader_db_dsn: config.hub.leader_db_dsn.clone(),
         oidc: config.hub.oidc.clone(),

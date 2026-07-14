@@ -128,7 +128,8 @@ pub async fn cmd_tenant_leave(
             ConfigOp::DeleteTcpService { service } => {
                 owned_tcp_services.remove(&service);
             }
-            ConfigOp::UpsertUdpService { service, .. } => {
+            ConfigOp::UpsertUdpService { service, .. }
+            | ConfigOp::UpsertUdpServiceRange { service, .. } => {
                 owned_udp_services.insert(service);
             }
             ConfigOp::DeleteUdpService { service } => {

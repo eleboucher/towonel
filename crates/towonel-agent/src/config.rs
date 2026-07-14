@@ -25,7 +25,65 @@ pub struct TcpServiceConfig {
     pub listen_port: u16,
 }
 
-pub type UdpServiceConfig = TcpServiceConfig;
+/// UDP counterpart of [`TcpServiceConfig`]. Exactly one of `listen_port`
+/// (single port) or `listen_port_range` (`[start, end]`, inclusive) must be
+/// set. A range forwards each edge port to the origin host at the *same* port,
+/// so `origin` is host-only (no `:port`) for ranges. `idle_timeout_secs` sizes
+/// the edge session-reap window (`None` → edge default of 60s).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UdpServiceConfig {
+    pub name: String,
+    pub origin: String,
+    #[serde(default)]
+    pub listen_port: Option<u16>,
+    /// Inclusive `[start, end]` — deserialized from a two-element JSON array.
+    #[serde(default)]
+    pub listen_port_range: Option<(u16, u16)>,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u32>,
+}
+
+impl UdpServiceConfig {
+    /// Effective inclusive `(port_start, port_end)`. `None` when the config is
+    /// invalid (both or neither port field set); [`validate`] rejects that
+    /// before this is consulted at publish time.
+    pub const fn port_span(&self) -> Option<(u16, u16)> {
+        match (self.listen_port, self.listen_port_range) {
+            (Some(p), None) => Some((p, p)),
+            (None, Some(range)) => Some(range),
+            _ => None,
+        }
+    }
+
+    pub const fn is_range(&self) -> bool {
+        self.listen_port_range.is_some()
+    }
+}
+
+/// Matches the hub's `MAX_UDP_IDLE_TIMEOUT_SECS`; validated agent-side too so a
+/// misconfig fails at boot rather than at publish.
+const MAX_UDP_IDLE_TIMEOUT_SECS: u32 = 3600;
+
+/// Matches the hub's default `TOWONEL_HUB_MAX_UDP_PORT_RANGE`. Fail-fast on the
+/// agent; the hub stays authoritative (it may be configured lower).
+const MAX_UDP_PORT_RANGE: u16 = 512;
+
+/// True when `origin` carries an explicit `:port` (an `ip:port` socket address
+/// or a `hostname:port`). A bare IPv6 literal parses as `IpAddr` and is not
+/// treated as having a port.
+fn origin_has_port(origin: &str) -> bool {
+    use std::net::{IpAddr, SocketAddr};
+    if origin.parse::<SocketAddr>().is_ok() {
+        return true;
+    }
+    if origin.parse::<IpAddr>().is_ok() {
+        return false;
+    }
+    origin
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -99,7 +157,7 @@ impl AgentConfig {
         let hostnames: std::collections::HashSet<&str> =
             self.services.iter().map(|s| s.hostname.as_str()).collect();
         validate_raw_services("tcp_service", &self.tcp_services, &hostnames)?;
-        validate_raw_services("udp_service", &self.udp_services, &hostnames)?;
+        validate_raw_udp_services(&self.udp_services, &hostnames)?;
         Ok(())
     }
 }
@@ -142,6 +200,91 @@ fn validate_raw_services(
             anyhow::bail!(
                 "{label} name `{}` collides with a configured hostname",
                 svc.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// UDP variant of [`validate_raw_services`]: enforces the single-vs-range
+/// port shape, host-only origins for ranges, the idle-timeout bound, and
+/// non-overlapping port intervals across all UDP services.
+fn validate_raw_udp_services(
+    services: &[UdpServiceConfig],
+    hostnames: &std::collections::HashSet<&str>,
+) -> anyhow::Result<()> {
+    let label = "udp_service";
+    let mut names = std::collections::HashSet::new();
+    // (start, end, service name) for the cross-service overlap check.
+    let mut spans: Vec<(u16, u16, &str)> = Vec::new();
+    for svc in services {
+        if svc.name.is_empty() {
+            anyhow::bail!("{label} name must not be empty");
+        }
+        let (start, end) = match (svc.listen_port, svc.listen_port_range) {
+            (Some(_), Some(_)) => anyhow::bail!(
+                "{label} `{}` sets both listen_port and listen_port_range; use exactly one",
+                svc.name
+            ),
+            (None, None) => anyhow::bail!(
+                "{label} `{}` must set listen_port or listen_port_range",
+                svc.name
+            ),
+            (Some(p), None) => (p, p),
+            (None, Some((s, e))) => (s, e),
+        };
+        if start == 0 {
+            anyhow::bail!("{label} `{}` listen_port must not be 0", svc.name);
+        }
+        if svc.is_range() {
+            if end < start {
+                anyhow::bail!(
+                    "{label} `{}` listen_port_range end {end} must be >= start {start}",
+                    svc.name
+                );
+            }
+            let count = u32::from(end - start) + 1;
+            if count > u32::from(MAX_UDP_PORT_RANGE) {
+                anyhow::bail!(
+                    "{label} `{}` range spans {count} ports, over the limit of {MAX_UDP_PORT_RANGE}",
+                    svc.name
+                );
+            }
+            if origin_has_port(&svc.origin) {
+                anyhow::bail!(
+                    "{label} `{}` origin `{}` must be host-only (no :port) for a port range",
+                    svc.name,
+                    svc.origin
+                );
+            }
+        }
+        if let Some(secs) = svc.idle_timeout_secs
+            && (secs == 0 || secs > MAX_UDP_IDLE_TIMEOUT_SECS)
+        {
+            anyhow::bail!(
+                "{label} `{}` idle_timeout_secs {secs} must be between 1 and {MAX_UDP_IDLE_TIMEOUT_SECS}",
+                svc.name
+            );
+        }
+        if !names.insert(svc.name.as_str()) {
+            anyhow::bail!("duplicate {label} name `{}`", svc.name);
+        }
+        if hostnames.contains(svc.name.as_str()) {
+            anyhow::bail!(
+                "{label} name `{}` collides with a configured hostname",
+                svc.name
+            );
+        }
+        spans.push((start, end, svc.name.as_str()));
+    }
+
+    spans.sort_by_key(|(start, _, _)| *start);
+    for ((a_start, a_end, a_name), (b_start, b_end, b_name)) in
+        spans.iter().zip(spans.iter().skip(1))
+    {
+        if b_start <= a_end {
+            anyhow::bail!(
+                "{label} port ranges overlap: `{a_name}` ({a_start}-{a_end}) and `{b_name}` ({b_start}-{b_end})"
             );
         }
     }
@@ -280,7 +423,9 @@ mod tests {
             udp_services: vec![UdpServiceConfig {
                 name: "dns".into(),
                 origin: "127.0.0.1:5353".into(),
-                listen_port: 5353,
+                listen_port: Some(5353),
+                listen_port_range: None,
+                idle_timeout_secs: None,
             }],
         };
         cfg.validate().expect("valid udp_service should pass");
@@ -295,7 +440,148 @@ mod tests {
         let svcs: Vec<UdpServiceConfig> = serde_json::from_str(json).unwrap();
         assert_eq!(svcs.len(), 2);
         assert_eq!(svcs[0].name, "dns");
-        assert_eq!(svcs[1].listen_port, 51820);
+        assert_eq!(svcs[0].listen_port, Some(5353));
+        assert_eq!(svcs[0].idle_timeout_secs, None);
+        assert_eq!(svcs[1].listen_port, Some(51820));
+    }
+
+    #[test]
+    fn udp_services_json_parses_idle_timeout() {
+        let json = r#"[{"name":"turn","origin":"10.0.0.5:3478","listen_port":3478,"idle_timeout_secs":300}]"#;
+        let svcs: Vec<UdpServiceConfig> = serde_json::from_str(json).unwrap();
+        assert_eq!(svcs[0].idle_timeout_secs, Some(300));
+    }
+
+    #[test]
+    fn udp_range_json_parses() {
+        let json =
+            r#"[{"name":"turn-relay","origin":"10.0.0.5","listen_port_range":[49160,49660]}]"#;
+        let svcs: Vec<UdpServiceConfig> = serde_json::from_str(json).unwrap();
+        assert_eq!(svcs[0].listen_port_range, Some((49160, 49660)));
+        assert_eq!(svcs[0].port_span(), Some((49160, 49660)));
+        assert!(svcs[0].is_range());
+    }
+
+    fn udp_svc(f: impl FnOnce(&mut UdpServiceConfig)) -> AgentConfig {
+        let mut svc = UdpServiceConfig {
+            name: "svc".into(),
+            origin: "10.0.0.5".into(),
+            listen_port: None,
+            listen_port_range: None,
+            idle_timeout_secs: None,
+        };
+        f(&mut svc);
+        AgentConfig {
+            services: Vec::new(),
+            tcp_services: Vec::new(),
+            udp_services: vec![svc],
+        }
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_idle_timeout() {
+        assert!(
+            udp_svc(|s| {
+                s.origin = "10.0.0.5:3478".into();
+                s.listen_port = Some(3478);
+                s.idle_timeout_secs = Some(0);
+            })
+            .validate()
+            .is_err()
+        );
+        assert!(
+            udp_svc(|s| {
+                s.origin = "10.0.0.5:3478".into();
+                s.listen_port = Some(3478);
+                s.idle_timeout_secs = Some(3601);
+            })
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_both_port_and_range() {
+        let err = udp_svc(|s| {
+            s.listen_port = Some(3478);
+            s.listen_port_range = Some((49160, 49660));
+        })
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("exactly one"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_neither_port_nor_range() {
+        let err = udp_svc(|_| {}).validate().unwrap_err().to_string();
+        assert!(err.contains("must set listen_port"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_inverted_range() {
+        assert!(
+            udp_svc(|s| s.listen_port_range = Some((49660, 49160)))
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_oversized_range() {
+        assert!(
+            udp_svc(|s| s.listen_port_range = Some((10000, 10000 + 512)))
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn validate_rejects_origin_with_port_for_range() {
+        let err = udp_svc(|s| {
+            s.origin = "10.0.0.5:3478".into();
+            s.listen_port_range = Some((49160, 49660));
+        })
+        .validate()
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("host-only"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_ipv6_host_only_range_origin() {
+        udp_svc(|s| {
+            s.origin = "fe80::1".into();
+            s.listen_port_range = Some((49160, 49260));
+        })
+        .validate()
+        .expect("bare IPv6 host-only origin should pass");
+    }
+
+    #[test]
+    fn validate_rejects_overlapping_udp_ranges() {
+        let cfg = AgentConfig {
+            services: Vec::new(),
+            tcp_services: Vec::new(),
+            udp_services: vec![
+                UdpServiceConfig {
+                    name: "a".into(),
+                    origin: "10.0.0.5".into(),
+                    listen_port: None,
+                    listen_port_range: Some((49160, 49200)),
+                    idle_timeout_secs: None,
+                },
+                UdpServiceConfig {
+                    name: "b".into(),
+                    origin: "10.0.0.6".into(),
+                    listen_port: Some(49180),
+                    listen_port_range: None,
+                    idle_timeout_secs: None,
+                },
+            ],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("overlap"), "got: {err}");
     }
 
     #[test]

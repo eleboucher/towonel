@@ -132,10 +132,14 @@ async fn run_agent(cli: Cli) -> anyhow::Result<()> {
         .iter()
         .map(|s| (s.name.clone(), s.listen_port))
         .collect();
-    let desired_udp_bindings: Vec<(String, u16)> = agent_config
+    let desired_udp_bindings: Vec<stateless::UdpPublish> = agent_config
         .udp_services
         .iter()
-        .map(|s| (s.name.clone(), s.listen_port))
+        .filter_map(|s| {
+            // `port_span` is `Some` for any service that passed validation.
+            let (start, end) = s.port_span()?;
+            Some((s.name.clone(), start, end, s.idle_timeout_secs))
+        })
         .collect();
 
     let health_handle = tokio::spawn(serve_http(cli.health_listen_addr, metrics.clone()));
@@ -215,7 +219,7 @@ async fn run_lifecycle(
     service_map: &Arc<tunnel::ServiceMap>,
     metrics: &Arc<AgentMetrics>,
     desired_tcp_bindings: &[(String, u16)],
-    desired_udp_bindings: &[(String, u16)],
+    desired_udp_bindings: &[stateless::UdpPublish],
     shutdown: &CancellationToken,
     shutdown_endpoint: &Arc<tokio::sync::Mutex<Option<Endpoint>>>,
 ) -> anyhow::Result<()> {
@@ -319,7 +323,7 @@ async fn try_bring_up(
     service_map: &Arc<tunnel::ServiceMap>,
     metrics: &Arc<AgentMetrics>,
     desired_tcp_bindings: &[(String, u16)],
-    desired_udp_bindings: &[(String, u16)],
+    desired_udp_bindings: &[stateless::UdpPublish],
     shutdown: &CancellationToken,
 ) -> anyhow::Result<BroughtUp> {
     let ctx = Arc::new(stateless::bootstrap(token).await?);

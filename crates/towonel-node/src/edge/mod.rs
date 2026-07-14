@@ -1311,6 +1311,13 @@ struct ActiveListener {
     handle: tokio::task::JoinHandle<()>,
 }
 
+/// UDP counterpart of [`ActiveListener`]. Separate because the UDP binding
+/// carries a per-service idle timeout the TCP binding doesn't.
+struct UdpActiveListener {
+    binding: towonel_common::routing::UdpListenerBinding,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 /// Try a dual-stack v6 bind first (single FD serving both families), fall back
 /// to v4. `set_only_v6(false)` is explicit because the `bindv6only` sysctl
 /// default differs between Linux and *BSD.
@@ -1524,7 +1531,7 @@ const UDP_SESSION_IDLE: Duration = Duration::from_mins(1);
 const UDP_SESSION_QUEUE: usize = 64;
 
 async fn udp_listener_reconciler(ctx: Arc<ConnCtx>, shutdown: CancellationToken) {
-    let mut active: std::collections::HashMap<u16, ActiveListener> =
+    let mut active: std::collections::HashMap<u16, UdpActiveListener> =
         std::collections::HashMap::new();
     let mut rx = ctx.router.subscribe_udp_listener_changes();
 
@@ -1549,7 +1556,7 @@ async fn udp_listener_reconciler(ctx: Arc<ConnCtx>, shutdown: CancellationToken)
 
 fn reconcile_udp_listeners(
     ctx: &Arc<ConnCtx>,
-    active: &mut std::collections::HashMap<u16, ActiveListener>,
+    active: &mut std::collections::HashMap<u16, UdpActiveListener>,
 ) {
     let desired = ctx.router.desired_udp_listeners();
 
@@ -1597,7 +1604,7 @@ fn reconcile_udp_listeners(
         ));
         active.insert(
             *port,
-            ActiveListener {
+            UdpActiveListener {
                 binding: binding.clone(),
                 handle,
             },
@@ -1793,13 +1800,19 @@ async fn udp_session_pump(
         // Per-datagram hot path: resolve the tenant's counter child once.
         let tenant_bytes_out = ctx.metrics.tenant_counters(&binding.tenant).bytes_out;
 
+        // Per-service idle window, falling back to the edge default when the
+        // binding carries none (older hub, or a service that didn't set one).
+        let idle = binding
+            .idle_timeout_secs
+            .map_or(UDP_SESSION_IDLE, |s| Duration::from_secs(u64::from(s)));
+
         // `select!` (not `join!`) so an idle-timeout on the edge->agent side
         // tears down the agent->edge side too. Otherwise a quiet origin
         // would leak one task per session.
         let mut frame_reader = DatagramFrameReader::new();
         loop {
             tokio::select! {
-                framed = tokio::time::timeout(UDP_SESSION_IDLE, rx.recv()) => {
+                framed = tokio::time::timeout(idle, rx.recv()) => {
                     match framed {
                         Ok(Some(datagram)) => {
                             if let Err(e) = write_datagram_frame(&mut send_stream, &datagram).await {

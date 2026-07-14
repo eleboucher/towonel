@@ -222,13 +222,68 @@ namespaces, so `2222/tcp` and `2222/udp` can coexist.
 ```bash
 TOWONEL_AGENT_UDP_SERVICES='[
   {"name":"dns",        "origin":"127.0.0.1:5353",   "listen_port":5353},
-  {"name":"wireguard",  "origin":"10.0.0.1:51820",   "listen_port":51820}
+  {"name":"wireguard",  "origin":"10.0.0.1:51820",   "listen_port":51820, "idle_timeout_secs":120}
 ]'
 ```
 
 Bindings publish, retire, and respect the privileged-port gate exactly
-like TCP services. Sessions are reaped after 60 s of inactivity on
-either side.
+like TCP services. The edge reaps a session after 60 s of inactivity by
+default; set `idle_timeout_secs` per service (1–3600) to widen or narrow
+that window — useful for flows whose keepalives are further apart than
+60 s.
+
+### Port ranges
+
+Use `listen_port_range` (`[start, end]`, inclusive) instead of
+`listen_port` to claim a contiguous block of UDP ports. A datagram
+arriving on any port in the range is forwarded to the origin host at the
+**same** port, so the origin `origin` is host-only (no `:port`):
+
+```bash
+TOWONEL_AGENT_UDP_SERVICES='[
+  {"name":"relay", "origin":"10.0.0.5", "listen_port_range":[49160,49660], "idle_timeout_secs":600}
+]'
+```
+
+The hub caps a single range at `TOWONEL_HUB_MAX_UDP_PORT_RANGE` ports
+(default 512). Ranges are not available when
+`TOWONEL_HUB_PORTS_REQUIRE_RESERVATION` is on.
+
+### TURN behind towonel (coturn)
+
+A TURN relay needs both its control port and its relay port range
+reachable at a stable public address. Expose the control port as a
+single UDP service and the relay range as a port range:
+
+```bash
+TOWONEL_AGENT_UDP_SERVICES='[
+  {"name":"turn",       "origin":"10.0.0.5:3478", "listen_port":3478,             "idle_timeout_secs":300},
+  {"name":"turn-relay", "origin":"10.0.0.5",      "listen_port_range":[49160,49660], "idle_timeout_secs":600}
+]'
+```
+
+coturn side — advertise the **edge's** public IP (coturn sits behind the
+tunnel) and pin the relay range to what you exposed:
+
+```ini
+listening-port=3478
+min-port=49160
+max-port=49660
+external-ip=<edge public IP>
+realm=turn.example.eu
+```
+
+Notes and limits:
+
+- coturn sees the agent as the client source address (NAT-like). Fine
+  for credential auth; IP-based allow/deny won't work.
+- STUN/`XOR-MAPPED-ADDRESS` answers reflect the agent's socket, not the
+  real client, so **server-reflexive (srflx) candidates are wrong** —
+  point clients at a separate STUN server. TURN **relay** candidates
+  (the actual job) work correctly.
+- Keep `idle_timeout_secs` at or above coturn's allocation lifetime
+  (~300 s+) so a quiet allocation isn't reaped between refreshes.
+- TCP TURN (`3478/tcp`) rides the regular TCP service support.
 
 ## Managing tenants and invites
 
@@ -406,6 +461,7 @@ identity at startup.
 | `TOWONEL_HUB_DB_DSN`                 | `${DATA_DIR}/hub.db` or `hub.db` (sqlite)    | Connection string. **Required** for `postgres`                               |
 | `TOWONEL_HUB_DB_MAX_OPEN_CONNS`      | `4` / `25`                                   | Pool size                                                                    |
 | `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS` | `false`                                      | Allow tenants to claim TCP/UDP ports below 1024                              |
+| `TOWONEL_HUB_MAX_UDP_PORT_RANGE`     | `512`                                        | Largest UDP port range a tenant may claim in one `listen_port_range`         |
 | `TOWONEL_HUB_KEK`                    | derived from `HUB_KEK_PATH`                  | 32-byte hex KEK that seals hub signing-key seeds. Must match across all hubs in a cluster |
 | `TOWONEL_HUB_KEK_PATH`               | `${DATA_DIR}/hub_kek.key`                    | Where the hub reads/generates the KEK                                        |
 | `TOWONEL_HUB_LINK_LISTEN_ADDR`       |                                              | Bind address for the optional hub↔edge control link (see [Hub↔edge control link](#hubedge-control-link)) |

@@ -43,6 +43,14 @@ services:
         socat -d \
           OPENSSL-LISTEN:9443,reuseaddr,fork,cert=/certs/origin-tls.pem,key=/certs/origin-tls.key,verify=0 \
           EXEC:"/bin/cat" &
+        # Plain UDP echo for the single-port case.
+        socat -d UDP-LISTEN:5354,reuseaddr,fork EXEC:"/bin/cat" &
+        # One echo per port in the range; each replies "<local-port>:<payload>"
+        # (SOCAT_SOCKPORT = the origin port hit), proving same-port forwarding.
+        for p in 49160 49161 49162; do
+          socat -d "UDP-LISTEN:$p,reuseaddr,fork" \
+            SYSTEM:'printf "%s:" "$SOCAT_SOCKPORT"; cat' &
+        done
         wait
     volumes:
       - ./tests/e2e/fixtures:/certs:ro
@@ -73,6 +81,9 @@ services:
       E2E_ORIGIN_HOST: origin
       E2E_ORIGIN_TCP_PORT: "9000"
       E2E_ORIGIN_TLS_PORT: "9443"
+      E2E_UDP_ECHO_PORT: "5354"
+      E2E_UDP_RANGE_START: "49160"
+      E2E_UDP_RANGE_END: "49162"
       E2E_BROKER_LISTEN: 0.0.0.0:7777
       E2E_AGENT_CONTAINER: towonel-e2e-agent
       E2E_HUB_CONTAINER: towonel-e2e-hub
@@ -98,6 +109,9 @@ services:
         [{"hostname":"app.e2e.local","origin":"origin:9443","proxy_protocol":"none"}]
       TOWONEL_AGENT_TCP_SERVICES: |
         [{"name":"echo","origin":"origin:9000","listen_port":9000}]
+      TOWONEL_AGENT_UDP_SERVICES: |
+        [{"name":"udp-echo","origin":"origin:5354","listen_port":5354,"idle_timeout_secs":120},
+         {"name":"udp-relay","origin":"origin","listen_port_range":[49160,49162]}]
 
 volumes:
   hub-data:

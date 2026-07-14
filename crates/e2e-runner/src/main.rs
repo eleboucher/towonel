@@ -52,6 +52,8 @@ async fn main() -> Result<()> {
     )
     .await?;
     cases::proxy_v2::run(&ctx.edge_host, ctx.edge_tls_port).await?;
+    cases::udp_echo::run(&ctx.edge_host, ctx.udp_echo_port).await?;
+    cases::udp_range::run(&ctx.edge_host, ctx.udp_range_start, ctx.udp_range_end).await?;
 
     let docker = bollard::Docker::connect_with_local_defaults()?;
     cases::liveness_drop::run(
@@ -83,6 +85,9 @@ struct Context_ {
     edge_host: String,
     edge_tls_port: u16,
     origin_tcp_port: u16,
+    udp_echo_port: u16,
+    udp_range_start: u16,
+    udp_range_end: u16,
     agent_container: String,
     hub_container: String,
     liveness_budget: Duration,
@@ -116,6 +121,9 @@ impl Context_ {
             origin_tcp_port: required("E2E_ORIGIN_TCP_PORT")?
                 .parse()
                 .context("E2E_ORIGIN_TCP_PORT")?,
+            udp_echo_port: port_env("E2E_UDP_ECHO_PORT", 5354)?,
+            udp_range_start: port_env("E2E_UDP_RANGE_START", 49160)?,
+            udp_range_end: port_env("E2E_UDP_RANGE_END", 49162)?,
             agent_container: required("E2E_AGENT_CONTAINER")?,
             hub_container: required("E2E_HUB_CONTAINER")?,
             liveness_budget: Duration::from_secs(liveness_budget_secs),
@@ -126,6 +134,14 @@ impl Context_ {
 
 fn required(var: &str) -> Result<String> {
     std::env::var(var).with_context(|| format!("env var {var} is required"))
+}
+
+/// Parse an optional port env var, falling back to `default` when unset.
+fn port_env(var: &str, default: u16) -> Result<u16> {
+    std::env::var(var).map_or_else(
+        |_| Ok(default),
+        |v| v.parse().with_context(|| format!("env var {var}")),
+    )
 }
 
 async fn read_operator_key(path: &std::path::Path, max_wait: Duration) -> Result<String> {

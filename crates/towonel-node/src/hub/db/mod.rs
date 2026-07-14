@@ -197,7 +197,8 @@ impl Db {
                     ConfigOp::DeleteTcpService { service } => {
                         tcp_services.remove(&service);
                     }
-                    ConfigOp::UpsertUdpService { service, .. } => {
+                    ConfigOp::UpsertUdpService { service, .. }
+                    | ConfigOp::UpsertUdpServiceRange { service, .. } => {
                         udp_services.insert(service);
                     }
                     ConfigOp::DeleteUdpService { service } => {

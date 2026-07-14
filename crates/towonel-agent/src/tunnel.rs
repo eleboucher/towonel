@@ -212,17 +212,28 @@ struct UdpOriginTarget {
     address: String,
     resolved: ArcSwap<Vec<SocketAddr>>,
     is_literal: bool,
+    /// For port-range services the origin is host-only and each edge port is
+    /// forwarded to the origin at the *same* port; the cached addresses carry
+    /// port 0 and the connect port comes from the listener. Single-port
+    /// services keep their configured origin port (`false`).
+    use_listener_port: bool,
 }
 
 impl UdpOriginTarget {
-    async fn connect(&self) -> anyhow::Result<UdpSocket> {
+    async fn connect(&self, listener_port: u16) -> anyhow::Result<UdpSocket> {
         let cached = self.resolved.load();
-        let chosen: SocketAddr = if let Some(addr) = cached.first().copied() {
+        let mut chosen: SocketAddr = if let Some(addr) = cached.first().copied() {
             addr
         } else {
             // Fall back to a fresh resolve so a transient startup DNS miss
-            // doesn't permanently brick this service.
-            lookup_host_timeout(&self.address)
+            // doesn't permanently brick this service. Host-only (range) origins
+            // resolve with a placeholder `:0` port that the listener overrides.
+            let target = if self.use_listener_port {
+                format!("{}:0", self.address)
+            } else {
+                self.address.clone()
+            };
+            lookup_host_timeout(&target)
                 .await
                 .with_context(|| format!("failed to resolve udp origin {}", self.address))?
                 .into_iter()
@@ -231,6 +242,9 @@ impl UdpOriginTarget {
                     anyhow::anyhow!("udp origin {} resolved to no addresses", self.address)
                 })?
         };
+        if self.use_listener_port {
+            chosen.set_port(listener_port);
+        }
         let bind_addr: SocketAddr = match chosen {
             SocketAddr::V4(_) => SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0)),
             SocketAddr::V6(_) => SocketAddr::V6(SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, 0, 0, 0)),
@@ -304,11 +318,18 @@ impl ServiceMap {
 
         let mut udp_map: HashMap<String, Arc<UdpOriginTarget>> = HashMap::new();
         for svc in udp_services {
-            let (initial, is_literal) = resolve_origin(&svc.origin).await;
+            // Range services forward each port to the origin host at the same
+            // port, so their origin is host-only and resolves with port 0.
+            let (initial, is_literal) = if svc.is_range() {
+                resolve_origin_host_only(&svc.origin).await
+            } else {
+                resolve_origin(&svc.origin).await
+            };
             let target = Arc::new(UdpOriginTarget {
                 address: svc.origin.clone(),
                 resolved: ArcSwap::from_pointee(initial),
                 is_literal,
+                use_listener_port: svc.is_range(),
             });
             udp_map.insert(svc.name.clone(), target);
         }
@@ -406,6 +427,22 @@ async fn resolve_origin(origin: &str) -> (Vec<SocketAddr>, bool) {
         Ok(addrs) => (addrs, false),
         Err(e) => {
             warn!(origin, error = %e, "initial DNS resolution failed; will retry on first connect");
+            (Vec::new(), false)
+        }
+    }
+}
+
+/// Resolve a host-only origin (no `:port`) to addresses with a placeholder
+/// port 0; the actual connect port is supplied per-session by the listener.
+/// Used by UDP port-range services.
+async fn resolve_origin_host_only(host: &str) -> (Vec<SocketAddr>, bool) {
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return (vec![SocketAddr::new(ip, 0)], true);
+    }
+    match lookup_host_timeout(&format!("{host}:0")).await {
+        Ok(addrs) => (addrs, false),
+        Err(e) => {
+            warn!(origin = host, error = %e, "initial DNS resolution failed; will retry on first connect");
             (Vec::new(), false)
         }
     }
@@ -761,7 +798,9 @@ async fn handle_udp_stream(
 
     async {
         debug!("forwarding udp service to origin");
-        let socket = match target.connect().await {
+        // The edge listener port rides in `dst`; range services forward to the
+        // origin host at this same port, single-port services ignore it.
+        let socket = match target.connect(client_addrs.dst.port()).await {
             Ok(s) => s,
             Err(e) => {
                 metrics.record_stream_error(metrics::stream_error::ORIGIN_CONNECT);

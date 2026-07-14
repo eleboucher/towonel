@@ -1002,6 +1002,7 @@ fn udp_service_produces_route_and_listener() {
             ConfigOp::UpsertUdpService {
                 service: "dns".into(),
                 listen_port: 5353,
+                idle_timeout_secs: None,
             },
         ),
         sign_entry(
@@ -1018,6 +1019,35 @@ fn udp_service_produces_route_and_listener() {
     let binding = table.udp_listeners().get(&5353).expect("port 5353 bound");
     assert_eq!(binding.service, "dns");
     assert_eq!(binding.tenant, kp.id());
+    assert_eq!(binding.idle_timeout_secs, None);
+}
+
+#[test]
+fn udp_service_idle_timeout_materializes_into_binding() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertUdpService {
+                service: "turn".into(),
+                listen_port: 3478,
+                idle_timeout_secs: Some(300),
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    let binding = table.udp_listeners().get(&3478).expect("port 3478 bound");
+    assert_eq!(binding.idle_timeout_secs, Some(300));
 }
 
 #[test]
@@ -1032,6 +1062,7 @@ fn udp_service_delete_releases_route_and_listener() {
             ConfigOp::UpsertUdpService {
                 service: "dns".into(),
                 listen_port: 5353,
+                idle_timeout_secs: None,
             },
         ),
         sign_entry(
@@ -1052,6 +1083,148 @@ fn udp_service_delete_releases_route_and_listener() {
     let table = RouteTable::from_entries(&entries, &policy);
     assert!(table.lookup_udp_service(&kp.id(), "dns").is_none());
     assert!(table.udp_listeners().is_empty());
+}
+
+#[test]
+fn udp_range_materializes_one_listener_per_port() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertUdpServiceRange {
+                service: "turn-relay".into(),
+                port_start: 49160,
+                port_end: 49163,
+                idle_timeout_secs: Some(600),
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    // One route entry for the service, one listener per port in the range.
+    assert!(table.lookup_udp_service(&kp.id(), "turn-relay").is_some());
+    for port in 49160..=49163 {
+        let binding = table
+            .udp_listeners()
+            .get(&port)
+            .unwrap_or_else(|| panic!("port {port} bound"));
+        assert_eq!(binding.service, "turn-relay");
+        assert_eq!(binding.idle_timeout_secs, Some(600));
+    }
+    assert!(table.udp_listeners().get(&49164).is_none());
+    assert!(table.udp_listeners().get(&49159).is_none());
+}
+
+#[test]
+fn udp_range_replaced_by_single_port_upsert() {
+    let kp = TenantKeypair::generate();
+    let agent = AgentKeypair::generate();
+    let policy = policy_for(&kp, &[]);
+    let entries = vec![
+        sign_entry(
+            &kp,
+            1,
+            ConfigOp::UpsertUdpServiceRange {
+                service: "svc".into(),
+                port_start: 40000,
+                port_end: 40004,
+                idle_timeout_secs: None,
+            },
+        ),
+        sign_entry(
+            &kp,
+            2,
+            ConfigOp::UpsertUdpService {
+                service: "svc".into(),
+                listen_port: 40000,
+                idle_timeout_secs: None,
+            },
+        ),
+        sign_entry(
+            &kp,
+            3,
+            ConfigOp::UpsertAgent {
+                agent_id: agent.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    // Re-publishing the same service name as a single port collapses the range.
+    assert!(table.udp_listeners().get(&40000).is_some());
+    for port in 40001..=40004 {
+        assert!(
+            table.udp_listeners().get(&port).is_none(),
+            "port {port} should be released after single-port re-publish"
+        );
+    }
+}
+
+#[test]
+fn udp_range_cross_tenant_overlap_first_claim_wins() {
+    let alice = TenantKeypair::generate();
+    let bob = TenantKeypair::generate();
+    let agent_a = AgentKeypair::generate();
+    let agent_b = AgentKeypair::generate();
+    let mut policy = OwnershipPolicy::new();
+    register(&mut policy, &alice, &[]);
+    register(&mut policy, &bob, &[]);
+
+    // Both tenants claim overlapping ranges; the lower tenant_id wins each
+    // contested port (matches the single-port collision tie-break).
+    let entries = vec![
+        sign_entry(
+            &alice,
+            1,
+            ConfigOp::UpsertUdpServiceRange {
+                service: "a".into(),
+                port_start: 50000,
+                port_end: 50002,
+                idle_timeout_secs: None,
+            },
+        ),
+        sign_entry(
+            &alice,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent_a.id(),
+            },
+        ),
+        sign_entry(
+            &bob,
+            1,
+            ConfigOp::UpsertUdpServiceRange {
+                service: "b".into(),
+                port_start: 50001,
+                port_end: 50003,
+                idle_timeout_secs: None,
+            },
+        ),
+        sign_entry(
+            &bob,
+            2,
+            ConfigOp::UpsertAgent {
+                agent_id: agent_b.id(),
+            },
+        ),
+    ];
+    let table = RouteTable::from_entries(&entries, &policy);
+    let winner = if alice.id().as_bytes() < bob.id().as_bytes() {
+        (alice.id(), "a")
+    } else {
+        (bob.id(), "b")
+    };
+    let binding = table.udp_listeners().get(&50001).expect("50001 bound");
+    assert_eq!(binding.tenant, winner.0);
+    assert_eq!(binding.service, winner.1);
 }
 
 #[test]
@@ -1076,6 +1249,7 @@ fn tcp_and_udp_share_no_port_namespace() {
             ConfigOp::UpsertUdpService {
                 service: "x-udp".into(),
                 listen_port: 9000,
+                idle_timeout_secs: None,
             },
         ),
         sign_entry(

@@ -21,6 +21,9 @@ pub mod reject_reason {
     pub const TCP_PORT_CLAIMED: &str = "tcp_port_claimed";
     pub const INVALID_UDP_SERVICE: &str = "invalid_udp_service";
     pub const INVALID_UDP_PORT: &str = "invalid_udp_port";
+    pub const INVALID_UDP_IDLE_TIMEOUT: &str = "invalid_udp_idle_timeout";
+    pub const INVALID_UDP_RANGE: &str = "invalid_udp_range";
+    pub const UDP_RANGE_NOT_RESERVABLE: &str = "udp_range_not_reservable";
     pub const UDP_PORT_CLAIMED: &str = "udp_port_claimed";
     pub const PORT_NOT_RESERVED: &str = "port_not_reserved";
     pub const SEQUENCE_CONFLICT: &str = "sequence_conflict";

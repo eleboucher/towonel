@@ -1489,6 +1489,397 @@ async fn upsert_tcp_service_accepted() {
 }
 
 #[tokio::test]
+async fn upsert_udp_service_idle_timeout_accepted() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpService {
+            service: "turn".into(),
+            listen_port: 3478,
+            idle_timeout_secs: Some(300),
+        },
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+    assert_eq!(body["status"], "ok");
+}
+
+#[tokio::test]
+async fn upsert_udp_service_without_idle_timeout_accepted() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpService {
+            service: "dns".into(),
+            listen_port: 5353,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+}
+
+#[tokio::test]
+async fn upsert_udp_service_zero_idle_timeout_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpService {
+            service: "turn".into(),
+            listen_port: 3478,
+            idle_timeout_secs: Some(0),
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "got body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("idle_timeout_secs"),
+        "got body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn upsert_udp_service_idle_timeout_over_max_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpService {
+            service: "turn".into(),
+            listen_port: 3478,
+            idle_timeout_secs: Some(3601),
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "got body: {body}");
+}
+
+#[tokio::test]
+async fn upsert_udp_service_range_accepted() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "turn-relay".into(),
+            port_start: 49160,
+            port_end: 49260,
+            idle_timeout_secs: Some(600),
+        },
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+}
+
+#[tokio::test]
+async fn upsert_udp_service_range_inverted_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "bad".into(),
+            port_start: 50000,
+            port_end: 49000,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "got body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("port_end"),
+        "got body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn upsert_udp_service_range_too_large_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    // Default cap is 512; 513 ports (inclusive) is over.
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "big".into(),
+            port_start: 10000,
+            port_end: 10512,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "got body: {body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("limit"),
+        "got body: {body}"
+    );
+}
+
+#[tokio::test]
+async fn upsert_udp_service_range_privileged_start_rejected() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "priv".into(),
+            port_start: 500,
+            port_end: 600,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "got body: {body}");
+}
+
+#[tokio::test]
+async fn upsert_udp_range_cross_tenant_overlap_rejected_both_directions() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let alice_token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let alice = tenant_from_token(&alice_token);
+    let bob_token = create_invite(&hub, &client, "bob", &["app.bob.test"]).await;
+    let bob = tenant_from_token(&bob_token);
+
+    // Alice claims a range; Bob's single port inside it is rejected.
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &alice,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "a".into(),
+            port_start: 49160,
+            port_end: 49200,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &bob,
+        1,
+        ConfigOp::UpsertUdpService {
+            service: "b".into(),
+            listen_port: 49180,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "single-into-range; got body: {body}");
+
+    // And the reverse: Bob's range covering Alice's would-be single port.
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &alice,
+        2,
+        ConfigOp::UpsertUdpService {
+            service: "a-single".into(),
+            listen_port: 60000,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &bob,
+        2,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "b-range".into(),
+            port_start: 59990,
+            port_end: 60010,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 400, "range-over-single; got body: {body}");
+}
+
+#[tokio::test]
+async fn upsert_udp_range_same_tenant_republish_updates() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "relay".into(),
+            port_start: 49160,
+            port_end: 49200,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // Same service, shifted range — must be accepted (own prior claim freed).
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        2,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "relay".into(),
+            port_start: 49180,
+            port_end: 49220,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+}
+
+#[tokio::test]
+async fn upsert_udp_range_rejected_when_reservations_required() {
+    let hub = TestHub::start_with_quota(true, 0).await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "relay".into(),
+            port_start: 49160,
+            port_end: 49200,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 403, "got body: {body}");
+    assert_eq!(body["error"]["code"], "udp_range_not_reservable");
+}
+
+#[tokio::test]
+async fn delete_udp_range_frees_all_ports() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "relay".into(),
+            port_start: 49160,
+            port_end: 49200,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, _) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        2,
+        ConfigOp::DeleteUdpService {
+            service: "relay".into(),
+        },
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // A different tenant can now claim a port that was inside the freed range.
+    let bob_token = create_invite(&hub, &client, "bob", &["app.bob.test"]).await;
+    let bob = tenant_from_token(&bob_token);
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &bob,
+        1,
+        ConfigOp::UpsertUdpService {
+            service: "b".into(),
+            listen_port: 49180,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "freed port should be claimable; got body: {body}"
+    );
+}
+
+#[tokio::test]
 async fn upsert_tcp_service_zero_port_rejected() {
     let hub = TestHub::start().await;
     let client = reqwest::Client::new();
@@ -1756,6 +2147,7 @@ async fn require_reservation_is_per_protocol() {
         ConfigOp::UpsertUdpService {
             service: "dns".into(),
             listen_port: 5353,
+            idle_timeout_secs: None,
         },
     )
     .await;

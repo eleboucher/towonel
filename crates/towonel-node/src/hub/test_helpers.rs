@@ -187,6 +187,7 @@ impl TestHub {
             mailer: Some(Arc::clone(&mailer) as super::mail::SharedMailer),
             ports_require_reservation,
             user_port_quota,
+            max_udp_port_range: 512,
             oidc: super::api::OidcRuntimes::default(),
             webauthn: {
                 let origin =

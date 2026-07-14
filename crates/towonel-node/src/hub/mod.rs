@@ -253,6 +253,7 @@ pub struct HubParams {
     pub web_enabled: bool,
     pub ports_require_reservation: bool,
     pub user_port_quota: i64,
+    pub max_udp_port_range: u16,
     /// Enable active/passive leader election (Postgres only).
     pub leader_election: bool,
     /// Optional direct-to-primary DSN for the election connection; falls
@@ -420,6 +421,7 @@ impl Hub {
             mailer: self.p.mailer.clone(),
             ports_require_reservation: self.p.ports_require_reservation,
             user_port_quota: self.p.user_port_quota,
+            max_udp_port_range: self.p.max_udp_port_range,
             port_index: arc_swap::ArcSwap::from_pointee(api::PortIndex::default()),
             port_reservations: arc_swap::ArcSwap::from_pointee(Vec::new()),
             oidc,

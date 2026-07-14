@@ -45,9 +45,24 @@ pub enum ConfigOp {
     UpsertUdpService {
         service: String,
         listen_port: u16,
+        /// Edge idle-reap timeout in seconds. `None` falls back to the edge
+        /// default (60s). Absent on entries written before this field existed.
+        #[serde(default)]
+        idle_timeout_secs: Option<u32>,
     },
     DeleteUdpService {
         service: String,
+    },
+    /// Claim a contiguous UDP port range `[port_start, port_end]` (inclusive).
+    /// A datagram on any port in the range forwards to the origin host at the
+    /// same port. A hub predating this variant fails to decode it, surfacing to
+    /// the agent as `unsupported_op`.
+    UpsertUdpServiceRange {
+        service: String,
+        port_start: u16,
+        port_end: u16,
+        #[serde(default)]
+        idle_timeout_secs: Option<u32>,
     },
 }
 
@@ -332,6 +347,18 @@ mod tests {
             ConfigOp::UpsertUdpService {
                 service: "dns".into(),
                 listen_port: 5353,
+                idle_timeout_secs: None,
+            },
+            ConfigOp::UpsertUdpService {
+                service: "turn".into(),
+                listen_port: 3478,
+                idle_timeout_secs: Some(300),
+            },
+            ConfigOp::UpsertUdpServiceRange {
+                service: "turn-relay".into(),
+                port_start: 49160,
+                port_end: 49660,
+                idle_timeout_secs: Some(600),
             },
             ConfigOp::DeleteUdpService {
                 service: "dns".into(),
@@ -350,6 +377,96 @@ mod tests {
             let verified = entry.verify(kp.public_key()).unwrap();
             assert_eq!(verified, payload);
         }
+    }
+
+    #[test]
+    fn udp_service_without_idle_field_decodes_to_none() {
+        // Simulate an entry signed before `idle_timeout_secs` existed: the op
+        // map omits the field entirely. It must decode to `None`, not fail.
+        #[derive(Serialize)]
+        #[serde(rename_all = "snake_case")]
+        enum OldConfigOp {
+            UpsertUdpService { service: String, listen_port: u16 },
+        }
+        #[derive(Serialize)]
+        struct OldPayload {
+            version: u16,
+            tenant_id: TenantId,
+            sequence: u64,
+            timestamp: u64,
+            op: OldConfigOp,
+        }
+
+        let kp = TenantKeypair::generate();
+        let old = OldPayload {
+            version: 1,
+            tenant_id: kp.id(),
+            sequence: 1,
+            timestamp: 1,
+            op: OldConfigOp::UpsertUdpService {
+                service: "dns".into(),
+                listen_port: 5353,
+            },
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&old, &mut cbor).unwrap();
+        let entry = SignedConfigEntry {
+            signature: Box::new(kp.sign(&cbor)),
+            payload_cbor: cbor,
+            tenant_id: kp.id(),
+        };
+
+        let decoded = entry.verify(kp.public_key()).unwrap();
+        assert_eq!(
+            decoded.op,
+            ConfigOp::UpsertUdpService {
+                service: "dns".into(),
+                listen_port: 5353,
+                idle_timeout_secs: None,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_op_variant_fails_decode() {
+        // An op variant a hub predates (here a hand-rolled stand-in for a
+        // future variant) must fail decode rather than silently no-op — this
+        // is what surfaces to the agent as `unsupported_op`.
+        #[derive(Serialize)]
+        #[serde(rename_all = "snake_case")]
+        enum FutureConfigOp {
+            SomeFutureOp { value: u16 },
+        }
+        #[derive(Serialize)]
+        struct FuturePayload {
+            version: u16,
+            tenant_id: TenantId,
+            sequence: u64,
+            timestamp: u64,
+            op: FutureConfigOp,
+        }
+
+        let kp = TenantKeypair::generate();
+        let future = FuturePayload {
+            version: 1,
+            tenant_id: kp.id(),
+            sequence: 1,
+            timestamp: 1,
+            op: FutureConfigOp::SomeFutureOp { value: 7 },
+        };
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&future, &mut cbor).unwrap();
+        let entry = SignedConfigEntry {
+            signature: Box::new(kp.sign(&cbor)),
+            payload_cbor: cbor,
+            tenant_id: kp.id(),
+        };
+
+        let err = entry.verify(kp.public_key()).unwrap_err();
+        assert!(
+            matches!(err, ConfigEntryError::Decode(_)),
+            "expected Decode, got {err:?}"
+        );
     }
 
     #[test]

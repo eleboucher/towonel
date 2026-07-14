@@ -321,15 +321,25 @@ impl ServiceProtocol {
         }
     }
 
-    const fn upsert(self, service: String, listen_port: u16) -> ConfigOp {
+    const fn upsert(self, service: String, binding: &ServiceBinding) -> ConfigOp {
         match self {
             Self::Tcp => ConfigOp::UpsertTcpService {
                 service,
-                listen_port,
+                listen_port: binding.port_start,
             },
-            Self::Udp => ConfigOp::UpsertUdpService {
+            // Emit the plain single-port op when the span is one port, so a
+            // single-port agent stays interoperable with a hub that predates
+            // ranges.
+            Self::Udp if binding.port_start == binding.port_end => ConfigOp::UpsertUdpService {
                 service,
-                listen_port,
+                listen_port: binding.port_start,
+                idle_timeout_secs: binding.idle_timeout_secs,
+            },
+            Self::Udp => ConfigOp::UpsertUdpServiceRange {
+                service,
+                port_start: binding.port_start,
+                port_end: binding.port_end,
+                idle_timeout_secs: binding.idle_timeout_secs,
             },
         }
     }
@@ -341,9 +351,9 @@ impl ServiceProtocol {
         }
     }
 
-    /// Pull `(service, port)` out of an Upsert, or `service` out of a Delete,
-    /// for this protocol. Returns `None` for any other op so the entry replay
-    /// can skip it cleanly.
+    /// Pull the binding out of an Upsert, or `service` out of a Delete, for
+    /// this protocol. Returns `None` for any other op so the entry replay can
+    /// skip it cleanly.
     fn classify(self, op: ConfigOp) -> Option<ServiceMutation> {
         match (self, op) {
             (
@@ -352,16 +362,44 @@ impl ServiceProtocol {
                     service,
                     listen_port,
                 },
-            )
-            | (
+            ) => Some(ServiceMutation::Upsert {
+                service,
+                binding: ServiceBinding {
+                    port_start: listen_port,
+                    port_end: listen_port,
+                    idle_timeout_secs: None,
+                },
+            }),
+            (
                 Self::Udp,
                 ConfigOp::UpsertUdpService {
                     service,
                     listen_port,
+                    idle_timeout_secs,
                 },
             ) => Some(ServiceMutation::Upsert {
                 service,
-                listen_port,
+                binding: ServiceBinding {
+                    port_start: listen_port,
+                    port_end: listen_port,
+                    idle_timeout_secs,
+                },
+            }),
+            (
+                Self::Udp,
+                ConfigOp::UpsertUdpServiceRange {
+                    service,
+                    port_start,
+                    port_end,
+                    idle_timeout_secs,
+                },
+            ) => Some(ServiceMutation::Upsert {
+                service,
+                binding: ServiceBinding {
+                    port_start,
+                    port_end,
+                    idle_timeout_secs,
+                },
             }),
             (Self::Tcp, ConfigOp::DeleteTcpService { service })
             | (Self::Udp, ConfigOp::DeleteUdpService { service }) => {
@@ -372,26 +410,39 @@ impl ServiceProtocol {
     }
 }
 
+/// A service binding as the agent tracks it while diffing desired vs
+/// published. `port_start == port_end` is a single port; a wider span is a UDP
+/// range. `idle_timeout_secs` is always `None` for TCP.
+#[derive(Clone, PartialEq, Eq)]
+struct ServiceBinding {
+    port_start: u16,
+    port_end: u16,
+    idle_timeout_secs: Option<u32>,
+}
+
 enum ServiceMutation {
-    Upsert { service: String, listen_port: u16 },
-    Delete { service: String },
+    Upsert {
+        service: String,
+        binding: ServiceBinding,
+    },
+    Delete {
+        service: String,
+    },
 }
 
 async fn fetch_existing_service_bindings(
     ctx: &BootstrapContext,
     proto: ServiceProtocol,
-) -> anyhow::Result<std::collections::HashMap<String, u16>> {
+) -> anyhow::Result<std::collections::HashMap<String, ServiceBinding>> {
     let entries = fetch_tenant_entries(ctx).await?;
     let pk = ctx.tenant_kp.public_key();
-    let mut bindings: std::collections::HashMap<String, u16> = std::collections::HashMap::new();
+    let mut bindings: std::collections::HashMap<String, ServiceBinding> =
+        std::collections::HashMap::new();
     for entry in &entries {
         if let Ok(payload) = entry.verify(pk) {
             match proto.classify(payload.op) {
-                Some(ServiceMutation::Upsert {
-                    service,
-                    listen_port,
-                }) => {
-                    bindings.insert(service, listen_port);
+                Some(ServiceMutation::Upsert { service, binding }) => {
+                    bindings.insert(service, binding);
                 }
                 Some(ServiceMutation::Delete { service }) => {
                     bindings.remove(&service);
@@ -427,7 +478,7 @@ async fn fetch_tenant_entries(ctx: &BootstrapContext) -> anyhow::Result<Vec<Sign
 
 async fn publish_services(
     ctx: &BootstrapContext,
-    desired: &[(String, u16)],
+    desired: &[(String, ServiceBinding)],
     proto: ServiceProtocol,
 ) -> anyhow::Result<()> {
     let existing = retry_on_rate_limit("fetch_existing_service_bindings", || {
@@ -436,9 +487,9 @@ async fn publish_services(
     .await?;
     let desired_names: HashSet<&str> = desired.iter().map(|(n, _)| n.as_str()).collect();
 
-    let to_upsert: Vec<&(String, u16)> = desired
+    let to_upsert: Vec<&(String, ServiceBinding)> = desired
         .iter()
-        .filter(|(name, port)| existing.get(name) != Some(port))
+        .filter(|(name, binding)| existing.get(name) != Some(binding))
         .collect();
     let to_delete: Vec<String> = existing
         .keys()
@@ -476,18 +527,32 @@ async fn publish_services(
         }
     }
 
-    for (service, listen_port) in to_upsert {
+    for (service, binding) in to_upsert {
         let label = format!("Upsert{}Service {service}", proto.label());
         match submit_with_retry(
             ctx,
             &mut next_seq,
-            proto.upsert(service.clone(), *listen_port),
+            proto.upsert(service.clone(), binding),
             &label,
         )
         .await
         {
             Ok(()) => {
-                info!(proto = proto.label(), %service, listen_port, "published service");
+                info!(
+                    proto = proto.label(),
+                    %service,
+                    port_start = binding.port_start,
+                    port_end = binding.port_end,
+                    "published service"
+                );
+            }
+            // A range op rejected as unsupported means an old hub: surface an
+            // actionable error rather than silently dropping the binding.
+            Err(e) if is_unsupported_op(&e) && binding.port_start != binding.port_end => {
+                anyhow::bail!(
+                    "hub at {} does not support UDP port ranges (service `{service}`); upgrade the hub",
+                    ctx.hub_url,
+                );
             }
             Err(e) if is_unsupported_op(&e) => {
                 warn!(
@@ -509,14 +574,44 @@ pub async fn publish_tcp_services(
     ctx: &BootstrapContext,
     desired: &[(String, u16)],
 ) -> anyhow::Result<()> {
-    publish_services(ctx, desired, ServiceProtocol::Tcp).await
+    let bindings: Vec<(String, ServiceBinding)> = desired
+        .iter()
+        .map(|(name, port)| {
+            (
+                name.clone(),
+                ServiceBinding {
+                    port_start: *port,
+                    port_end: *port,
+                    idle_timeout_secs: None,
+                },
+            )
+        })
+        .collect();
+    publish_services(ctx, &bindings, ServiceProtocol::Tcp).await
 }
+
+/// A UDP service to publish: `(name, port_start, port_end, idle_timeout_secs)`.
+/// `port_start == port_end` is a single port; a wider span is a range.
+pub type UdpPublish = (String, u16, u16, Option<u32>);
 
 pub async fn publish_udp_services(
     ctx: &BootstrapContext,
-    desired: &[(String, u16)],
+    desired: &[UdpPublish],
 ) -> anyhow::Result<()> {
-    publish_services(ctx, desired, ServiceProtocol::Udp).await
+    let bindings: Vec<(String, ServiceBinding)> = desired
+        .iter()
+        .map(|(name, port_start, port_end, idle_timeout_secs)| {
+            (
+                name.clone(),
+                ServiceBinding {
+                    port_start: *port_start,
+                    port_end: *port_end,
+                    idle_timeout_secs: *idle_timeout_secs,
+                },
+            )
+        })
+        .collect();
+    publish_services(ctx, &bindings, ServiceProtocol::Udp).await
 }
 
 /// Tighter than a full TTL so a transient hub blip doesn't extend exposure.

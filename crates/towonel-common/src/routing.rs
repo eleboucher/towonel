@@ -67,10 +67,22 @@ pub struct TcpListenerBinding {
     pub service: String,
 }
 
-/// UDP routing reuses the TCP key/binding shapes (`{tenant, service}`); the
-/// protocol is implicit in which map the entry lives in.
+/// UDP routing reuses the TCP *key* shape (`{tenant, service}`); the protocol
+/// is implicit in which map the entry lives in.
 pub type UdpRouteKey = TcpRouteKey;
-pub type UdpListenerBinding = TcpListenerBinding;
+
+/// UDP listener binding. Unlike TCP it carries an optional per-service idle
+/// timeout the edge uses to size its session-reap window.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UdpListenerBinding {
+    pub tenant: TenantId,
+    pub service: String,
+    /// Edge idle-reap timeout in seconds. `None` → edge default (60s).
+    /// `#[serde(default)]` keeps the wire form compatible with edges that
+    /// predate this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_timeout_secs: Option<u32>,
+}
 
 impl RouteTable {
     /// Materialize a route table by replaying signed config entries in order.
@@ -358,8 +370,46 @@ fn apply_op(
         ConfigOp::UpsertUdpService {
             service,
             listen_port,
+            idle_timeout_secs,
         } => {
-            state.udp_services.insert(service.clone(), *listen_port);
+            state.udp_services.insert(
+                service.clone(),
+                UdpServiceSpec {
+                    listen_port: *listen_port,
+                    port_count: 1,
+                    idle_timeout_secs: *idle_timeout_secs,
+                },
+            );
+        }
+        ConfigOp::UpsertUdpServiceRange {
+            service,
+            port_start,
+            port_end,
+            idle_timeout_secs,
+        } => {
+            // `port_end < port_start` should never reach here (the hub rejects
+            // it at ingress); skip defensively rather than underflow.
+            let Some(count) = port_end
+                .checked_sub(*port_start)
+                .map(|d| d.saturating_add(1))
+            else {
+                tracing::warn!(
+                    tenant = %tenant_id,
+                    %service,
+                    port_start,
+                    port_end,
+                    "skipping udp range with port_end < port_start"
+                );
+                return;
+            };
+            state.udp_services.insert(
+                service.clone(),
+                UdpServiceSpec {
+                    listen_port: *port_start,
+                    port_count: count,
+                    idle_timeout_secs: *idle_timeout_secs,
+                },
+            );
         }
         ConfigOp::DeleteUdpService { service } => {
             state.udp_services.remove(service);
@@ -432,7 +482,7 @@ fn materialize_tenant(
                 service: service.clone(),
             });
     }
-    for (service, listen_port) in &state.udp_services {
+    for (service, spec) in &state.udp_services {
         udp_routes.insert(
             UdpRouteKey {
                 tenant: *tenant_id,
@@ -440,12 +490,20 @@ fn materialize_tenant(
             },
             agents_ref.clone(),
         );
-        udp_listeners
-            .entry(*listen_port)
-            .or_insert_with(|| UdpListenerBinding {
-                tenant: *tenant_id,
-                service: service.clone(),
-            });
+        // One listener per port in the range (`port_count` is bounded by the
+        // hub's cap). First-claim-wins backstops the hub's insert-time check.
+        for offset in 0..spec.port_count {
+            let Some(port) = spec.listen_port.checked_add(offset) else {
+                break;
+            };
+            udp_listeners
+                .entry(port)
+                .or_insert_with(|| UdpListenerBinding {
+                    tenant: *tenant_id,
+                    service: service.clone(),
+                    idle_timeout_secs: spec.idle_timeout_secs,
+                });
+        }
     }
 }
 
@@ -461,8 +519,18 @@ struct TenantState {
     tls: HashMap<String, TlsMode>,
     /// `service_name -> listen_port`, last-write-wins per service.
     tcp_services: HashMap<String, u16>,
-    /// Same shape as `tcp_services` but for UDP listeners.
-    udp_services: HashMap<String, u16>,
+    /// `service_name -> spec`, last-write-wins per service.
+    udp_services: HashMap<String, UdpServiceSpec>,
+}
+
+/// Accumulated UDP service binding for one tenant while replaying entries.
+/// A single-port service has `port_count == 1`; a range spans
+/// `listen_port ..= listen_port + port_count - 1`.
+#[derive(Clone)]
+struct UdpServiceSpec {
+    listen_port: u16,
+    port_count: u16,
+    idle_timeout_secs: Option<u32>,
 }
 
 #[cfg(test)]

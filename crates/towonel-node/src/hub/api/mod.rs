@@ -225,6 +225,8 @@ pub struct AppState {
     pub ports_require_reservation: bool,
     /// Per-user port reservation quota. `0` means unlimited.
     pub user_port_quota: i64,
+    /// Largest UDP port range a tenant may claim in one `UpsertUdpServiceRange`.
+    pub max_udp_port_range: u16,
     /// Port → (tenant, service) index, computed without the liveness filter
     /// so an offline agent's reservation still blocks another tenant from
     /// claiming the port. Read by `find_port_conflict` under the
@@ -269,9 +271,11 @@ fn build_port_index(
         TenantId,
         std::collections::HashMap<String, u16>,
     > = std::collections::HashMap::new();
+    // UDP value is the inclusive `(port_start, port_end)`; a single-port
+    // service is `(p, p)`.
     let mut per_tenant_udp: std::collections::HashMap<
         TenantId,
-        std::collections::HashMap<String, u16>,
+        std::collections::HashMap<String, (u16, u16)>,
     > = std::collections::HashMap::new();
     for entry in entries {
         if policy.pq_public_key(&entry.tenant_id).is_none() {
@@ -300,11 +304,23 @@ fn build_port_index(
             ConfigOp::UpsertUdpService {
                 service,
                 listen_port,
+                ..
             } => {
                 per_tenant_udp
                     .entry(payload.tenant_id)
                     .or_default()
-                    .insert(service, listen_port);
+                    .insert(service, (listen_port, listen_port));
+            }
+            ConfigOp::UpsertUdpServiceRange {
+                service,
+                port_start,
+                port_end,
+                ..
+            } => {
+                per_tenant_udp
+                    .entry(payload.tenant_id)
+                    .or_default()
+                    .insert(service, (port_start, port_end));
             }
             ConfigOp::DeleteUdpService { service } => {
                 per_tenant_udp
@@ -322,8 +338,12 @@ fn build_port_index(
         }
     }
     for (tenant, services) in per_tenant_udp {
-        for (service, port) in services {
-            idx.udp.entry(port).or_insert((tenant, service));
+        for (service, (start, end)) in services {
+            for port in start..=end {
+                idx.udp
+                    .entry(port)
+                    .or_insert_with(|| (tenant, service.clone()));
+            }
         }
     }
     idx
@@ -392,9 +412,21 @@ pub fn apply_port_index_delta(
             ConfigOp::UpsertUdpService {
                 service,
                 listen_port,
+                ..
             } => {
                 idx.udp.retain(|_, (t, s)| !(*t == tenant && s == service));
                 idx.udp.insert(*listen_port, (tenant, service.clone()));
+            }
+            ConfigOp::UpsertUdpServiceRange {
+                service,
+                port_start,
+                port_end,
+                ..
+            } => {
+                idx.udp.retain(|_, (t, s)| !(*t == tenant && s == service));
+                for port in *port_start..=*port_end {
+                    idx.udp.insert(port, (tenant, service.clone()));
+                }
             }
             ConfigOp::DeleteUdpService { service } => {
                 idx.udp.retain(|_, (t, s)| !(*t == tenant && s == service));

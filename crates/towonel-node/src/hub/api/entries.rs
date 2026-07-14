@@ -102,22 +102,43 @@ fn validate_listen_port(port: u16) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Reason the requested `(tenant, service, listen_port)` triple can't be
-/// inserted. Re-publishing the same `(service, port)` for the same tenant
-/// is allowed and returns no conflict.
-enum PortConflict {
-    OtherTenant { tenant: TenantId },
-    SameTenantOtherService { service: String },
+/// Upper bound on a UDP service's idle-reap timeout. Long enough for TURN
+/// allocation refreshes (minutes) without letting a tenant pin sessions open
+/// indefinitely.
+const MAX_UDP_IDLE_TIMEOUT_SECS: u32 = 3600;
+
+const fn validate_idle_timeout(secs: u32) -> Result<(), &'static str> {
+    if secs == 0 {
+        return Err("must not be 0");
+    }
+    if secs > MAX_UDP_IDLE_TIMEOUT_SECS {
+        return Err("must be 3600 seconds or fewer");
+    }
+    Ok(())
 }
 
-/// Look up `listen_port` in the cached per-protocol port index. The cache is
-/// refreshed by `rebuild_and_broadcast_routes` after every upsert/delete and
-/// computed without the liveness filter, so an agent that's currently
-/// disconnected still owns its declared port.
+/// Reason a requested `(tenant, service)` claim over `[port_start, port_end]`
+/// can't be inserted. Carries the specific conflicting port for the error
+/// message. Re-publishing the same `(service, port)` for the same tenant is
+/// allowed and returns no conflict.
+enum PortConflict {
+    OtherTenant { port: u16, tenant: TenantId },
+    SameTenantOtherService { port: u16, service: String },
+}
+
+/// Probe `[port_start, port_end]` (inclusive) against the cached per-protocol
+/// port index for the first conflicting port. The cache is refreshed by
+/// `rebuild_and_broadcast_routes` after every upsert/delete and computed
+/// without the liveness filter, so an agent that's currently disconnected
+/// still owns its declared ports. A single-port claim passes `start == end`;
+/// because a range occupies every port in the index, this catches both a new
+/// single port landing inside an existing range and a new range covering an
+/// existing single port.
 fn find_port_conflict(
     port_index: &super::PortIndex,
     kind: ServiceKind,
-    listen_port: u16,
+    port_start: u16,
+    port_end: u16,
     requesting_tenant: &TenantId,
     requesting_service: &str,
 ) -> Option<PortConflict> {
@@ -125,14 +146,19 @@ fn find_port_conflict(
         ServiceKind::Tcp => &port_index.tcp,
         ServiceKind::Udp => &port_index.udp,
     };
-    let (tenant, service) = map.get(&listen_port)?;
-    if tenant != requesting_tenant {
-        return Some(PortConflict::OtherTenant { tenant: *tenant });
-    }
-    if service != requesting_service {
-        return Some(PortConflict::SameTenantOtherService {
-            service: service.clone(),
-        });
+    for (port, (tenant, service)) in map.range(port_start..=port_end) {
+        if tenant != requesting_tenant {
+            return Some(PortConflict::OtherTenant {
+                port: *port,
+                tenant: *tenant,
+            });
+        }
+        if service != requesting_service {
+            return Some(PortConflict::SameTenantOtherService {
+                port: *port,
+                service: service.clone(),
+            });
+        }
     }
     None
 }
@@ -180,7 +206,9 @@ async fn validate_service_op(
         ConfigOp::UpsertTcpService { service, .. } | ConfigOp::DeleteTcpService { service } => {
             Some((ServiceKind::Tcp, service.as_str()))
         }
-        ConfigOp::UpsertUdpService { service, .. } | ConfigOp::DeleteUdpService { service } => {
+        ConfigOp::UpsertUdpService { service, .. }
+        | ConfigOp::DeleteUdpService { service }
+        | ConfigOp::UpsertUdpServiceRange { service, .. } => {
             Some((ServiceKind::Udp, service.as_str()))
         }
         _ => None,
@@ -217,46 +245,129 @@ async fn validate_service_op(
             return Err(resp);
         }
     }
+
+    if let ConfigOp::UpsertUdpService {
+        idle_timeout_secs: Some(secs),
+        ..
+    }
+    | ConfigOp::UpsertUdpServiceRange {
+        idle_timeout_secs: Some(secs),
+        ..
+    } = &payload.op
+        && let Err(e) = validate_idle_timeout(*secs)
+    {
+        state
+            .metrics
+            .record_reject(reject_reason::INVALID_UDP_IDLE_TIMEOUT);
+        return Err(invalid_request(format!(
+            "invalid udp idle_timeout_secs {secs}: {e}"
+        )));
+    }
+
+    if let ConfigOp::UpsertUdpServiceRange {
+        port_start,
+        port_end,
+        ..
+    } = &payload.op
+    {
+        if let Some(resp) = validate_udp_range(state, *port_start, *port_end) {
+            return Err(resp);
+        }
+        // Reservations are single-port; ranges aren't reservable yet.
+        if state.ports_require_reservation {
+            state
+                .metrics
+                .record_reject(reject_reason::UDP_RANGE_NOT_RESERVABLE);
+            return Err(error_response(
+                axum::http::StatusCode::FORBIDDEN,
+                "udp_range_not_reservable",
+                "UDP port ranges are not supported when port reservations are required".to_string(),
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Validate a UDP range against the privileged-port gate, ordering, and the
+/// hub's `max_udp_port_range` cap. Returns the rejection response (and records
+/// the reject metric) on failure, mirroring [`check_port_conflict`].
+fn validate_udp_range(state: &AppState, port_start: u16, port_end: u16) -> Option<Response> {
+    let msg = if let Err(e) = validate_listen_port(port_start) {
+        format!("invalid udp port_start {port_start}: {e}")
+    } else if port_end < port_start {
+        format!("udp port_end {port_end} must be >= port_start {port_start}")
+    } else {
+        let count = u32::from(port_end - port_start) + 1;
+        if count <= u32::from(state.max_udp_port_range) {
+            return None;
+        }
+        format!(
+            "udp range {port_start}-{port_end} spans {count} ports, over the limit of {}",
+            state.max_udp_port_range
+        )
+    };
+    state
+        .metrics
+        .record_reject(reject_reason::INVALID_UDP_RANGE);
+    Some(invalid_request(msg))
 }
 
 /// Cross-tenant port-uniqueness check against the cached index. Kept separate
 /// from [`validate_service_op`] so only this — plus the entry insert and the
 /// index update — runs under the per-protocol port lock.
 fn check_port_conflict(state: &AppState, payload: &ConfigPayload) -> Option<Response> {
-    let (kind, service, listen_port) = match &payload.op {
+    let (kind, service, port_start, port_end) = match &payload.op {
         ConfigOp::UpsertTcpService {
             service,
             listen_port,
-        } => (ServiceKind::Tcp, service.as_str(), *listen_port),
+        } => (
+            ServiceKind::Tcp,
+            service.as_str(),
+            *listen_port,
+            *listen_port,
+        ),
         ConfigOp::UpsertUdpService {
             service,
             listen_port,
-        } => (ServiceKind::Udp, service.as_str(), *listen_port),
+            ..
+        } => (
+            ServiceKind::Udp,
+            service.as_str(),
+            *listen_port,
+            *listen_port,
+        ),
+        ConfigOp::UpsertUdpServiceRange {
+            service,
+            port_start,
+            port_end,
+            ..
+        } => (ServiceKind::Udp, service.as_str(), *port_start, *port_end),
         _ => return None,
     };
     let r = kind.reasons();
     match find_port_conflict(
         &state.port_index.load(),
         kind,
-        listen_port,
+        port_start,
+        port_end,
         &payload.tenant_id,
         service,
     ) {
         None => None,
-        Some(PortConflict::OtherTenant { tenant }) => {
+        Some(PortConflict::OtherTenant { port, tenant }) => {
             state.metrics.record_reject(r.port_claimed);
             Some(invalid_request(format!(
-                "{} listen_port {listen_port} is already claimed by tenant {tenant}",
+                "{} listen_port {port} is already claimed by tenant {tenant}",
                 r.label
             )))
         }
         Some(PortConflict::SameTenantOtherService {
+            port,
             service: other_service,
         }) => {
             state.metrics.record_reject(r.port_claimed);
             Some(invalid_request(format!(
-                "{} listen_port {listen_port} is already bound to service `{other_service}` for this tenant",
+                "{} listen_port {port} is already bound to service `{other_service}` for this tenant",
                 r.label
             )))
         }
@@ -327,7 +438,8 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         | ConfigOp::UpsertTcpService { .. }
         | ConfigOp::DeleteTcpService { .. }
         | ConfigOp::UpsertUdpService { .. }
-        | ConfigOp::DeleteUdpService { .. } => None,
+        | ConfigOp::DeleteUdpService { .. }
+        | ConfigOp::UpsertUdpServiceRange { .. } => None,
     };
     if let Some(hostname) = hostname_for_check {
         if let Err(e) = towonel_common::hostname::validate_hostname(hostname) {
@@ -384,7 +496,9 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
     // because they share no port namespace at the OS level.
     let _port_guard = match &payload.op {
         ConfigOp::UpsertTcpService { .. } => Some(state.tcp_port_lock.lock().await),
-        ConfigOp::UpsertUdpService { .. } => Some(state.udp_port_lock.lock().await),
+        ConfigOp::UpsertUdpService { .. } | ConfigOp::UpsertUdpServiceRange { .. } => {
+            Some(state.udp_port_lock.lock().await)
+        }
         _ => None,
     };
     if let Some(resp) = check_port_conflict(&state, &payload) {
@@ -414,7 +528,8 @@ pub(super) async fn post_entry(State(state): State<Arc<AppState>>, body: Bytes) 
         ConfigOp::UpsertTcpService { .. }
         | ConfigOp::DeleteTcpService { .. }
         | ConfigOp::UpsertUdpService { .. }
-        | ConfigOp::DeleteUdpService { .. } => {
+        | ConfigOp::DeleteUdpService { .. }
+        | ConfigOp::UpsertUdpServiceRange { .. } => {
             apply_port_index_delta(&state, payload.tenant_id, &payload.op);
         }
         _ => {}
