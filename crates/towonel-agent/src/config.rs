@@ -46,8 +46,8 @@ pub struct UdpServiceConfig {
 
 impl UdpServiceConfig {
     /// Effective inclusive `(port_start, port_end)`. `None` when the config is
-    /// invalid (both or neither port field set); [`validate`] rejects that
-    /// before this is consulted at publish time.
+    /// invalid (both or neither port field set); [`AgentConfig::validate`]
+    /// rejects that before this is consulted at publish time.
     pub const fn port_span(&self) -> Option<(u16, u16)> {
         match (self.listen_port, self.listen_port_range) {
             (Some(p), None) => Some((p, p)),
