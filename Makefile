@@ -31,11 +31,18 @@ up:
 down:
 	docker compose down
 
+# NB: run detached and `docker wait` on the runner instead of
+# --abort-on-container-exit; the route_recovery case restarts the hub, which
+# would otherwise trip the abort and kill the runner mid-test.
 e2e:
 	./tests/e2e/fixtures/make-fixtures.sh
 	docker compose --env-file .env.e2e -f docker-compose.e2e.yml down -v
-	docker compose --env-file .env.e2e -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
-	docker compose --env-file .env.e2e -f docker-compose.e2e.yml down -v
+	docker compose --env-file .env.e2e -f docker-compose.e2e.yml up --build --detach
+	@code=$$(docker wait towonel-e2e-runner); \
+		docker compose --env-file .env.e2e -f docker-compose.e2e.yml logs --no-color test-runner; \
+		echo "test-runner exit code: $$code"; \
+		docker compose --env-file .env.e2e -f docker-compose.e2e.yml down -v; \
+		exit $$code
 
 release:
 	@test -n "$(V)" || (echo "usage: make release V=0.1.0" && exit 1)
