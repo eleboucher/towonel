@@ -131,9 +131,14 @@ services:
     depends_on:
       test-runner:
         condition: service_started
+      pebble:
+        condition: service_healthy
     environment:
       RUST_LOG: info
       BROKER_URL: http://test-runner:7777/token
+      # Fetch Pebble's issuing CA (management API on :15000) so the agent
+      # trusts the hub's TLS cert.
+      PEBBLE_URL: https://pebble:15000
       TOWONEL_AGENT_SERVICES: |
         [{"hostname":"app.e2e.local","origin":"origin:9443","proxy_protocol":"none"}]
       TOWONEL_AGENT_TCP_SERVICES: |
