@@ -6,6 +6,7 @@ dynamic IPs without opening inbound ports.
 [![CI](https://codeberg.org/towonel/towonel/actions/workflows/ci.yml/badge.svg)](https://codeberg.org/towonel/towonel/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 2024](https://img.shields.io/badge/rust-2024-orange.svg)](https://www.rust-lang.org/)
+[![Matrix](https://img.shields.io/badge/matrix-join%20chat-0dbd8b?logo=matrix&logoColor=white)](https://matrix.to/#/!N0IMRJojScLMh5pvQtJJpG6aVR4F_i3q9cITIjinWOE?via=erwanleboucher.dev)
 
 > Status: **alpha**. Functional and covered by integration tests. Wire
 > format and APIs may change between `0.0.x` releases.
