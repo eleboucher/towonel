@@ -12,14 +12,19 @@ pub async fn cmd_acme_account() -> anyhow::Result<()> {
         .as_deref()
         .ok_or_else(|| anyhow!("TOWONEL_HUB_TLS_ACME_EMAIL is required"))?;
 
-    let info = load_account_info(&tls.cert_dir, email, tls.acme_staging)
-        .await?
-        .ok_or_else(|| {
-            anyhow!(
-                "no ACME account at {} yet (created on first TLS handshake)",
-                tls.cert_dir.display()
-            )
-        })?;
+    let info = load_account_info(
+        &tls.cert_dir,
+        email,
+        tls.acme_staging,
+        tls.acme_directory_url.clone(),
+    )
+    .await?
+    .ok_or_else(|| {
+        anyhow!(
+            "no ACME account at {} yet (created on first TLS handshake)",
+            tls.cert_dir.display()
+        )
+    })?;
 
     let account_uri = info.account_uri;
     println!("CA:          {}", info.ca);
@@ -46,9 +51,14 @@ fn load_tls_from_env() -> TlsConfig {
     let acme_staging = std::env::var("TOWONEL_HUB_TLS_ACME_STAGING")
         .ok()
         .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"));
+    let acme_directory_url = std::env::var("TOWONEL_HUB_TLS_ACME_DIRECTORY_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     TlsConfig {
         cert_dir,
         acme_email,
         acme_staging,
+        acme_directory_url,
     }
 }

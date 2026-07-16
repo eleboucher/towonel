@@ -21,23 +21,33 @@ pub const CAA_VALIDATION_METHOD: &str = "tls-alpn-01";
 
 #[derive(Debug, Clone)]
 pub struct AcmeAccountInfo {
-    pub ca: &'static str,
+    pub ca: String,
     pub account_uri: String,
     pub status: String,
+}
+
+/// Resolve the ACME directory URL: an explicit override wins, else the
+/// Let's Encrypt prod/staging endpoint.
+fn resolve_ca(directory_url: Option<String>, staging: bool) -> String {
+    directory_url.unwrap_or_else(|| {
+        if staging {
+            LETS_ENCRYPT_STAGING
+        } else {
+            LETS_ENCRYPT_PRODUCTION
+        }
+        .to_string()
+    })
 }
 
 pub async fn load_account_info(
     cert_dir: &Path,
     acme_email: &str,
     staging: bool,
+    directory_url: Option<String>,
 ) -> anyhow::Result<Option<AcmeAccountInfo>> {
-    let ca = if staging {
-        LETS_ENCRYPT_STAGING
-    } else {
-        LETS_ENCRYPT_PRODUCTION
-    };
+    let ca = resolve_ca(directory_url, staging);
     let storage = FileStorage::new(cert_dir);
-    let account = certon::account::get_account(&storage, ca, acme_email)
+    let account = certon::account::get_account(&storage, &ca, acme_email)
         .await
         .with_context(|| format!("failed to read ACME account from {}", cert_dir.display()))?;
     Ok(account.map(|a| AcmeAccountInfo {
@@ -70,7 +80,12 @@ impl Drop for InflightGuard {
 }
 
 impl AcmeManager {
-    pub fn new(cert_dir: &Path, acme_email: String, staging: bool) -> anyhow::Result<Arc<Self>> {
+    pub fn new(
+        cert_dir: &Path,
+        acme_email: String,
+        staging: bool,
+        directory_url: Option<String>,
+    ) -> anyhow::Result<Arc<Self>> {
         std::fs::create_dir_all(cert_dir)
             .with_context(|| format!("failed to create cert_dir {}", cert_dir.display()))?;
         #[cfg(unix)]
@@ -88,11 +103,7 @@ impl AcmeManager {
         let resolver: Arc<CertResolver> = Arc::new(CertResolver::new(Arc::clone(&cache)));
         let alpn_solver: Arc<dyn Solver> = Arc::new(EdgeAlpnSolver::new(Arc::clone(&resolver)));
 
-        let ca = if staging {
-            LETS_ENCRYPT_STAGING
-        } else {
-            LETS_ENCRYPT_PRODUCTION
-        };
+        let ca = resolve_ca(directory_url, staging);
         let issuer = AcmeIssuer::builder()
             .ca(ca)
             .email(acme_email)

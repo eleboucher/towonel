@@ -501,7 +501,12 @@ impl Hub {
                      TOWONEL_HUB_TLS_* is set"
                 )
             })?;
-            let mgr = acme::AcmeManager::new(&tls.cert_dir, email, tls.acme_staging)?;
+            let mgr = acme::AcmeManager::new(
+                &tls.cert_dir,
+                email,
+                tls.acme_staging,
+                tls.acme_directory_url.clone(),
+            )?;
             if let Some(host) = url::Url::parse(&self.p.public_url)
                 .ok()
                 .and_then(|u| u.host_str().map(str::to_lowercase))

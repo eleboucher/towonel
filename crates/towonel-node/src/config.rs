@@ -386,6 +386,9 @@ pub struct TlsConfig {
     pub cert_dir: PathBuf,
     pub acme_email: Option<String>,
     pub acme_staging: bool,
+    /// Override the ACME directory URL. Defaults to Let's Encrypt
+    /// prod/staging; set to point at a private ACME CA (e.g. Pebble in e2e).
+    pub acme_directory_url: Option<String>,
 }
 
 /// Operator-configured tenant allowlist entry.
@@ -482,6 +485,7 @@ struct RawEnv {
     hub_tls_cert_dir: Option<PathBuf>,
     hub_tls_acme_email: Option<String>,
     hub_tls_acme_staging: Option<bool>,
+    hub_tls_acme_directory_url: Option<String>,
 
     tenants: Option<String>,
 }
@@ -724,7 +728,8 @@ impl NodeConfig {
 fn build_hub_tls(r: &RawEnv) -> Option<TlsConfig> {
     let any = r.hub_tls_cert_dir.is_some()
         || r.hub_tls_acme_email.is_some()
-        || r.hub_tls_acme_staging.is_some();
+        || r.hub_tls_acme_staging.is_some()
+        || r.hub_tls_acme_directory_url.is_some();
     if !any {
         return None;
     }
@@ -736,6 +741,11 @@ fn build_hub_tls(r: &RawEnv) -> Option<TlsConfig> {
         cert_dir: r.hub_tls_cert_dir.clone().unwrap_or(default_cert_dir),
         acme_email: r.hub_tls_acme_email.clone(),
         acme_staging: r.hub_tls_acme_staging.unwrap_or(false),
+        acme_directory_url: r
+            .hub_tls_acme_directory_url
+            .clone()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
     })
 }
 

@@ -23,7 +23,14 @@ pub(super) async fn get_acme_account(State(state): State<Arc<AppState>>) -> Resp
         return not_found("TLS is configured without an ACME email");
     };
 
-    match crate::hub::acme::load_account_info(&tls.cert_dir, email, tls.acme_staging).await {
+    match crate::hub::acme::load_account_info(
+        &tls.cert_dir,
+        email,
+        tls.acme_staging,
+        tls.acme_directory_url.clone(),
+    )
+    .await
+    {
         Ok(Some(info)) => {
             let account_uri = info.account_uri;
             let caa_record = format!(
