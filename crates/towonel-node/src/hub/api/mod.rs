@@ -6,7 +6,7 @@ mod bootstrap;
 mod entries;
 mod invites;
 mod metrics_handler;
-mod oidc;
+pub(in crate::hub) mod oidc;
 mod openapi;
 mod passkey;
 mod password_reset;

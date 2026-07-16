@@ -47,6 +47,9 @@ pub struct OidcProviderRuntime {
     pub http: Arc<OidcHttpClient>,
     pub scopes: Vec<String>,
     pub pending: moka::future::Cache<String, PendingOidcFlow>,
+    /// Auto-link an OIDC login into a matching verified local account. Only set
+    /// for providers whose `email_verified` claim the operator trusts.
+    pub trust_email_verified: bool,
 }
 
 #[derive(Clone)]
@@ -136,6 +139,7 @@ fn build_provider_lazy(
         http: Arc::clone(&http),
         scopes: vec!["openid".into(), "email".into(), "profile".into()],
         pending,
+        trust_email_verified: cfg.trust_email_verified,
     };
 
     spawn_oidc_initializer(
@@ -592,39 +596,60 @@ pub(super) async fn callback(
                 }
                 resolved_id
             } else {
-                let Some(code) = signup_code.as_deref() else {
-                    return error_redirect(&provider, "signup_required");
+                // No identity yet. Before requiring a signup invite, try to
+                // merge into an existing account whose verified email matches —
+                // only for providers the operator flagged as email-trustworthy.
+                let auto = if runtime.trust_email_verified {
+                    maybe_auto_link(
+                        &state,
+                        &provider,
+                        &subject,
+                        email.as_deref(),
+                        email_verified,
+                    )
+                    .await
+                } else {
+                    AutoLink::NoMatch
                 };
-                let Some(email_val) = email else {
-                    return error_redirect(&provider, "no_email");
-                };
-                // IdP-verified email required: otherwise an invite
-                // could be claimed under any address the attacker
-                // wants, pre-squatting the real recipient.
-                if email_verified != Some(true) {
-                    return error_redirect(&provider, "email_unverified_by_idp");
-                }
-                match signup_via_oidc(
-                    &state,
-                    &provider,
-                    &subject,
-                    &email_val,
-                    email_verified,
-                    code,
-                )
-                .await
-                {
-                    Ok(id) => id,
-                    // Point users at the link-from-settings path instead
-                    // of a dead-end "email taken" message.
-                    Err("email_taken") => {
-                        return error_redirect_with_hint(
+                match auto {
+                    AutoLink::Linked(id) => id,
+                    AutoLink::Failed(why) => return error_redirect(&provider, why),
+                    AutoLink::NoMatch => {
+                        let Some(code) = signup_code.as_deref() else {
+                            return error_redirect(&provider, "signup_required");
+                        };
+                        let Some(email_val) = email else {
+                            return error_redirect(&provider, "no_email");
+                        };
+                        // IdP-verified email required: otherwise an invite
+                        // could be claimed under any address the attacker
+                        // wants, pre-squatting the real recipient.
+                        if email_verified != Some(true) {
+                            return error_redirect(&provider, "email_unverified_by_idp");
+                        }
+                        match signup_via_oidc(
+                            &state,
                             &provider,
-                            "email_taken",
-                            "link_from_settings",
-                        );
+                            &subject,
+                            &email_val,
+                            email_verified,
+                            code,
+                        )
+                        .await
+                        {
+                            Ok(id) => id,
+                            // Point users at the link-from-settings path instead
+                            // of a dead-end "email taken" message.
+                            Err("email_taken") => {
+                                return error_redirect_with_hint(
+                                    &provider,
+                                    "email_taken",
+                                    "link_from_settings",
+                                );
+                            }
+                            Err(why) => return error_redirect(&provider, why),
+                        }
                     }
-                    Err(why) => return error_redirect(&provider, why),
                 }
             };
             issue_session_or_2fa_redirect(&state, &provider, &user_id, &next).await
@@ -937,6 +962,107 @@ pub(super) async fn unlink(
     }
 
     json_ok(serde_json::json!({ "ok": true }))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(in crate::hub) enum AutoLink {
+    Linked(String),
+    NoMatch,
+    Failed(&'static str),
+}
+
+/// Merge a freshly-authenticated identity into an existing account when the
+/// `IdP`-verified email matches a local account whose email is also verified.
+/// Two verified sides mean the same mailbox owner, so linking grants no more
+/// than a password reset over that mailbox already would.
+///
+/// `NoMatch` falls back to invite-gated signup; `Failed` is a hard error.
+pub(in crate::hub) async fn maybe_auto_link(
+    state: &Arc<AppState>,
+    provider: &str,
+    subject: &str,
+    email: Option<&str>,
+    email_verified: Option<bool>,
+) -> AutoLink {
+    // An unverified IdP email must never merge: an attacker holding an
+    // unverified address at the IdP could otherwise seize the local account.
+    if email_verified != Some(true) {
+        return AutoLink::NoMatch;
+    }
+    let Some(email) = email else {
+        return AutoLink::NoMatch;
+    };
+
+    let user = match state.db.find_user_by_email(email).await {
+        Ok(Some(u)) => u,
+        Ok(None) => return AutoLink::NoMatch,
+        Err(e) => {
+            warn!(error = %e, "find_user_by_email failed (oidc auto-link)");
+            return AutoLink::Failed("internal_error");
+        }
+    };
+    if user.disabled_at_ms.is_some() {
+        return AutoLink::Failed("account_disabled");
+    }
+    // Only merge into a verified local account. An unverified one may be a
+    // pre-squatted email; let it fall through to normal signup handling.
+    if user.email_verified_at_ms.is_none() {
+        return AutoLink::NoMatch;
+    }
+
+    let now_ms_i = now_ms_i64();
+    if let Err(e) = state
+        .db
+        .insert_oauth_identity(NewOauthIdentity {
+            provider,
+            subject,
+            user_id: &user.id,
+            email: Some(email),
+            now_ms: now_ms_i,
+        })
+        .await
+    {
+        if !crate::hub::db::is_unique_violation(&e) {
+            warn!(error = %e, "insert_oauth_identity failed (oidc auto-link)");
+            return AutoLink::Failed("internal_error");
+        }
+        // (provider, subject) PK vs (user_id, provider) index — re-query to
+        // tell which fired. A concurrent callback may have already linked this
+        // same identity to this account (idempotent race).
+        return match state.db.find_oauth_identity(provider, subject).await {
+            Ok(Some(ident)) if ident.user_id == user.id => AutoLink::Linked(user.id),
+            Ok(Some(_)) => AutoLink::Failed("identity_in_use"),
+            Ok(None) => AutoLink::Failed("provider_already_linked"),
+            Err(lookup_err) => {
+                warn!(error = %lookup_err, "find_oauth_identity after dup failed (auto-link)");
+                AutoLink::Failed("internal_error")
+            }
+        };
+    }
+
+    if let Err(e) = state
+        .db
+        .insert_admin_action(NewAdminAction {
+            id: &random_code(16),
+            actor_user_id: None,
+            actor_kind: "system",
+            action: "user.oidc.merge",
+            target_kind: "user",
+            target_id: Some(&user.id),
+            metadata: Some(serde_json::json!({
+                "provider": provider,
+                "subject": subject,
+                "email_claim": email,
+                "merged_by": "verified_email_match",
+            })),
+            now_ms: now_ms_i,
+        })
+        .await
+    {
+        warn!(error = %e, "insert_admin_action oidc merge failed");
+    }
+
+    AutoLink::Linked(user.id)
 }
 
 async fn signup_via_oidc(

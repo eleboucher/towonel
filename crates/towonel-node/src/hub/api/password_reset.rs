@@ -45,12 +45,11 @@ pub(super) async fn post_request(
     let email = body.email.trim();
     let email_key = email.to_lowercase();
 
-    // OIDC-only users (empty hash) have no password to reset.
     // Spawn the DB+SMTP work so the response time is independent of whether
-    // the email exists, closing the user-enumeration timing oracle.
+    // the email exists, closing the user-enumeration timing oracle. OIDC-only
+    // users (empty hash) qualify too: this is how they set a first password.
     if let Ok(Some(user)) = state.db.find_user_by_email(email).await
         && user.disabled_at_ms.is_none()
-        && !user.password_hash.is_empty()
     {
         let state = Arc::clone(&state);
         let user_id = user.id.clone();

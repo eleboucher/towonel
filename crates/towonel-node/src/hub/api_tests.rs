@@ -3139,6 +3139,273 @@ async fn unlink_removes_identity_for_caller() {
     assert!(still.is_none());
 }
 
+async fn user_id_from_me(hub: &TestHub, client: &reqwest::Client, cookie: &str) -> String {
+    let body: Value = client
+        .get(hub.url("/v1/auth/me"))
+        .header(reqwest::header::COOKIE, cookie)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    body["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn oidc_auto_link_merges_into_verified_password_account() {
+    use super::api::oidc::{AutoLink, maybe_auto_link};
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let alice_id = user_id_from_me(&hub, &client, &cookie).await;
+
+    let outcome = maybe_auto_link(
+        &hub.state,
+        "codeberg",
+        "cb-sub-1",
+        Some("alice@example.test"),
+        Some(true),
+    )
+    .await;
+    assert_eq!(outcome, AutoLink::Linked(alice_id));
+
+    // The identity is now attached to Alice's existing account.
+    let ident = hub
+        .state
+        .db
+        .find_oauth_identity("codeberg", "cb-sub-1")
+        .await
+        .unwrap()
+        .expect("identity linked");
+    assert_eq!(ident.email.as_deref(), Some("alice@example.test"));
+}
+
+#[tokio::test]
+async fn oidc_auto_link_declines_without_verified_match() {
+    use super::api::oidc::{AutoLink, maybe_auto_link};
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let _cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+
+    // Unverified IdP email: never merge.
+    assert_eq!(
+        maybe_auto_link(
+            &hub.state,
+            "codeberg",
+            "cb-sub-2",
+            Some("alice@example.test"),
+            Some(false),
+        )
+        .await,
+        AutoLink::NoMatch,
+    );
+    // No local account for this address.
+    assert_eq!(
+        maybe_auto_link(
+            &hub.state,
+            "codeberg",
+            "cb-sub-2",
+            Some("nobody@example.test"),
+            Some(true),
+        )
+        .await,
+        AutoLink::NoMatch,
+    );
+}
+
+#[tokio::test]
+async fn oidc_auto_link_declines_unverified_local_account() {
+    use super::api::oidc::{AutoLink, maybe_auto_link};
+    use super::db::users::NewUser;
+    let hub = TestHub::start().await;
+
+    // Signed-up-but-never-verified password account: a possible pre-squat,
+    // so an IdP-verified email must not merge into it.
+    hub.state
+        .db
+        .insert_user(NewUser {
+            id: "unverified-1",
+            email: "squat@example.test",
+            password_hash: "argon2-placeholder",
+            role: "user",
+            email_verified_at_ms: None,
+            now_ms: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        maybe_auto_link(
+            &hub.state,
+            "codeberg",
+            "cb-sub-3",
+            Some("squat@example.test"),
+            Some(true),
+        )
+        .await,
+        AutoLink::NoMatch,
+    );
+}
+
+#[tokio::test]
+async fn oidc_auto_link_refuses_when_provider_already_linked() {
+    use super::api::oidc::{AutoLink, maybe_auto_link};
+    use super::db::user_oauth_identities::NewOauthIdentity;
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let alice_id = user_id_from_me(&hub, &client, &cookie).await;
+
+    hub.state
+        .db
+        .insert_oauth_identity(NewOauthIdentity {
+            provider: "codeberg",
+            subject: "existing-sub",
+            user_id: &alice_id,
+            email: Some("alice@example.test"),
+            now_ms: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+    // A second codeberg identity can't be merged onto the same account.
+    assert_eq!(
+        maybe_auto_link(
+            &hub.state,
+            "codeberg",
+            "other-sub",
+            Some("alice@example.test"),
+            Some(true),
+        )
+        .await,
+        AutoLink::Failed("provider_already_linked"),
+    );
+}
+
+#[tokio::test]
+async fn oidc_auto_link_matches_email_case_insensitively() {
+    use super::api::oidc::{AutoLink, maybe_auto_link};
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let cookie = signup_and_login_user(&hub, &client, "alice@example.test", "hunter22!").await;
+    let alice_id = user_id_from_me(&hub, &client, &cookie).await;
+
+    // A differently-cased IdP email must still merge into Alice's account.
+    assert_eq!(
+        maybe_auto_link(
+            &hub.state,
+            "codeberg",
+            "cb-sub-case",
+            Some("Alice@Example.TEST"),
+            Some(true),
+        )
+        .await,
+        AutoLink::Linked(alice_id),
+    );
+}
+
+#[tokio::test]
+async fn oidc_auto_link_refuses_disabled_account() {
+    use super::api::oidc::{AutoLink, maybe_auto_link};
+    use super::db::users::NewUser;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    let hub = TestHub::start().await;
+
+    hub.state
+        .db
+        .insert_user(NewUser {
+            id: "disabled-1",
+            email: "dana@example.test",
+            password_hash: "argon2-placeholder",
+            role: "user",
+            email_verified_at_ms: Some(1_700_000_000_000),
+            now_ms: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+    super::db::entities::users::Entity::update_many()
+        .col_expr(
+            super::db::entities::users::Column::DisabledAtMs,
+            sea_orm::sea_query::Expr::value(1_700_000_000_001_i64),
+        )
+        .filter(super::db::entities::users::Column::Id.eq("disabled-1"))
+        .exec(&hub.state.db.conn)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        maybe_auto_link(
+            &hub.state,
+            "codeberg",
+            "cb-sub-disabled",
+            Some("dana@example.test"),
+            Some(true),
+        )
+        .await,
+        AutoLink::Failed("account_disabled"),
+    );
+}
+
+#[tokio::test]
+async fn oidc_only_user_can_set_password_via_reset() {
+    use super::db::users::NewUser;
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+
+    // OIDC-only account: empty password hash, verified email, as
+    // signup_via_oidc leaves it.
+    hub.state
+        .db
+        .insert_user(NewUser {
+            id: "oidc-only-1",
+            email: "carol@example.test",
+            password_hash: "",
+            role: "user",
+            email_verified_at_ms: Some(1_700_000_000_000),
+            now_ms: 1_700_000_000_000,
+        })
+        .await
+        .unwrap();
+
+    // For an OIDC-only user, the reset flow sets the first password.
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/password/reset"),
+        json!({"email": "carol@example.test"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+    let reset_token = snapshot_mails(&hub)
+        .await
+        .iter()
+        .rev()
+        .find(|m| m.kind == TestMailKind::PasswordReset)
+        .expect("OIDC-only user must receive a reset mail")
+        .token
+        .clone();
+
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/password/reset/confirm"),
+        json!({"token": reset_token, "new_password": "brand-new!"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+
+    // The account now also signs in with the password.
+    let (s, _) = post_json(
+        &client,
+        &hub.url("/v1/auth/login"),
+        json!({"email": "carol@example.test", "password": "brand-new!"}),
+        None,
+    )
+    .await;
+    assert_eq!(s, 200);
+}
+
 #[tokio::test]
 async fn unlink_unknown_provider_returns_not_found() {
     let hub = TestHub::start().await;

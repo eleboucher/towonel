@@ -271,6 +271,10 @@ pub struct OidcProviderConfig {
     pub client_id: String,
     pub client_secret: zeroize::Zeroizing<String>,
     pub redirect_uri: String,
+    /// Opt-in: auto-link an OIDC login into an existing verified local account
+    /// when the emails match. Off by default — only enable for providers whose
+    /// `email_verified` claim you trust as much as mailbox control.
+    pub trust_email_verified: bool,
 }
 
 /// Default UDP port for the iroh QUIC socket. Operators rarely need
@@ -444,6 +448,7 @@ struct RawEnv {
     hub_oidc_codeberg_client_id: Option<String>,
     hub_oidc_codeberg_client_secret: Option<String>,
     hub_oidc_codeberg_redirect_uri: Option<String>,
+    hub_oidc_codeberg_trust_email_verified: Option<bool>,
     hub_console_url: Option<String>,
 
     mail_mailjet_api_key: Option<String>,
@@ -529,6 +534,7 @@ impl NodeConfig {
             hub_oidc_codeberg_client_id,
             hub_oidc_codeberg_client_secret,
             hub_oidc_codeberg_redirect_uri,
+            hub_oidc_codeberg_trust_email_verified,
             hub_console_url,
             mail_mailjet_api_key,
             mail_mailjet_api_secret,
@@ -588,6 +594,7 @@ impl NodeConfig {
                 hub_oidc_codeberg_client_id,
                 hub_oidc_codeberg_client_secret,
                 hub_oidc_codeberg_redirect_uri,
+                hub_oidc_codeberg_trust_email_verified,
             )?,
         };
 
@@ -981,6 +988,7 @@ fn build_oidc_provider(
     client_id: Option<String>,
     client_secret: Option<String>,
     redirect_uri: Option<String>,
+    trust_email_verified: Option<bool>,
 ) -> anyhow::Result<Option<OidcProviderConfig>> {
     let any = client_id.is_some() || client_secret.is_some() || redirect_uri.is_some();
     if !any {
@@ -1009,6 +1017,7 @@ fn build_oidc_provider(
         client_id,
         client_secret: zeroize::Zeroizing::new(client_secret),
         redirect_uri,
+        trust_email_verified: trust_email_verified.unwrap_or(false),
     }))
 }
 
@@ -1605,6 +1614,39 @@ mod tests {
             cfg.hub.operator_api_key.as_deref(),
             Some("super-secret-token")
         );
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn oidc_trust_email_verified_defaults_off() {
+        let dir = unique_data_dir("oidc-trust-default");
+        let cfg = NodeConfig::from_raw(RawEnv {
+            data_dir: Some(dir.clone()),
+            hub_oidc_codeberg_client_id: Some("cid".into()),
+            hub_oidc_codeberg_client_secret: Some("secret".into()),
+            hub_oidc_codeberg_redirect_uri: Some("https://hub.example/callback".into()),
+            ..base_raw_env(&"88".repeat(32))
+        })
+        .unwrap();
+        let cb = cfg.hub.oidc.codeberg.expect("codeberg configured");
+        assert!(!cb.trust_email_verified);
+        drop(std::fs::remove_dir_all(&dir));
+    }
+
+    #[test]
+    fn oidc_trust_email_verified_opt_in() {
+        let dir = unique_data_dir("oidc-trust-on");
+        let cfg = NodeConfig::from_raw(RawEnv {
+            data_dir: Some(dir.clone()),
+            hub_oidc_codeberg_client_id: Some("cid".into()),
+            hub_oidc_codeberg_client_secret: Some("secret".into()),
+            hub_oidc_codeberg_redirect_uri: Some("https://hub.example/callback".into()),
+            hub_oidc_codeberg_trust_email_verified: Some(true),
+            ..base_raw_env(&"88".repeat(32))
+        })
+        .unwrap();
+        let cb = cfg.hub.oidc.codeberg.expect("codeberg configured");
+        assert!(cb.trust_email_verified);
         drop(std::fs::remove_dir_all(&dir));
     }
 }
