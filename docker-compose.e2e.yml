@@ -1,6 +1,26 @@
 name: towonel-e2e
 
 services:
+  pebble:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e-pebble
+    container_name: towonel-e2e-pebble
+    command: ["-config", "/pebble-config.json", "-dnsserver", "127.0.0.11:53"]
+    environment:
+      # Deterministic validation: no random sleeps, no random nonce rejects.
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_WFE_NONCEREJECT: "0"
+    volumes:
+      - ./tests/e2e/fixtures/pebble-config.json:/pebble-config.json:ro
+      - ./tests/e2e/fixtures:/certs:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsSk", "https://127.0.0.1:14000/dir"]
+      interval: 2s
+      timeout: 3s
+      start_period: 2s
+      retries: 20
+
   hub-node:
     build:
       context: .
@@ -22,10 +42,19 @@ services:
       TOWONEL_HUB_PUBLIC_URL: https://hub-node:8443
       TOWONEL_HUB_TLS_CERT_DIR: /data/certs
       TOWONEL_HUB_TLS_ACME_EMAIL: ${E2E_HUB_TLS_ACME_EMAIL}
+      # Issue certs from the local Pebble CA instead of Let's Encrypt, and
+      # trust Pebble's directory cert (SAN=pebble) via the CA we mount below.
+      TOWONEL_HUB_TLS_ACME_DIRECTORY_URL: https://pebble:14000/dir
+      SSL_CERT_FILE: /certs/pebble-ca.pem
     volumes:
       - hub-data:/data
+      - ./tests/e2e/fixtures:/certs:ro
+    depends_on:
+      pebble:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "--max-time", "2", "-fsSk", "https://127.0.0.1:8443/v1/health"]
+      # SNI hub-node so the resolver serves the cert obtained for that name.
+      test: ["CMD", "curl", "--max-time", "2", "-fsSk", "https://hub-node:8443/v1/health"]
       interval: 2s
       timeout: 3s
       start_period: 5s
@@ -48,8 +77,8 @@ services:
         # One echo per port in the range; each replies "<local-port>:<payload>"
         # (SOCAT_SOCKPORT = the origin port hit), proving same-port forwarding.
         for p in 49160 49161 49162; do
-          socat -d "UDP-LISTEN:$p,reuseaddr,fork" \
-            SYSTEM:'printf "%s:" "$SOCAT_SOCKPORT"; cat' &
+          socat -d "UDP-LISTEN:$$p,reuseaddr,fork" \
+            SYSTEM:'printf "%s:" "$$SOCAT_SOCKPORT"; cat' &
         done
         wait
     volumes:
@@ -73,7 +102,7 @@ services:
         condition: service_healthy
     environment:
       RUST_LOG: info,e2e_runner=debug
-      E2E_HUB_BASE: http://hub-node:8443
+      E2E_HUB_BASE: https://hub-node:8443
       E2E_EDGE_HOST: hub-node
       E2E_EDGE_PORT: "4443"
       E2E_OPERATOR_KEY_FILE: /hub-data/operator.key

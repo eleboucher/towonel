@@ -39,6 +39,9 @@ impl OpsClient {
             api_key: api_key.into(),
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(5))
+                // e2e hub serves a Pebble-issued cert; trust chain isn't
+                // provisioned into this test client, so skip verification.
+                .danger_accept_invalid_certs(true)
                 .build()
                 .expect("reqwest client build"),
         }

@@ -1,0 +1,9 @@
+# Pebble (local ACME CA) for e2e. The upstream image is distroless, so wrap it
+# in alpine to get curl for a container healthcheck — the hub depends on Pebble
+# being ready before it obtains its cert (a failed obtain triggers a 15m cooldown).
+FROM ghcr.io/letsencrypt/pebble:latest AS upstream
+
+FROM alpine:3.21
+RUN apk add --no-cache curl
+COPY --from=upstream /app /usr/bin/pebble
+ENTRYPOINT ["/usr/bin/pebble"]

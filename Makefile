@@ -32,6 +32,7 @@ down:
 	docker compose down
 
 e2e:
+	./tests/e2e/fixtures/make-fixtures.sh
 	docker compose --env-file .env.e2e -f docker-compose.e2e.yml down -v
 	docker compose --env-file .env.e2e -f docker-compose.e2e.yml up --build --abort-on-container-exit --exit-code-from test-runner
 	docker compose --env-file .env.e2e -f docker-compose.e2e.yml down -v
