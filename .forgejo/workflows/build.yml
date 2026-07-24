@@ -30,7 +30,7 @@ jobs:
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: registry.erwanleboucher.dev
-          username: ${{ vars.USERNAME }}
+          username: eleboucher
           password: ${{ secrets.APOCI_REGISTRY_TOKEN }}
       - name: Compute node image metadata
         id: meta-node
@@ -38,7 +38,7 @@ jobs:
         with:
           images: |
             codeberg.org/towonel/towonel-node
-            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
+            registry.erwanleboucher.dev/eleboucher/towonel-node
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
@@ -75,7 +75,7 @@ jobs:
         with:
           images: |
             codeberg.org/towonel/towonel-agent
-            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
+            registry.erwanleboucher.dev/eleboucher/towonel-agent
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long
@@ -112,7 +112,7 @@ jobs:
         with:
           images: |
             codeberg.org/towonel/towonel-hub-caddy
-            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy
+            registry.erwanleboucher.dev/eleboucher/towonel-hub-caddy
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha,format=long

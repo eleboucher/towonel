@@ -108,7 +108,7 @@ jobs:
         uses: https://data.forgejo.org/docker/login-action@v4
         with:
           registry: registry.erwanleboucher.dev
-          username: ${{ vars.USERNAME }}
+          username: eleboucher
           password: ${{ secrets.APOCI_REGISTRY_TOKEN }}
       - name: Compute node image metadata
         id: meta-node
@@ -116,7 +116,7 @@ jobs:
         with:
           images: |
             codeberg.org/towonel/towonel-node
-            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-node
+            registry.erwanleboucher.dev/eleboucher/towonel-node
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -159,7 +159,7 @@ jobs:
         with:
           images: |
             codeberg.org/towonel/towonel-agent
-            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-agent
+            registry.erwanleboucher.dev/eleboucher/towonel-agent
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -202,7 +202,7 @@ jobs:
         with:
           images: |
             codeberg.org/towonel/towonel-hub-caddy
-            registry.erwanleboucher.dev/${{ vars.USERNAME }}/towonel-hub-caddy
+            registry.erwanleboucher.dev/eleboucher/towonel-hub-caddy
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -247,16 +247,15 @@ jobs:
           NODE_DIGEST: ${{ steps.build-node.outputs.digest }}
           AGENT_DIGEST: ${{ steps.build-agent.outputs.digest }}
           HUB_CADDY_DIGEST: ${{ steps.build-hub-caddy.outputs.digest }}
-          USERNAME: ${{ vars.USERNAME }}
         run: |
           set -euo pipefail
           cosign sign --yes --key env://COSIGN_KEY \
             "codeberg.org/towonel/towonel-node@${NODE_DIGEST}" \
-            "registry.erwanleboucher.dev/${USERNAME}/towonel-node@${NODE_DIGEST}" \
+            "registry.erwanleboucher.dev/eleboucher/towonel-node@${NODE_DIGEST}" \
             "codeberg.org/towonel/towonel-agent@${AGENT_DIGEST}" \
-            "registry.erwanleboucher.dev/${USERNAME}/towonel-agent@${AGENT_DIGEST}" \
+            "registry.erwanleboucher.dev/eleboucher/towonel-agent@${AGENT_DIGEST}" \
             "codeberg.org/towonel/towonel-hub-caddy@${HUB_CADDY_DIGEST}" \
-            "registry.erwanleboucher.dev/${USERNAME}/towonel-hub-caddy@${HUB_CADDY_DIGEST}"
+            "registry.erwanleboucher.dev/eleboucher/towonel-hub-caddy@${HUB_CADDY_DIGEST}"
       - name: Stage and archive
         env:
           TAG: ${{ needs.release.outputs.tag }}
