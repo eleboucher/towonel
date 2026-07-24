@@ -338,6 +338,12 @@ jobs:
         run: |
           set -euo pipefail
           echo "${CODEBERG_TOKEN}" | helm registry login codeberg.org --username "${USERNAME}" --password-stdin
+      - name: Login to registry.erwanleboucher.dev
+        env:
+          APOCI_REGISTRY_TOKEN: ${{ secrets.APOCI_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${APOCI_REGISTRY_TOKEN}" | helm registry login registry.erwanleboucher.dev --username eleboucher --password-stdin
       # Released charts reference immutable images; fail closed rather than
       # fall back to a floating tag.
       - name: Pin the released image digests into the charts
@@ -375,6 +381,14 @@ jobs:
               exit 1
             fi
             echo "codeberg.org/towonel/charts/${NAME}@${DIGEST}" >> chart-digests.txt
+            OUTPUT="$(helm push "${NAME}-${VERSION}.tgz" "oci://registry.erwanleboucher.dev/eleboucher/charts" 2>&1)"
+            echo "$OUTPUT"
+            DIGEST="$(echo "$OUTPUT" | sed -n 's/^Digest: //p')"
+            if [ -z "$DIGEST" ]; then
+              echo "failed to parse digest for ${NAME} on registry.erwanleboucher.dev" >&2
+              exit 1
+            fi
+            echo "registry.erwanleboucher.dev/eleboucher/charts/${NAME}@${DIGEST}" >> chart-digests.txt
           done
       - name: Install cosign
         run: |
@@ -397,9 +411,11 @@ jobs:
           COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
           CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}
           USERNAME: ${{ vars.USERNAME }}
+          APOCI_REGISTRY_TOKEN: ${{ secrets.APOCI_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
           # helm registry login only fills helm's config; cosign reads the
           # docker config, so it needs its own login.
           echo "${CODEBERG_TOKEN}" | cosign login codeberg.org --username "${USERNAME}" --password-stdin
+          echo "${APOCI_REGISTRY_TOKEN}" | cosign login registry.erwanleboucher.dev --username eleboucher --password-stdin
           xargs cosign sign --yes --key env://COSIGN_KEY < chart-digests.txt
