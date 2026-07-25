@@ -21,6 +21,10 @@ global:
 hub:
   # -- Run the hub control plane (TOWONEL_HUB_ENABLED).
   enabled: true
+  # -- Bind address for the API and hub-link listeners. "[::]" is dual-stack.
+  bindAddress: 0.0.0.0
+  # -- Bind address for the hub health/metrics listener.
+  healthBindAddress: 0.0.0.0
   # -- Port the user/operator HTTP API listens on.
   apiPort: 8443
   # -- Port edges dial for the hub link.
@@ -107,13 +111,22 @@ controllers:
               - ALL
             add:
               - NET_BIND_SERVICE
-        # env, ports, probes and resources are derived from the hub/edge roles.
+        # env, ports, probes and resources are derived from the hub/edge roles;
+        # probes keys set here win, down to single spec fields.
         # App config (DB DSN, public URLs, OIDC, OTEL) merges in here as a map:
         # env:
         #   TOWONEL_HUB_DB_DRIVER: postgres
         envFrom: []
         # - secretRef:
         #     name: towonel-hub-secret
+
+# The edge mounts a `data` volume at edge.dataDir, an emptyDir unless set here.
+# The node generates its identity key there (plus the hub KEK and invite-hash
+# key when the hub shares the pod), so an emptyDir regenerates them on restart:
+# persistence:
+#   data:
+#     type: persistentVolumeClaim
+#     existingClaim: towonel-node-data
 
 # -- Service exposing the enabled listeners (ports derived from the roles).
 service:

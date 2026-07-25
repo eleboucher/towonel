@@ -65,6 +65,45 @@ tests:
             name: TOWONEL_AGENT_HEALTH_LISTEN_ADDR
             value: 0.0.0.0:9090
 
+  - it: binds the health listener on the configured address
+    set:
+      agent.healthBindAddress: "[::]"
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TOWONEL_AGENT_HEALTH_LISTEN_ADDR
+            value: "[::]:9090"
+
+  - it: keeps an explicit dnsPolicy under hostNetwork
+    set:
+      hostNetwork: true
+      defaultPodOptions.dnsPolicy: None
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - equal:
+          path: spec.template.spec.hostNetwork
+          value: true
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: None
+
+  - it: defaults dnsPolicy to ClusterFirstWithHostNet under hostNetwork
+    set:
+      hostNetwork: true
+    documentSelector:
+      path: kind
+      value: Deployment
+    asserts:
+      - equal:
+          path: spec.template.spec.dnsPolicy
+          value: ClusterFirstWithHostNet
+
   - it: sets pod and container security contexts
     documentSelector:
       path: kind

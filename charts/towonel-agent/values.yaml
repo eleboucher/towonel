@@ -19,6 +19,8 @@ agent:
   logLevel: info
   # -- Port serving health and Prometheus metrics (TOWONEL_AGENT_HEALTH_LISTEN_ADDR).
   healthPort: 9090
+  # -- Bind address for the health/metrics listener. "[::]" is dual-stack.
+  healthBindAddress: 0.0.0.0
   # -- HTTPS services exposed through the tunnel (TOWONEL_AGENT_SERVICES).
   services: []
   # - hostname: "*.example.com"

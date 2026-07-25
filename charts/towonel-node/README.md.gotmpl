@@ -31,6 +31,12 @@ helm install towonel-edge-eu oci://codeberg.org/towonel/charts/towonel-node \
 Deployment-specific configuration (database DSN, public URLs, region) is
 passed through `env`/`envFrom`.
 
+An enabled edge mounts a `data` volume at `edge.dataDir`, an `emptyDir`
+unless you set `persistence.data`. The node generates its identity key
+there (plus the hub KEK and invite-hash key when the hub shares the pod),
+so an `emptyDir` regenerates them on every restart. Back it with a claim,
+or pass the keys in as env.
+
 {{ template "chart.maintainersSection" . }}
 
 {{ template "chart.sourcesSection" . }}

@@ -27,9 +27,9 @@ allowPrivilegeEscalation (NoNewPrivs would block the file-cap bind of 443/80).
 {{- $_ := set $env "TOWONEL_HUB_ENABLED" ($hub.enabled | toString) -}}
 {{- $_ := set $env "TOWONEL_EDGE_ENABLED" ($edge.enabled | toString) -}}
 {{- if $hub.enabled -}}
-  {{- $_ := set $env "TOWONEL_HUB_LISTEN_ADDR" (printf "0.0.0.0:%v" $hub.apiPort) -}}
-  {{- $_ := set $env "TOWONEL_HUB_LINK_LISTEN_ADDR" (printf "0.0.0.0:%v" $hub.linkPort) -}}
-  {{- $_ := set $env "TOWONEL_HUB_HEALTH_LISTEN_ADDR" (printf "0.0.0.0:%v" $hub.metricsPort) -}}
+  {{- $_ := set $env "TOWONEL_HUB_LISTEN_ADDR" (printf "%s:%v" $hub.bindAddress $hub.apiPort) -}}
+  {{- $_ := set $env "TOWONEL_HUB_LINK_LISTEN_ADDR" (printf "%s:%v" $hub.bindAddress $hub.linkPort) -}}
+  {{- $_ := set $env "TOWONEL_HUB_HEALTH_LISTEN_ADDR" (printf "%s:%v" $hub.healthBindAddress $hub.metricsPort) -}}
   {{- $_ := set $env "TOWONEL_HUB_RATE_LIMIT_PER_SEC" ($hub.rateLimitPerSecond | toString) -}}
   {{- $_ := set $env "TOWONEL_HUB_RATE_LIMIT_BURST" ($hub.rateLimitBurst | toString) -}}
 {{- end -}}
@@ -55,14 +55,32 @@ allowPrivilegeEscalation (NoNewPrivs would block the file-cap bind of 443/80).
 {{- end -}}
 {{- $_ := set $container "ports" $ports -}}
 
-{{- /* Role-default probes (the edge health listener, or the hub API). */ -}}
+{{- /* Role-default probes (the edge health listener, or the hub API); keys set
+       in container.probes win, down to single spec fields. */ -}}
 {{- $probePort := $edge.enabled | ternary "edge-metrics" "hub-api" -}}
 {{- $healthPath := $edge.enabled | ternary "/health" "/v1/health" -}}
 {{- $readyPath := $edge.enabled | ternary "/health" "/v1/readyz" -}}
-{{- $_ := set $container "probes" (dict
+{{- $defaultProbes := dict
     "startup" (dict "enabled" true "type" "HTTP" "path" $healthPath "port" $probePort "spec" (dict "periodSeconds" 5 "failureThreshold" 60))
     "liveness" (dict "enabled" true "type" "HTTP" "path" $healthPath "port" $probePort "spec" (dict "periodSeconds" 30))
-    "readiness" (dict "enabled" true "type" "HTTP" "path" $readyPath "port" $probePort "spec" (dict "periodSeconds" 10))) -}}
+    "readiness" (dict "enabled" true "type" "HTTP" "path" $readyPath "port" $probePort "spec" (dict "periodSeconds" 10)) -}}
+{{- $userProbes := default dict $container.probes -}}
+{{- $probes := deepCopy $userProbes -}}
+{{- range $name, $default := $defaultProbes -}}
+  {{- $user := default dict (index $userProbes $name) -}}
+  {{- $probe := deepCopy $default -}}
+  {{- /* Field-wise, not merge/mergeOverwrite: those drop `false` and `0`. */ -}}
+  {{- range $key, $val := (omit $user "spec") -}}
+    {{- $_ := set $probe $key $val -}}
+  {{- end -}}
+  {{- $spec := deepCopy (default dict $default.spec) -}}
+  {{- range $key, $val := (default dict $user.spec) -}}
+    {{- $_ := set $spec $key $val -}}
+  {{- end -}}
+  {{- $_ := set $probe "spec" $spec -}}
+  {{- $_ := set $probes $name $probe -}}
+{{- end -}}
+{{- $_ := set $container "probes" $probes -}}
 
 {{- /* Role-default resources (explicit container.resources wins). */ -}}
 {{- if empty $container.resources -}}
@@ -82,8 +100,17 @@ allowPrivilegeEscalation (NoNewPrivs would block the file-cap bind of 443/80).
   {{- if not $v.defaultPodOptions.dnsPolicy -}}
     {{- $_ := set $v.defaultPodOptions "dnsPolicy" "ClusterFirstWithHostNet" -}}
   {{- end -}}
+  {{- /* Data volume: emptyDir unless persistence.data declares its own type,
+         which is how a PVC keeps the node identity across restarts. */ -}}
   {{- $persistence := default dict $v.persistence -}}
-  {{- $_ := set $persistence "data" (dict "type" "emptyDir" "globalMounts" (list (dict "path" $edge.dataDir))) -}}
+  {{- $data := deepCopy (default dict (index $persistence "data")) -}}
+  {{- if not $data.type -}}
+    {{- $_ := set $data "type" "emptyDir" -}}
+  {{- end -}}
+  {{- if not $data.globalMounts -}}
+    {{- $_ := set $data "globalMounts" (list (dict "path" $edge.dataDir)) -}}
+  {{- end -}}
+  {{- $_ := set $persistence "data" $data -}}
   {{- $_ := set $v "persistence" $persistence -}}
 {{- end -}}
 
@@ -101,13 +128,15 @@ allowPrivilegeEscalation (NoNewPrivs would block the file-cap bind of 443/80).
 {{- end -}}
 {{- $_ := set $v.service.main "ports" $svcPorts -}}
 
-{{- /* ServiceMonitor endpoints (per enabled role). */ -}}
-{{- $eps := list -}}
-{{- if $hub.enabled -}}
-  {{- $eps = append $eps (dict "port" "hub-metrics" "interval" "30s" "scrapeTimeout" "10s" "path" "/metrics") -}}
+{{- /* ServiceMonitor endpoints (per enabled role, unless already set). */ -}}
+{{- if not $v.serviceMonitor.main.endpoints -}}
+  {{- $eps := list -}}
+  {{- if $hub.enabled -}}
+    {{- $eps = append $eps (dict "port" "hub-metrics" "interval" "30s" "scrapeTimeout" "10s" "path" "/metrics") -}}
+  {{- end -}}
+  {{- if $edge.enabled -}}
+    {{- $eps = append $eps (dict "port" "edge-metrics" "interval" "30s" "scrapeTimeout" "10s" "path" "/metrics") -}}
+  {{- end -}}
+  {{- $_ := set $v.serviceMonitor.main "endpoints" $eps -}}
 {{- end -}}
-{{- if $edge.enabled -}}
-  {{- $eps = append $eps (dict "port" "edge-metrics" "interval" "30s" "scrapeTimeout" "10s" "path" "/metrics") -}}
-{{- end -}}
-{{- $_ := set $v.serviceMonitor.main "endpoints" $eps -}}
 {{- end -}}

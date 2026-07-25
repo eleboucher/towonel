@@ -4,6 +4,12 @@
     "agent": {
       "description": "Friendly agent configuration (derived into the container env / ports).",
       "properties": {
+        "healthBindAddress": {
+          "default": "0.0.0.0",
+          "description": "Bind address for the health/metrics listener. \"[::]\" is dual-stack.",
+          "title": "healthBindAddress",
+          "type": "string"
+        },
         "healthPort": {
           "default": 9090,
           "description": "Port serving health and Prometheus metrics (TOWONEL_AGENT_HEALTH_LISTEN_ADDR).",

@@ -16,3 +16,21 @@ tests:
       - equal:
           path: spec.endpoints[0].port
           value: hub-metrics
+      - equal:
+          path: spec.endpoints[0].interval
+          value: 30s
+
+  - it: honours endpoint overrides
+    set:
+      serviceMonitor.main.enabled: true
+      serviceMonitor.main.endpoints:
+        - port: hub-metrics
+          interval: 5m
+          path: /metrics
+    documentSelector:
+      path: kind
+      value: ServiceMonitor
+    asserts:
+      - equal:
+          path: spec.endpoints[0].interval
+          value: 5m

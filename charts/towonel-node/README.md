@@ -31,6 +31,12 @@ helm install towonel-edge-eu oci://codeberg.org/towonel/charts/towonel-node \
 Deployment-specific configuration (database DSN, public URLs, region) is
 passed through `env`/`envFrom`.
 
+An enabled edge mounts a `data` volume at `edge.dataDir`, an `emptyDir`
+unless you set `persistence.data`. The node generates its identity key
+there (plus the hub KEK and invite-hash key when the hub shares the pod),
+so an `emptyDir` regenerates them on every restart. Back it with a claim,
+or pass the keys in as env.
+
 ## Maintainers
 
 | Name | Email | Url |
@@ -75,7 +81,9 @@ Kubernetes: `>=1.31.0-0`
 | global.fullnameOverride | string | `""` | Override the full release name. |
 | global.nameOverride | string | `""` | Override the chart name used in resource names. |
 | hub.apiPort | int | `8443` | Port the user/operator HTTP API listens on. |
+| hub.bindAddress | string | `"0.0.0.0"` | Bind address for the API and hub-link listeners. "[::]" is dual-stack. |
 | hub.enabled | bool | `true` | Run the hub control plane (TOWONEL_HUB_ENABLED). |
+| hub.healthBindAddress | string | `"0.0.0.0"` | Bind address for the hub health/metrics listener. |
 | hub.linkPort | int | `51444` | Port edges dial for the hub link. |
 | hub.metricsPort | int | `9091` | Port serving hub health and Prometheus metrics. |
 | hub.rateLimitBurst | int | `30` | Per-IP burst allowance on the public API (TOWONEL_HUB_RATE_LIMIT_BURST). |

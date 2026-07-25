@@ -12,7 +12,7 @@ into common's native values, mutating .Values before the common loader renders.
 {{- $_ := set $env "NODE_NAME" (dict "valueFrom" (dict "fieldRef" (dict "fieldPath" "spec.nodeName"))) -}}
 {{- $_ := set $env "POD_NAMESPACE" (dict "valueFrom" (dict "fieldRef" (dict "fieldPath" "metadata.namespace"))) -}}
 {{- $_ := set $env "RUST_LOG" ($a.logLevel | toString) -}}
-{{- $_ := set $env "TOWONEL_AGENT_HEALTH_LISTEN_ADDR" (printf "0.0.0.0:%v" $a.healthPort) -}}
+{{- $_ := set $env "TOWONEL_AGENT_HEALTH_LISTEN_ADDR" (printf "%s:%v" $a.healthBindAddress $a.healthPort) -}}
 {{- with $a.services }}{{- $_ := set $env "TOWONEL_AGENT_SERVICES" (toJson .) -}}{{- end }}
 {{- with $a.tcpServices }}{{- $_ := set $env "TOWONEL_AGENT_TCP_SERVICES" (toJson .) -}}{{- end }}
 {{- with $a.udpServices }}{{- $_ := set $env "TOWONEL_AGENT_UDP_SERVICES" (toJson .) -}}{{- end }}
@@ -30,7 +30,9 @@ into common's native values, mutating .Values before the common loader renders.
 {{- /* hostNetwork workaround. */ -}}
 {{- if $v.hostNetwork -}}
   {{- $_ := set $v.defaultPodOptions "hostNetwork" true -}}
-  {{- $_ := set $v.defaultPodOptions "dnsPolicy" "ClusterFirstWithHostNet" -}}
+  {{- if not $v.defaultPodOptions.dnsPolicy -}}
+    {{- $_ := set $v.defaultPodOptions "dnsPolicy" "ClusterFirstWithHostNet" -}}
+  {{- end -}}
 {{- end -}}
 
 {{- /* Relay-less direct connectivity. */ -}}

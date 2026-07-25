@@ -45,7 +45,7 @@
                 "main": {
                   "properties": {
                     "envFrom": {
-                      "description": "env, ports, probes and resources are derived from the hub/edge roles.\nApp config (DB DSN, public URLs, OIDC, OTEL) merges in here as a map:\nenv:\n  TOWONEL_HUB_DB_DRIVER: postgres",
+                      "description": "env, ports, probes and resources are derived from the hub/edge roles;\nprobes keys set here win, down to single spec fields.\nApp config (DB DSN, public URLs, OIDC, OTEL) merges in here as a map:\nenv:\n  TOWONEL_HUB_DB_DRIVER: postgres",
                       "items": {
                         "required": []
                       },
@@ -305,11 +305,23 @@
           "title": "apiPort",
           "type": "integer"
         },
+        "bindAddress": {
+          "default": "0.0.0.0",
+          "description": "Bind address for the API and hub-link listeners. \"[::]\" is dual-stack.",
+          "title": "bindAddress",
+          "type": "string"
+        },
         "enabled": {
           "default": true,
           "description": "Run the hub control plane (TOWONEL_HUB_ENABLED).",
           "title": "enabled",
           "type": "boolean"
+        },
+        "healthBindAddress": {
+          "default": "0.0.0.0",
+          "description": "Bind address for the hub health/metrics listener.",
+          "title": "healthBindAddress",
+          "type": "string"
         },
         "linkPort": {
           "default": 51444,

@@ -43,6 +43,7 @@ Kubernetes: `>=1.31.0-0`
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| agent.healthBindAddress | string | `"0.0.0.0"` | Bind address for the health/metrics listener. "[::]" is dual-stack. |
 | agent.healthPort | int | `9090` | Port serving health and Prometheus metrics (TOWONEL_AGENT_HEALTH_LISTEN_ADDR). |
 | agent.inviteTokenSecret.key | string | `"TOWONEL_INVITE_TOKEN"` | Key inside the Secret. |
 | agent.inviteTokenSecret.name | string | `""` | Name of the Secret holding the invite token (TOWONEL_INVITE_TOKEN). Leave empty to skip the env var. |

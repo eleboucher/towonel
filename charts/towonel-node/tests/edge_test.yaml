@@ -72,9 +72,34 @@ tests:
           content:
             mountPath: /data
           any: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            emptyDir: {}
       - equal:
           path: spec.template.spec.containers[0].resources.limits.memory
           value: 2Gi
+
+  - it: backs the data dir with a claim when persistence.data is set
+    set:
+      persistence.data.type: persistentVolumeClaim
+      persistence.data.existingClaim: towonel-node-data
+    documentSelector:
+      path: kind
+      value: DaemonSet
+    asserts:
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: data
+            persistentVolumeClaim:
+              claimName: towonel-node-data
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            mountPath: /data
+          any: true
 
   - it: serves only the edge ports on the Service
     documentSelector:
