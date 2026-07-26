@@ -4,6 +4,7 @@ pub mod hub_link;
 pub mod proxy_protocol;
 pub mod router;
 pub mod sessions;
+mod udp_source;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1617,6 +1618,10 @@ fn bind_udp_port(
     binding: &towonel_common::routing::UdpListenerBinding,
 ) -> Option<std::net::UdpSocket> {
     let sock = bind_dual_stack_socket(port, socket2::Type::DGRAM, socket2::Protocol::UDP, |s| {
+        // Without this the reply source is a route lookup; see `udp_source`.
+        if let Err(e) = udp_source::enable_recv_dst_addr(&s) {
+            warn!(port, error = %e, "failed to enable udp destination reporting");
+        }
         Some(s.into())
     });
     if sock.is_none() {
@@ -1638,8 +1643,8 @@ type UdpSessions = papaya::HashMap<std::net::SocketAddr, mpsc::Sender<bytes::Byt
 
 /// Receive-buffer chunk for the UDP listener. Each datagram is split off the
 /// chunk as a refcounted `Bytes` (no copy, no per-datagram allocation); a
-/// fresh chunk is allocated only once spare capacity dips below one
-/// max-size datagram.
+/// fresh chunk is allocated only once the remainder dips below one max-size
+/// datagram. Zeroed because `recvmsg` needs an initialized slice.
 const UDP_RECV_CHUNK: usize = 4 * MAX_UDP_DATAGRAM;
 
 async fn udp_listen_loop(
@@ -1666,20 +1671,26 @@ async fn udp_listen_loop(
         .udp_datagrams_dropped
         .with_label_values(&[&tenant_label, &binding.service]);
 
-    let mut chunk = bytes::BytesMut::with_capacity(UDP_RECV_CHUNK);
+    let mut cmsg = udp_source::cmsg_buffer();
+    let mut chunk = bytes::BytesMut::zeroed(UDP_RECV_CHUNK);
     loop {
-        // `recv_buf_from` appends into spare capacity, so keep at least one
-        // max-size datagram spare or an oversized datagram would truncate.
-        if chunk.capacity() < MAX_UDP_DATAGRAM {
-            chunk = bytes::BytesMut::with_capacity(UDP_RECV_CHUNK);
+        // Datagrams are received into the head of the chunk and split off, so
+        // keep one max-size datagram of room or an oversized one would truncate.
+        if chunk.len() < MAX_UDP_DATAGRAM {
+            chunk = bytes::BytesMut::zeroed(UDP_RECV_CHUNK);
         }
-        let (n, peer_addr) = match socket.recv_buf_from(&mut chunk).await {
-            Ok(v) => v,
-            Err(e) => {
-                warn!(service = %binding.service, "udp recv error: {e}");
-                continue;
-            }
+        let Some(recv_buf) = chunk.get_mut(..MAX_UDP_DATAGRAM) else {
+            warn!(service = %binding.service, "udp recv chunk too small; stopping listener");
+            return;
         };
+        let (n, peer_addr, local_dst) =
+            match udp_source::recv_from_with_dst(&socket, &mut cmsg, recv_buf).await {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(service = %binding.service, "udp recv error: {e}");
+                    continue;
+                }
+            };
         let datagram = chunk.split_to(n).freeze();
 
         // Get-or-create the session sender. A stale entry (closed channel,
@@ -1708,6 +1719,7 @@ async fn udp_listen_loop(
                         udp_session_pump(
                             socket_for_session,
                             peer_addr,
+                            local_dst,
                             binding_for_session,
                             ctx_for_session,
                             rx,
@@ -1748,6 +1760,7 @@ async fn udp_listen_loop(
 async fn udp_session_pump(
     socket: Arc<UdpSocket>,
     peer_addr: std::net::SocketAddr,
+    local_dst: Option<std::net::IpAddr>,
     binding: Arc<towonel_common::routing::UdpListenerBinding>,
     ctx: Arc<ConnCtx>,
     mut rx: mpsc::Receiver<bytes::Bytes>,
@@ -1788,7 +1801,9 @@ async fn udp_session_pump(
         };
         let client_addrs = ClientAddrs {
             src: peer_addr,
-            dst: local_addr,
+            // `local_addr` is only the wildcard bind; prefer the destination
+            // the client actually sent to.
+            dst: local_dst.map_or(local_addr, |ip| std::net::SocketAddr::new(ip, local_addr.port())),
         };
         if let Err(e) = write_handshake(&mut send_stream, &route_key, client_addrs).await {
             warn!(error = %e, "udp handshake to agent failed");
@@ -1826,7 +1841,7 @@ async fn udp_session_pump(
                 read = frame_reader.next(&mut recv_stream) => {
                     match read {
                         Ok(payload) => {
-                            match socket.send_to(payload, peer_addr).await {
+                            match udp_source::send_to_from(&socket, payload, peer_addr, local_dst).await {
                                 Ok(sent) => {
                                     ctx.metrics.total_bytes_out.inc_by(sent as u64);
                                     tenant_bytes_out.inc_by(sent as u64);

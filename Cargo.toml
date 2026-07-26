@@ -196,6 +196,11 @@ rcgen = "0.14"
 webpki-roots = "1.0"
 arc-swap = "1.7"
 socket2 = { version = "0.6", features = ["all"] }
+nix = { version = "0.31", default-features = false, features = [
+  "net",
+  "socket",
+  "uio",
+] }
 moka = { version = "0.12", features = ["future"] }
 openidconnect = { version = "4", default-features = false, features = [
   "reqwest",

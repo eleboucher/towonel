@@ -7,3 +7,4 @@ pub mod tcp_passthrough;
 pub mod tls_passthrough;
 pub mod udp_echo;
 pub mod udp_range;
+pub mod udp_reply_source;

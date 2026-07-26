@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
     cases::proxy_v2::run(&ctx.edge_host, ctx.edge_tls_port).await?;
     cases::udp_echo::run(&ctx.edge_host, ctx.udp_echo_port).await?;
     cases::udp_range::run(&ctx.edge_host, ctx.udp_range_start, ctx.udp_range_end).await?;
+    cases::udp_reply_source::run(&ctx.edge_vip, ctx.udp_echo_port).await?;
 
     let docker = bollard::Docker::connect_with_local_defaults()?;
     cases::liveness_drop::run(
@@ -83,6 +84,7 @@ struct Context_ {
     tenant_hostname: String,
     broker_listen: String,
     edge_host: String,
+    edge_vip: String,
     edge_tls_port: u16,
     origin_tcp_port: u16,
     udp_echo_port: u16,
@@ -115,6 +117,7 @@ impl Context_ {
             broker_listen: std::env::var("E2E_BROKER_LISTEN")
                 .unwrap_or_else(|_| "0.0.0.0:7777".to_string()),
             edge_host: required("E2E_EDGE_HOST")?,
+            edge_vip: required("E2E_EDGE_VIP")?,
             edge_tls_port: required("E2E_EDGE_PORT")?
                 .parse()
                 .context("E2E_EDGE_PORT")?,

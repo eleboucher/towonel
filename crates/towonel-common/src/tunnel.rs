@@ -227,8 +227,9 @@ pub async fn read_handshake(
 /// Dual-stack sockets surface IPv4 peers as `::ffff:a.b.c.d`. Unmap src and
 /// dst back to native v4 so `(src, dst)` share a family before encoding.
 ///
-/// UDP listeners report `[::]:port` as their local addr regardless of peer.
-/// When the peer unmaps to v4, demote the v6 wildcard dst to v4 wildcard.
+/// A UDP listener that couldn't read the datagram's destination falls back to
+/// its own `[::]:port` wildcard bind. When the peer unmaps to v4, demote the v6
+/// wildcard dst to v4 wildcard.
 fn unmap_to_matching_family(src: SocketAddr, dst: SocketAddr) -> Option<(SocketAddr, SocketAddr)> {
     let src = unmap_v4(src);
     let dst = unmap_v4(dst);
