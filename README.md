@@ -195,10 +195,14 @@ The VPS admin doesn't add anything per service.
 
 ```bash
 TOWONEL_AGENT_TCP_SERVICES='[
-  {"name":"forgejo-ssh", "origin":"forgejo:22",            "listen_port":2222},
+  {"name":"forgejo-ssh", "origin":"forgejo:22",            "listen_port":2222, "proxy_protocol":"v2"},
   {"name":"prom-write",  "origin":"victoriametrics:8428",  "listen_port":9090}
 ]'
 ```
+
+TCP services forward bytes unchanged by default. Set `proxy_protocol` to
+`"v2"` when the origin accepts HAProxy PROXY protocol v2 and needs the real
+client source and destination addresses.
 
 Each agent boot reconciles the hub against the agent's env: added
 entries are upserted, removed entries are deleted, and stale agent IDs
@@ -511,6 +515,8 @@ Service shape:
 
 `proxy_protocol` defaults to `v2` for passthrough services and `none`
 for terminated services.
+
+Raw TCP service entries also accept `proxy_protocol`; it defaults to `none`.
 
 ### CLI
 

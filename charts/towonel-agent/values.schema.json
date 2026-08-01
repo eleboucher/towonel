@@ -59,7 +59,7 @@
           "type": "array"
         },
         "udpServices": {
-          "description": "- name: forgejo-ssh\n  origin: envoy-external.network.svc.cluster.local:2222\n  listen_port: 2222\nUDP services exposed through the tunnel (TOWONEL_AGENT_UDP_SERVICES).",
+          "description": "- name: forgejo-ssh\n  origin: envoy-external.network.svc.cluster.local:2222\n  listen_port: 2222\n  proxy_protocol: v2\nUDP services exposed through the tunnel (TOWONEL_AGENT_UDP_SERVICES).",
           "items": {
             "required": []
           },

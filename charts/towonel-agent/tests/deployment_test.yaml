@@ -161,6 +161,7 @@ tests:
         - name: ssh
           origin: svc.ns.svc:2222
           listen_port: 2222
+          proxy_protocol: v2
       agent.inviteTokenSecret.name: towonel-agent-secret
     documentSelector:
       path: kind
@@ -175,7 +176,7 @@ tests:
           path: spec.template.spec.containers[0].env
           content:
             name: TOWONEL_AGENT_TCP_SERVICES
-            value: '[{"listen_port":2222,"name":"ssh","origin":"svc.ns.svc:2222"}]'
+            value: '[{"listen_port":2222,"name":"ssh","origin":"svc.ns.svc:2222","proxy_protocol":"v2"}]'
       - contains:
           path: spec.template.spec.containers[0].env
           content:

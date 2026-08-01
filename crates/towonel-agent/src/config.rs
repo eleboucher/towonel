@@ -23,6 +23,14 @@ pub struct TcpServiceConfig {
     pub name: String,
     pub origin: String,
     pub listen_port: u16,
+    #[serde(default)]
+    pub proxy_protocol: Option<ProxyProtocol>,
+}
+
+impl TcpServiceConfig {
+    pub fn resolved_proxy_protocol(&self) -> ProxyProtocol {
+        self.proxy_protocol.unwrap_or(ProxyProtocol::None)
+    }
 }
 
 /// UDP counterpart of [`TcpServiceConfig`]. Exactly one of `listen_port`
@@ -332,7 +340,7 @@ mod tests {
     #[test]
     fn tcp_services_json_parses() {
         let json = r#"[
-            {"name":"forgejo-ssh","origin":"forgejo:22","listen_port":2222},
+            {"name":"forgejo-ssh","origin":"forgejo:22","listen_port":2222,"proxy_protocol":"v2"},
             {"name":"prom-write","origin":"victoriametrics:8428","listen_port":9090}
         ]"#;
         let svcs: Vec<TcpServiceConfig> = serde_json::from_str(json).unwrap();
@@ -340,6 +348,8 @@ mod tests {
         assert_eq!(svcs[0].name, "forgejo-ssh");
         assert_eq!(svcs[0].origin, "forgejo:22");
         assert_eq!(svcs[0].listen_port, 2222);
+        assert_eq!(svcs[0].resolved_proxy_protocol(), ProxyProtocol::V2);
+        assert_eq!(svcs[1].resolved_proxy_protocol(), ProxyProtocol::None);
     }
 
     #[test]
@@ -352,11 +362,13 @@ mod tests {
                     name: "ssh".into(),
                     origin: "127.0.0.1:22".into(),
                     listen_port: 2222,
+                    proxy_protocol: None,
                 },
                 TcpServiceConfig {
                     name: "ssh".into(),
                     origin: "127.0.0.1:23".into(),
                     listen_port: 2223,
+                    proxy_protocol: None,
                 },
             ],
         };
@@ -374,11 +386,13 @@ mod tests {
                     name: "ssh".into(),
                     origin: "127.0.0.1:22".into(),
                     listen_port: 2222,
+                    proxy_protocol: None,
                 },
                 TcpServiceConfig {
                     name: "metrics".into(),
                     origin: "127.0.0.1:9000".into(),
                     listen_port: 2222,
+                    proxy_protocol: None,
                 },
             ],
         };
@@ -396,6 +410,7 @@ mod tests {
                 name: String::new(),
                 origin: "127.0.0.1:22".into(),
                 listen_port: 2222,
+                proxy_protocol: None,
             }],
         };
         assert!(cfg.validate().is_err());
@@ -410,6 +425,7 @@ mod tests {
                 name: "ssh".into(),
                 origin: "127.0.0.1:22".into(),
                 listen_port: 0,
+                proxy_protocol: None,
             }],
         };
         assert!(cfg.validate().is_err());
@@ -598,6 +614,7 @@ mod tests {
                 name: "ssh".into(),
                 origin: "127.0.0.1:22".into(),
                 listen_port: 2222,
+                proxy_protocol: None,
             }],
             udp_services: Vec::new(),
         };

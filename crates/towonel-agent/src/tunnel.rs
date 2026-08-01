@@ -167,12 +167,11 @@ fn host_of(address: &str) -> &str {
     address.rsplit_once(':').map_or(address, |(host, _)| host)
 }
 
-/// Like [`OriginTarget`] but without TLS or PROXY-protocol rewriting —
-/// TCP services pipe bytes verbatim.
 struct TcpOriginTarget {
     address: String,
     resolved: ArcSwap<Vec<SocketAddr>>,
     is_literal: bool,
+    proxy_protocol: ProxyProtocol,
 }
 
 impl TcpOriginTarget {
@@ -312,6 +311,7 @@ impl ServiceMap {
                 address: svc.origin.clone(),
                 resolved: ArcSwap::from_pointee(initial),
                 is_literal,
+                proxy_protocol: svc.resolved_proxy_protocol(),
             });
             tcp_map.insert(svc.name.clone(), target);
         }
@@ -714,13 +714,18 @@ async fn handle_tcp_stream(
 
     async {
         debug!("forwarding tcp service to origin");
-        let origin = match target.connect().await {
+        let mut origin = match target.connect().await {
             Ok(s) => s,
             Err(e) => {
                 metrics.record_stream_error(metrics::stream_error::ORIGIN_CONNECT);
                 return Err(e);
             }
         };
+
+        if let Err(e) = write_proxy_header(&mut origin, target.proxy_protocol, client_addrs).await {
+            metrics.record_stream_error(metrics::stream_error::FORWARD_ERROR);
+            return Err(e);
+        }
 
         let (origin_read, mut origin_write) = origin.into_split();
         let mut origin_read = io::BufReader::with_capacity(COPY_BUF_SIZE, origin_read);
