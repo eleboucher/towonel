@@ -10,7 +10,7 @@ use anyhow::Context;
 use clap::{Parser, Subcommand};
 use iroh::endpoint::{Endpoint, presets::Minimal};
 use tokio::sync::broadcast;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use towonel_common::edge_link::EdgeCapabilities;
 use towonel_common::identity::TenantId;
@@ -584,11 +584,28 @@ pub async fn run() -> anyhow::Result<()> {
     }
 }
 
+fn raise_fd_limit() {
+    use nix::sys::resource::{Resource, getrlimit, setrlimit};
+
+    let Ok((soft, hard)) = getrlimit(Resource::RLIMIT_NOFILE) else {
+        return;
+    };
+    if soft >= hard {
+        return;
+    }
+    match setrlimit(Resource::RLIMIT_NOFILE, hard, hard) {
+        Ok(()) => info!(from = soft, to = hard, "raised open file limit"),
+        Err(e) => warn!(soft, hard, "failed to raise open file limit: {e}"),
+    }
+}
+
 #[expect(
     clippy::too_many_lines,
     reason = "linear boot orchestration — splitting the hub/edge/edge-only arms fragments the flow"
 )]
 async fn run_node() -> anyhow::Result<()> {
+    raise_fd_limit();
+
     let config = config::NodeConfig::load()?;
 
     let secret_key = config

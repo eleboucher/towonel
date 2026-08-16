@@ -198,6 +198,7 @@ arc-swap = "1.7"
 socket2 = { version = "0.6", features = ["all"] }
 nix = { version = "0.31", default-features = false, features = [
   "net",
+  "resource",
   "socket",
   "uio",
 ] }

@@ -101,11 +101,15 @@ fn max_udp_sessions_from_env() -> usize {
 /// Hard cap on simultaneously in-flight TCP connections. Each accept holds a
 /// permit for the lifetime of the per-connection task; on overload, new
 /// accepts close the socket and bump `connections_rejected_overload`
-/// (`reason="tcp_inflight"`). 50k
-/// matches the typical default ulimit -n of a Linux box and is comfortably
-/// above realistic steady-state load. Override with the
-/// `TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS` env var.
+/// (`reason="tcp_inflight"`). Clamped to what `RLIMIT_NOFILE` can back.
+/// Override with the `TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS` env var.
 const DEFAULT_MAX_INFLIGHT_CONNECTIONS: usize = 50_000;
+
+/// Fds held outside client connections (listeners, iroh socket, hub link,
+/// epoll), reserved so the health server can still accept at the cap.
+const FD_HEADROOM: usize = 256;
+
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
 
 fn max_inflight_connections_from_env() -> usize {
     std::env::var("TOWONEL_EDGE_MAX_INFLIGHT_CONNECTIONS")
@@ -114,6 +118,47 @@ fn max_inflight_connections_from_env() -> usize {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(DEFAULT_MAX_INFLIGHT_CONNECTIONS)
+}
+
+fn fd_limit() -> Option<usize> {
+    use nix::sys::resource::{RLIM_INFINITY, Resource, getrlimit};
+
+    let (soft, _) = getrlimit(Resource::RLIMIT_NOFILE).ok()?;
+    (soft != RLIM_INFINITY).then(|| usize::try_from(soft).unwrap_or(usize::MAX))
+}
+
+fn clamp_to_fd_limit(configured: usize, fd_limit: Option<usize>) -> usize {
+    let Some(fd_cap) = fd_limit.map(|n| n.saturating_sub(FD_HEADROOM).max(1)) else {
+        return configured;
+    };
+    if configured > fd_cap {
+        warn!(
+            configured,
+            fd_cap,
+            "in-flight cap exceeds RLIMIT_NOFILE; clamping so overload is rejected before accept() hits EMFILE"
+        );
+    }
+    configured.min(fd_cap)
+}
+
+fn max_inflight_connections() -> usize {
+    clamp_to_fd_limit(max_inflight_connections_from_env(), fd_limit())
+}
+
+fn is_connection_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
+}
+
+async fn backoff_after_accept_error(e: &std::io::Error) {
+    if is_connection_error(e) {
+        return;
+    }
+    tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
 }
 
 /// How long edge shutdown waits for in-flight connections before forcing them
@@ -234,7 +279,7 @@ impl Edge {
             }
         });
 
-        let max_inflight = max_inflight_connections_from_env();
+        let max_inflight = max_inflight_connections();
         let drain_timeout = drain_timeout_from_env();
         info!(
             max_inflight,
@@ -667,6 +712,7 @@ async fn accept_loop(
                 Ok(conn) => conn,
                 Err(e) => {
                     warn!("TCP accept error: {e}");
+                    backoff_after_accept_error(&e).await;
                     continue;
                 }
             },
@@ -1388,6 +1434,7 @@ async fn tcp_accept_loop(
             Ok(conn) => conn,
             Err(e) => {
                 warn!(service = %binding.service, "tcp accept error: {e}");
+                backoff_after_accept_error(&e).await;
                 continue;
             }
         };
@@ -1872,6 +1919,39 @@ async fn udp_session_pump(
 mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn clamp_to_fd_limit_leaves_headroom_under_a_low_rlimit() {
+        assert_eq!(clamp_to_fd_limit(50_000, Some(1024)), 1024 - FD_HEADROOM);
+    }
+
+    #[test]
+    fn clamp_to_fd_limit_keeps_the_configured_cap_when_fds_are_plentiful() {
+        assert_eq!(clamp_to_fd_limit(50_000, Some(65_536)), 50_000);
+    }
+
+    #[test]
+    fn clamp_to_fd_limit_is_a_noop_without_a_readable_limit() {
+        assert_eq!(clamp_to_fd_limit(50_000, None), 50_000);
+    }
+
+    #[test]
+    fn clamp_to_fd_limit_stays_positive_below_the_headroom() {
+        assert_eq!(clamp_to_fd_limit(50_000, Some(FD_HEADROOM)), 1);
+    }
+
+    #[test]
+    fn connection_errors_skip_the_accept_backoff() {
+        use std::io::{Error, ErrorKind};
+
+        assert!(is_connection_error(&Error::from(
+            ErrorKind::ConnectionReset
+        )));
+        // EMFILE surfaces as `Uncategorized`, which must back off.
+        assert!(!is_connection_error(&Error::from_raw_os_error(
+            nix::libc::EMFILE
+        )));
+    }
 
     async fn server_side_with(payload: &[u8]) -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
