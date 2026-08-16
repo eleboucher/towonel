@@ -180,7 +180,7 @@ utoipa-swagger-ui = { version = "9", default-features = false, features = [
 ] }
 aes-gcm = "0.11"
 argon2 = "0.5"
-totp-rs = { version = "5", default-features = false }
+totp-rs = { version = "6", default-features = false }
 subtle = "2.6"
 zeroize = { version = "1", features = ["derive"] }
 rpassword = "7"
