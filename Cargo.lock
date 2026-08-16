@@ -1646,7 +1646,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "e2e-runner"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -7167,7 +7167,7 @@ dependencies = [
 
 [[package]]
 name = "towonel"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "iroh",
  "tokio",
@@ -7176,7 +7176,7 @@ dependencies = [
 
 [[package]]
 name = "towonel-agent"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7207,7 +7207,7 @@ dependencies = [
 
 [[package]]
 name = "towonel-common"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "aes-gcm 0.11.0",
  "anyhow",
@@ -7244,7 +7244,7 @@ dependencies = [
 
 [[package]]
 name = "towonel-node"
-version = "1.5.2"
+version = "1.5.3"
 dependencies = [
  "aes-gcm 0.11.0",
  "anyhow",
