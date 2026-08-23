@@ -113,14 +113,14 @@ tokio = { workspace = true }
 iroh = { version = "1.0.0-rc.0", features = ["test-utils"] }
 ed25519-dalek = { version = "3.0", features = ["serde", "rand_core"] }
 ciborium = "0.2"
-sea-orm = { version = "1", features = [
+sea-orm = { version = "2", features = [
   "sqlx-sqlite",
   "sqlx-postgres",
   "runtime-tokio-rustls",
   "macros",
   "with-json",
 ] }
-sea-orm-migration = { version = "1", default-features = false, features = [
+sea-orm-migration = { version = "2", default-features = false, features = [
   "sqlx-sqlite",
   "sqlx-postgres",
   "runtime-tokio-rustls",
