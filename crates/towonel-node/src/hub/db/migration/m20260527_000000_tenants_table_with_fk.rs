@@ -16,7 +16,7 @@ impl MigrationTrait for Migration {
             "SELECT COUNT(*) AS c FROM port_reservations".to_string(),
         );
         let count: i64 = db
-            .query_one(count_stmt)
+            .query_one_raw(count_stmt)
             .await
             .ok()
             .flatten()
@@ -32,7 +32,7 @@ impl MigrationTrait for Migration {
 
         match backend {
             sea_orm::DatabaseBackend::Postgres => {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     r"
                     DO $$
@@ -50,7 +50,7 @@ impl MigrationTrait for Migration {
                 ))
                 .await?;
 
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     r"
                     ALTER TABLE port_reservations
@@ -62,7 +62,7 @@ impl MigrationTrait for Migration {
                 ))
                 .await?;
 
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     r"
                     ALTER TABLE tenant_ownership
@@ -75,7 +75,7 @@ impl MigrationTrait for Migration {
                 .await?;
             }
             sea_orm::DatabaseBackend::Sqlite => {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     r"
                     CREATE TRIGGER delete_port_reservations_on_invite_delete
@@ -87,7 +87,7 @@ impl MigrationTrait for Migration {
                 ))
                 .await?;
 
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     r"
                     CREATE TRIGGER delete_tenant_ownership_on_invite_delete
@@ -99,7 +99,7 @@ impl MigrationTrait for Migration {
                 ))
                 .await?;
             }
-            sea_orm::DatabaseBackend::MySql => {
+            _ => {
                 return Err(DbErr::Migration("Unsupported database backend".to_string()));
             }
         }
@@ -113,35 +113,35 @@ impl MigrationTrait for Migration {
 
         match backend {
             sea_orm::DatabaseBackend::Postgres => {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     "ALTER TABLE port_reservations DROP CONSTRAINT fk_port_reservations_invite",
                 ))
                 .await?;
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     "ALTER TABLE tenant_ownership DROP CONSTRAINT fk_tenant_ownership_invite",
                 ))
                 .await?;
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     "ALTER TABLE invites DROP CONSTRAINT uq_invites_tenant_id",
                 ))
                 .await?;
             }
             sea_orm::DatabaseBackend::Sqlite => {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     "DROP TRIGGER IF EXISTS delete_port_reservations_on_invite_delete",
                 ))
                 .await?;
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     "DROP TRIGGER IF EXISTS delete_tenant_ownership_on_invite_delete",
                 ))
                 .await?;
             }
-            sea_orm::DatabaseBackend::MySql => {
+            _ => {
                 return Err(DbErr::Migration("Unsupported database backend".to_string()));
             }
         }

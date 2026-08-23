@@ -638,7 +638,7 @@ pub(super) async fn readyz(State(state): State<Arc<AppState>>) -> Response {
     match state
         .db
         .conn
-        .execute(Statement::from_string(backend, "SELECT 1".to_string()))
+        .execute_raw(Statement::from_string(backend, "SELECT 1".to_string()))
         .await
     {
         Ok(_) => json_ok(serde_json::json!({"status": "ok"})),

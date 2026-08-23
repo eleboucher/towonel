@@ -1,6 +1,6 @@
 #![allow(dead_code, reason = "consumed by web routes once mounted")]
 
-use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ActiveValue, ColumnTrait, EntityTrait, ExprTrait, QueryFilter};
 
 use super::Db;
 use super::entities::user_totp;

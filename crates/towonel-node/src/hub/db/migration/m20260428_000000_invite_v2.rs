@@ -17,7 +17,7 @@ async fn warn_if_destructive(manager: &SchemaManager<'_>) {
     let db = manager.get_connection();
     let backend = db.get_database_backend();
     let count: i64 = db
-        .query_one(Statement::from_string(
+        .query_one_raw(Statement::from_string(
             backend,
             "SELECT COUNT(*) AS c FROM invites".to_string(),
         ))

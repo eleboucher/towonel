@@ -124,7 +124,7 @@ impl Db {
         );
         let row = self
             .conn
-            .query_one(stmt)
+            .query_one_raw(stmt)
             .await?
             .ok_or_else(|| anyhow::anyhow!("COUNT(*) returned no row"))?;
         Ok(row.try_get::<i64>("", "n")?)

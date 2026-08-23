@@ -18,7 +18,7 @@ impl MigrationTrait for Migration {
         }
 
         let dups = db
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 backend,
                 "SELECT user_id, provider, COUNT(*) AS c \
                  FROM user_oauth_identities \

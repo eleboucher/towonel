@@ -1,7 +1,8 @@
 #![allow(dead_code, reason = "consumed by web routes once mounted")]
 
 use sea_orm::{
-    ActiveValue, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, sea_query::Expr,
+    ActiveValue, ColumnTrait, EntityTrait, ExprTrait, PaginatorTrait, QueryFilter, QueryOrder,
+    sea_query::Expr,
 };
 
 use super::Db;

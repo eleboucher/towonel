@@ -12,7 +12,7 @@ impl MigrationTrait for Migration {
         // is dead weight. Postgres-only; SQLite never had it.
         let db = manager.get_connection();
         if matches!(db.get_database_backend(), DatabaseBackend::Postgres) {
-            db.execute(Statement::from_string(
+            db.execute_raw(Statement::from_string(
                 DatabaseBackend::Postgres,
                 "DROP INDEX IF EXISTS idx_invites_hostnames".to_string(),
             ))

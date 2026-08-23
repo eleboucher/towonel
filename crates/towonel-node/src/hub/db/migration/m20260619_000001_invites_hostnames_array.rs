@@ -19,7 +19,7 @@ impl MigrationTrait for Migration {
         // Add hostnames column
         let alter_sql = format!("ALTER TABLE invites ADD COLUMN hostnames {column_type}");
         tracing::debug!("Executing: {}", alter_sql);
-        db.execute(Statement::from_string(backend, alter_sql.clone()))
+        db.execute_raw(Statement::from_string(backend, alter_sql.clone()))
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -43,10 +43,10 @@ impl MigrationTrait for Migration {
             sea_orm::DatabaseBackend::Sqlite => {
                 "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invite_hostnames') AS \"exists\""
             }
-            sea_orm::DatabaseBackend::MySql => "SELECT FALSE AS \"exists\"",
+            _ => "SELECT FALSE AS \"exists\"",
         };
         let table_exists = db
-            .query_one(Statement::from_string(
+            .query_one_raw(Statement::from_string(
                 backend,
                 table_exists_sql.to_string(),
             ))
@@ -84,11 +84,11 @@ impl MigrationTrait for Migration {
                     )
                     "
                 }
-                sea_orm::DatabaseBackend::MySql => "",
+                _ => "",
             };
 
             if !migrate_sql.is_empty() {
-                db.execute(Statement::from_string(backend, migrate_sql.to_string()))
+                db.execute_raw(Statement::from_string(backend, migrate_sql.to_string()))
                     .await?;
                 tracing::info!(
                     "Migrated hostnames from invite_hostnames table to invites.hostnames"
@@ -110,7 +110,7 @@ impl MigrationTrait for Migration {
             let index_sql =
                 "CREATE INDEX IF NOT EXISTS idx_invites_hostnames ON invites USING GIN (hostnames)";
             if let Err(e) = db
-                .execute(Statement::from_string(backend, index_sql.to_string()))
+                .execute_raw(Statement::from_string(backend, index_sql.to_string()))
                 .await
             {
                 tracing::warn!("Failed to create GIN index: {e}");

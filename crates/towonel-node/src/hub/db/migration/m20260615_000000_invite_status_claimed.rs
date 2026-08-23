@@ -12,9 +12,9 @@ impl MigrationTrait for Migration {
         match db.get_database_backend() {
             DatabaseBackend::Sqlite => rebuild_sqlite(db).await,
             DatabaseBackend::Postgres => widen_postgres(db).await,
-            DatabaseBackend::MySql => Err(DbErr::Migration(
-                "MySQL backend is not supported".to_string(),
-            )),
+            other => Err(DbErr::Migration(format!(
+                "{other:?} backend is not supported"
+            ))),
         }
     }
 
@@ -42,7 +42,7 @@ async fn rebuild_sqlite(db: &impl ConnectionTrait) -> Result<(), DbErr> {
         "ALTER TABLE invites_new RENAME TO invites",
     ];
     for sql in stmts {
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             DatabaseBackend::Sqlite,
             sql.to_string(),
         ))
@@ -67,12 +67,12 @@ async fn widen_postgres(db: &impl ConnectionTrait) -> Result<(), DbErr> {
         END $$;
     ";
     let add_widened = "ALTER TABLE invites ADD CONSTRAINT invites_status_check CHECK (status IN ('pending', 'claimed', 'revoked'))";
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DatabaseBackend::Postgres,
         drop_existing.to_string(),
     ))
     .await?;
-    db.execute(Statement::from_string(
+    db.execute_raw(Statement::from_string(
         DatabaseBackend::Postgres,
         add_widened.to_string(),
     ))

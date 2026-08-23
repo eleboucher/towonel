@@ -54,7 +54,7 @@ impl MigrationTrait for Migration {
         // so coalesce the shared-IP NULL to a sentinel string for the index.
         let db = manager.get_connection();
         let backend = db.get_database_backend();
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "CREATE UNIQUE INDEX uniq_port_reservations_slot \
              ON port_reservations (COALESCE(ip_address, 'shared'), port, protocol)"

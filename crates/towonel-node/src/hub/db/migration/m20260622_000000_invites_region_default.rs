@@ -1,4 +1,4 @@
-use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionTrait};
+use sea_orm::{ConnectionTrait, DatabaseBackend, Statement, TransactionSession, TransactionTrait};
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
@@ -12,12 +12,12 @@ impl MigrationTrait for Migration {
 
         match backend {
             DatabaseBackend::Postgres => {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     "UPDATE invites SET region = 'EU' WHERE region IS NULL".to_string(),
                 ))
                 .await?;
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     "ALTER TABLE invites ALTER COLUMN region SET DEFAULT 'EU'".to_string(),
                 ))
@@ -26,7 +26,7 @@ impl MigrationTrait for Migration {
             DatabaseBackend::Sqlite => {
                 rebuild_sqlite(db).await?;
             }
-            DatabaseBackend::MySql => {
+            _ => {
                 return Err(DbErr::Migration("unsupported backend".to_string()));
             }
         }
@@ -40,7 +40,7 @@ impl MigrationTrait for Migration {
 
         match backend {
             DatabaseBackend::Postgres => {
-                db.execute(Statement::from_string(
+                db.execute_raw(Statement::from_string(
                     backend,
                     "ALTER TABLE invites ALTER COLUMN region DROP DEFAULT".to_string(),
                 ))
@@ -52,7 +52,7 @@ impl MigrationTrait for Migration {
             // irreversible regardless, so down() is a no-op here rather than a
             // hard error that would break `migrate down` on the main backend.
             DatabaseBackend::Sqlite => {}
-            DatabaseBackend::MySql => {
+            _ => {
                 return Err(DbErr::Migration("unsupported backend".to_string()));
             }
         }
@@ -99,7 +99,7 @@ async fn rebuild_sqlite(db: &(impl ConnectionTrait + TransactionTrait)) -> Resul
     // table or drop the cascade triggers without their replacements.
     let txn = db.begin().await?;
     for stmt in sql {
-        txn.execute(Statement::from_string(DatabaseBackend::Sqlite, stmt))
+        txn.execute_raw(Statement::from_string(DatabaseBackend::Sqlite, stmt))
             .await?;
     }
     txn.commit().await

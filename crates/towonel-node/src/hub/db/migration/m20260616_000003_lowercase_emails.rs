@@ -38,7 +38,7 @@ fn normalize_email(s: &str) -> String {
 
 async fn normalize_users(db: &impl ConnectionTrait, backend: DatabaseBackend) -> Result<(), DbErr> {
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT id, email FROM users".to_string(),
         ))
@@ -74,7 +74,7 @@ async fn normalize_users(db: &impl ConnectionTrait, backend: DatabaseBackend) ->
         let email = row.try_get::<String>("", "email")?;
         let normalized = normalize_email(&email);
         if normalized != email {
-            db.execute(Statement::from_sql_and_values(
+            db.execute_raw(Statement::from_sql_and_values(
                 backend,
                 "UPDATE users SET email = $1 WHERE id = $2",
                 [normalized.into(), id.into()],
@@ -90,7 +90,7 @@ async fn normalize_signup_invites(
     backend: DatabaseBackend,
 ) -> Result<(), DbErr> {
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT code, recipient_email FROM signup_invites WHERE recipient_email IS NOT NULL"
                 .to_string(),
@@ -101,7 +101,7 @@ async fn normalize_signup_invites(
         let email = row.try_get::<String>("", "recipient_email")?;
         let normalized = normalize_email(&email);
         if normalized != email {
-            db.execute(Statement::from_sql_and_values(
+            db.execute_raw(Statement::from_sql_and_values(
                 backend,
                 "UPDATE signup_invites SET recipient_email = $1 WHERE code = $2",
                 [normalized.into(), code.into()],
@@ -117,7 +117,7 @@ async fn normalize_oauth_identity_emails(
     backend: DatabaseBackend,
 ) -> Result<(), DbErr> {
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT provider, subject, email FROM user_oauth_identities WHERE email IS NOT NULL"
                 .to_string(),
@@ -129,7 +129,7 @@ async fn normalize_oauth_identity_emails(
         let email = row.try_get::<String>("", "email")?;
         let normalized = normalize_email(&email);
         if normalized != email {
-            db.execute(Statement::from_sql_and_values(
+            db.execute_raw(Statement::from_sql_and_values(
                 backend,
                 "UPDATE user_oauth_identities SET email = $1 \
                  WHERE provider = $2 AND subject = $3",

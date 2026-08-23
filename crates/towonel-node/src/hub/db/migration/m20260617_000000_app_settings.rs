@@ -29,7 +29,7 @@ impl MigrationTrait for Migration {
 
         let db = manager.get_connection();
         let backend = db.get_database_backend();
-        db.execute(Statement::from_string(
+        db.execute_raw(Statement::from_string(
             backend,
             "INSERT INTO app_settings (key, value_int, updated_at_ms) \
              VALUES ('user_port_quota', 10, 0)"

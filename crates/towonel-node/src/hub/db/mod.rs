@@ -52,7 +52,7 @@ pub fn is_unique_violation(e: &anyhow::Error) -> bool {
     match db_err {
         DbErr::Exec(sea_orm::RuntimeErr::SqlxError(sqlx_err))
         | DbErr::Query(sea_orm::RuntimeErr::SqlxError(sqlx_err)) => {
-            if let sea_orm::sqlx::Error::Database(db) = sqlx_err {
+            if let sea_orm::sqlx::Error::Database(db) = &**sqlx_err {
                 db.is_unique_violation()
             } else {
                 false
@@ -99,7 +99,7 @@ impl Db {
         let conn = Database::connect(opts).await?;
 
         if url.starts_with("sqlite:") {
-            conn.execute(sea_orm::Statement::from_string(
+            conn.execute_raw(sea_orm::Statement::from_string(
                 sea_orm::DatabaseBackend::Sqlite,
                 "PRAGMA foreign_keys = ON".to_string(),
             ))
@@ -371,7 +371,7 @@ pub(super) async fn temp_db() -> Db {
         .min_connections(1)
         .sqlx_logging_level(tracing::log::LevelFilter::Debug);
     let conn = Database::connect(opts).await.unwrap();
-    conn.execute(sea_orm::Statement::from_string(
+    conn.execute_raw(sea_orm::Statement::from_string(
         sea_orm::DatabaseBackend::Sqlite,
         "PRAGMA foreign_keys = ON".to_string(),
     ))

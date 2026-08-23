@@ -39,7 +39,7 @@ impl Db {
             ",
             [now_ms.into(), code.into()],
         );
-        let row = self.conn.query_one(stmt).await?;
+        let row = self.conn.query_one_raw(stmt).await?;
         let Some(row) = row else { return Ok(None) };
         Ok(Some(ClaimedInvite {
             code: row.try_get::<String>("", "code")?,
@@ -64,7 +64,7 @@ impl Db {
             ",
             [user_id.into(), code.into()],
         );
-        self.conn.execute(stmt).await?;
+        self.conn.execute_raw(stmt).await?;
         Ok(())
     }
 
@@ -83,7 +83,7 @@ impl Db {
             ",
             [code.into()],
         );
-        self.conn.execute(stmt).await?;
+        self.conn.execute_raw(stmt).await?;
         Ok(())
     }
 

@@ -58,7 +58,7 @@ impl MigrationTrait for Migration {
         let stmt = "CREATE UNIQUE INDEX uniq_hub_signing_keys_active \
                     ON hub_signing_keys ((1)) \
                     WHERE retired_at_ms IS NULL";
-        db.execute(Statement::from_string(backend, stmt.to_string()))
+        db.execute_raw(Statement::from_string(backend, stmt.to_string()))
             .await?;
 
         Ok(())
