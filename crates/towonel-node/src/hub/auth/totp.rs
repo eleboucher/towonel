@@ -5,8 +5,8 @@ use towonel_common::kek::HubKek;
 
 pub const SECRET_BYTES: usize = 20;
 pub const PERIOD_SECS: u64 = 30;
-pub const DIGITS: usize = 6;
-const SKEW: u8 = 1;
+pub const DIGITS: u8 = 6;
+const SKEW: u16 = 1;
 
 #[derive(Debug)]
 pub enum VerifyError {
@@ -57,62 +57,42 @@ pub fn verify_code(
     now_unix: u64,
     last_used_step: Option<u64>,
 ) -> Result<u64, VerifyError> {
-    if code.len() != DIGITS || !code.bytes().all(|b| b.is_ascii_digit()) {
+    if code.len() != usize::from(DIGITS) || !code.bytes().all(|b| b.is_ascii_digit()) {
         return Err(VerifyError::InvalidCode);
     }
-    let totp = totp_rs::TOTP::new(
-        totp_rs::Algorithm::SHA1,
-        DIGITS,
-        SKEW,
-        PERIOD_SECS,
-        secret.to_vec(),
-    )
-    .map_err(|_err| VerifyError::Internal)?;
+    let totp = builder(secret)
+        .build()
+        .map_err(|_err| VerifyError::Internal)?;
 
-    let current_step = now_unix / PERIOD_SECS;
-    for offset in [-1i64, 0, 1] {
-        let Some(step) = checked_step(current_step, offset) else {
-            continue;
-        };
-        let candidate = totp.generate(step.saturating_mul(PERIOD_SECS));
-        if constant_time_eq(candidate.as_bytes(), code.as_bytes()) {
-            if let Some(last) = last_used_step
-                && step <= last
-            {
-                return Err(VerifyError::Replayed);
-            }
-            return Ok(step);
-        }
+    // `check` walks the ±SKEW window in constant time and hands back the step
+    // that matched.
+    let Some(step) = totp.check(code, now_unix) else {
+        return Err(VerifyError::InvalidCode);
+    };
+    if let Some(last) = last_used_step
+        && step <= last
+    {
+        return Err(VerifyError::Replayed);
     }
-    Err(VerifyError::InvalidCode)
+    Ok(step)
+}
+
+fn builder(secret: &[u8]) -> totp_rs::Builder {
+    totp_rs::Builder::new()
+        .with_algorithm(totp_rs::Algorithm::SHA1)
+        .with_digits(DIGITS)
+        .with_skew(SKEW)
+        .with_step_duration(PERIOD_SECS)
+        .with_secret(secret)
 }
 
 #[cfg(test)]
 #[must_use]
 pub fn generate_at(secret: &[u8], unix_time: u64) -> String {
-    let totp = totp_rs::TOTP::new_unchecked(
-        totp_rs::Algorithm::SHA1,
-        DIGITS,
-        SKEW,
-        PERIOD_SECS,
-        secret.to_vec(),
-    );
-    totp.generate(unix_time)
-}
-
-fn checked_step(current: u64, offset: i64) -> Option<u64> {
-    if offset >= 0 {
-        let off = u64::try_from(offset).ok()?;
-        current.checked_add(off)
-    } else {
-        let off = u64::try_from(-offset).ok()?;
-        current.checked_sub(off)
-    }
-}
-
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    use subtle::ConstantTimeEq;
-    a.ct_eq(b).into()
+    builder(secret)
+        .build_noncompliant()
+        .generate(unix_time)
+        .to_string()
 }
 
 fn base32_encode_no_pad(input: &[u8]) -> String {

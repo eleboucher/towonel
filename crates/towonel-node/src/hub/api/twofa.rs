@@ -434,7 +434,7 @@ pub(super) async fn verify_code_or_backup(
     row: &UserTotpRow,
     code: &str,
 ) -> bool {
-    if code.len() == totp::DIGITS && code.bytes().all(|b| b.is_ascii_digit()) {
+    if code.len() == usize::from(totp::DIGITS) && code.bytes().all(|b| b.is_ascii_digit()) {
         let secret = match totp::unseal(&row.secret_encrypted, &state.kek) {
             Ok(s) => s,
             Err(e) => {
