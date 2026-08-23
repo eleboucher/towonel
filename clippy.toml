@@ -3,3 +3,6 @@ allow-panic-in-tests = true
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-dbg-in-tests = true
+
+# axum's Response is 128 bytes and is the error type of the hub API helpers.
+large-error-threshold = 144

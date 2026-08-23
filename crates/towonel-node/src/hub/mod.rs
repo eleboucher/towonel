@@ -550,8 +550,9 @@ impl Hub {
             let rustls_cfg =
                 axum_server::tls_rustls::RustlsConfig::from_config(mgr.server_config());
             let api_std = api_listener.into_std()?;
+            let api_server = axum_server::from_tcp_rustls(api_std, rustls_cfg)?;
             tokio::select! {
-                res = axum_server::from_tcp_rustls(api_std, rustls_cfg).serve(api_app) => res.map_err(anyhow::Error::from),
+                res = api_server.serve(api_app) => res.map_err(anyhow::Error::from),
                 res = axum::serve(health_listener, health_app) => res.map_err(anyhow::Error::from),
             }
         } else {

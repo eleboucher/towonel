@@ -67,7 +67,7 @@ services:
   # namespace, so `udp_reply_source` can send to an address that isn't the one
   # the kernel would pick when routing a reply back.
   edge-vip:
-    image: alpine:3.21
+    image: alpine:3.24
     container_name: towonel-e2e-edge-vip
     network_mode: "service:hub-node"
     cap_add:
@@ -90,7 +90,7 @@ services:
       retries: 20
 
   origin:
-    image: alpine:3.21
+    image: alpine:3.24
     container_name: towonel-e2e-origin
     command:
       - sh

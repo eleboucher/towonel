@@ -1,10 +1,10 @@
-# syntax=docker/dockerfile:1.25
+# syntax=docker/dockerfile:1.26
 #
 # The production agent image is distroless. This e2e variant rebases on
 # debian-slim so the entrypoint can poll the test-runner's token broker
 # before exec'ing the agent.
 
-FROM rust:1.97-bookworm AS builder
+FROM rust:1.98-bookworm AS builder
 WORKDIR /app
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates/ crates/

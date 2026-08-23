@@ -146,7 +146,7 @@ hex = "0.4"
 clienthello = "0.1"
 anyhow = "1"
 axum = "0.8"
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = [
   "trace",
@@ -162,7 +162,7 @@ eventsource-stream = "0.2"
 prometheus = { version = "0.14", default-features = false, features = [
   "process",
 ] }
-base64 = "0.22"
+base64 = "0.23"
 sha2 = "0.11"
 url = "2"
 fips204 = { version = "0.4", default-features = false, features = [

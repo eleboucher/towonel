@@ -1,5 +1,5 @@
 [tools]
-rust = "1.97.0"
+rust = "1.98.0"
 lefthook = "latest"
 helm = "latest"
 helm-docs = "1.14.2"
@@ -7,10 +7,10 @@ helm-docs = "1.14.2"
 
 # Pinned: `latest` makes mise re-resolve and rebuild these from source on
 # every activation (e.g. the helm-docs pre-commit hook), which is slow.
-"cargo:cargo-nextest" = "0.9.137"
+"cargo:cargo-nextest" = "0.9.143"
 "cargo:cargo-deny" = "0.20.2"
 "cargo:cargo-machete" = "0.9.2"
-"cargo:typos-cli" = "1.47.2"
+"cargo:typos-cli" = "1.49.0"
 "cargo:taplo-cli" = "0.10.0"
 
 [env]

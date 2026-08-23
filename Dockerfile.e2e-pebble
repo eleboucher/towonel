@@ -3,7 +3,7 @@
 # being ready before it obtains its cert (a failed obtain triggers a 15m cooldown).
 FROM ghcr.io/letsencrypt/pebble:latest AS upstream
 
-FROM alpine:3.21
+FROM alpine:3.24
 RUN apk add --no-cache curl
 COPY --from=upstream /app /usr/bin/pebble
 ENTRYPOINT ["/usr/bin/pebble"]

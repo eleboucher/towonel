@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.25
+# syntax=docker/dockerfile:1.26
 
 # Bundled hub image: towonel-node + Caddy (with the L4 plugin), supervised
 # by tini and a small bash entrypoint. Caddy binds the privileged ports
@@ -11,17 +11,17 @@
 # renovate: datasource=docker depName=caddy
 ARG CADDY_VERSION=2.11.4
 # renovate: datasource=github-releases depName=mholt/caddy-l4
-ARG CADDY_L4_VERSION=v0.1.1
+ARG CADDY_L4_VERSION=v0.1.2
 
 # ============================================================
-FROM --platform=$BUILDPLATFORM rust:1.97-bookworm AS chef
+FROM --platform=$BUILDPLATFORM rust:1.98-bookworm AS chef
 ARG BUILDARCH
 # renovate: datasource=github-releases depName=ziglang/zig
 ARG ZIG_VERSION=0.16.0
 # renovate: datasource=github-releases depName=rust-cross/cargo-zigbuild
 ARG CARGO_ZIGBUILD_VERSION=0.23.0
 # renovate: datasource=github-releases depName=mozilla/sccache
-ARG SCCACHE_VERSION=0.16.0
+ARG SCCACHE_VERSION=0.17.0
 # renovate: datasource=crate depName=cargo-chef
 ARG CARGO_CHEF_VERSION=0.1.77
 # sccache cannot cache incremental artifacts; release builds do not use them.

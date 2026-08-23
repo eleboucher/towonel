@@ -330,7 +330,7 @@ jobs:
         with:
           # Pin Helm 3 so `helm push` keeps emitting the "Digest:" line the
           # chart-signing step parses; Helm 4 changed plugin/OCI behaviour.
-          version: v3.21.0
+          version: v3.21.4
       - name: Login to codeberg.org
         env:
           CODEBERG_TOKEN: ${{ secrets.CODEBERG_TOKEN }}

@@ -50,6 +50,9 @@ allow = []
 deny = []
 # Duplicates pulled in by the iroh networking stack. Transitive, no upstream fix.
 skip = [
+  # Our direct dep is on base64 0.23; hyper-util, axum and bollard still pull
+  # 0.22. Drops when the http stack moves up.
+  { crate = "base64" },
   { crate = "block-buffer" },
   { crate = "core-foundation" },
   { crate = "cpufeatures" },

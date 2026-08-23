@@ -7,6 +7,11 @@
   },
   "packageRules": [
     {
+      "description": "clienthello 0.2 pins aes-gcm =0.11.0-rc.3, which cannot coexist with our stable aes-gcm 0.11; drop once upstream relaxes the pin",
+      "matchPackageNames": ["clienthello"],
+      "allowedVersions": "<0.2"
+    },
+    {
       "description": "Keep rust-toolchain.toml and mise.toml in sync on Rust bumps",
       "matchDepNames": ["rust"],
       "groupName": "rust toolchain"

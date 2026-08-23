@@ -49,8 +49,7 @@ fn load_tls_from_env() -> TlsConfig {
         .unwrap_or_else(|| PathBuf::from("/data/certs"));
     let acme_email = std::env::var("TOWONEL_HUB_TLS_ACME_EMAIL").ok();
     let acme_staging = std::env::var("TOWONEL_HUB_TLS_ACME_STAGING")
-        .ok()
-        .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"));
+        .is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"));
     let acme_directory_url = std::env::var("TOWONEL_HUB_TLS_ACME_DIRECTORY_URL")
         .ok()
         .map(|s| s.trim().to_string())
