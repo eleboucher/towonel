@@ -67,7 +67,12 @@ skip = [
   # netdev pulls jni 0.21 while hickory/rustls-platform-verifier pull 0.22.
   { crate = "jni" },
   { crate = "jni-sys" },
+  # netwatch 0.19.3 depends on netdev 0.45 and 0.46 at once, doubling the
+  # netlink stack under both.
+  { crate = "netdev" },
+  { crate = "netlink-packet-core" },
   { crate = "netlink-packet-route" },
+  { crate = "netlink-sys" },
   { crate = "rand_core" },
   # iroh's ed25519-dalek 3.0.0-pre pulls sha2 0.11 alongside our 0.10. Drops
   # when iroh ships a stable release.
