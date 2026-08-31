@@ -29,6 +29,7 @@ pub struct EdgeMetrics {
     /// Connections / sessions dropped because an edge concurrency cap was
     /// saturated, split by which cap fired.
     pub connections_rejected_overload: OverloadRejectCounters,
+    pub connections_rejected_prepare: PrepareRejectCounters,
     /// Per-listener UDP drops, labelled `{tenant, service}` to attribute the
     /// otherwise-global `connections_rejected_overload` to a listener. Bounded
     /// by the active UDP-listener count.
@@ -65,6 +66,32 @@ pub struct OverloadRejectCounters {
     pub udp_session: IntCounter,
     /// Agent iroh-connection permit pool exhausted.
     pub iroh_agent: IntCounter,
+}
+
+#[derive(Clone)]
+pub struct PrepareRejectCounters {
+    pub no_sni: IntCounter,
+    pub no_route: IntCounter,
+    pub reserved_sni: IntCounter,
+}
+
+impl PrepareRejectCounters {
+    fn register(r: &Registry) -> Self {
+        let vec = register_counter_vec(
+            r,
+            "towonel_edge_connections_rejected_prepare_total",
+            "Connections dropped before any byte was piped, by reason \
+             (no_sni = no SNI in the peeked ClientHello, no_route = SNI \
+             matched no claimed hostname, reserved_sni = SNI used a \
+             reserved route-key prefix).",
+            &["reason"],
+        );
+        Self {
+            no_sni: vec.with_label_values(&[prepare_reject_reason::NO_SNI]),
+            no_route: vec.with_label_values(&[prepare_reject_reason::NO_ROUTE]),
+            reserved_sni: vec.with_label_values(&[prepare_reject_reason::RESERVED_SNI]),
+        }
+    }
 }
 
 impl OverloadRejectCounters {
@@ -135,6 +162,7 @@ impl EdgeMetrics {
                  (excludes the case where a session existed but its open_bi failed)",
             ),
             connections_rejected_overload: OverloadRejectCounters::register(&r),
+            connections_rejected_prepare: PrepareRejectCounters::register(&r),
             udp_sessions_rejected: register_counter_vec(
                 &r,
                 "towonel_edge_udp_sessions_rejected_total",
@@ -221,6 +249,12 @@ pub mod overload_reject_reason {
     pub const TCP_INFLIGHT: &str = "tcp_inflight";
     pub const UDP_SESSION: &str = "udp_session";
     pub const IROH_AGENT: &str = "iroh_agent";
+}
+
+pub mod prepare_reject_reason {
+    pub const NO_SNI: &str = "no_sni";
+    pub const NO_ROUTE: &str = "no_route";
+    pub const RESERVED_SNI: &str = "reserved_sni";
 }
 
 #[derive(Serialize)]

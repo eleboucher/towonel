@@ -951,12 +951,18 @@ async fn resolve_peer_addr(
             debug!(advertised = %addr, immediate = %immediate_peer, "PROXY v2 header consumed");
             Ok(addr)
         }
-        Ok(Err(e)) => Err(anyhow::anyhow!(
-            "trusted peer {immediate_peer} sent invalid PROXY v2 header: {e}"
-        )),
-        Err(_) => Err(anyhow::anyhow!(
-            "trusted peer {immediate_peer} did not send PROXY v2 header within {PROXY_PROTOCOL_TIMEOUT:?}"
-        )),
+        Ok(Err(e)) => {
+            warn!(immediate = %immediate_peer, error = %e, "trusted peer sent invalid PROXY v2 header");
+            Err(anyhow::anyhow!(
+                "trusted peer {immediate_peer} sent invalid PROXY v2 header: {e}"
+            ))
+        }
+        Err(_) => {
+            warn!(immediate = %immediate_peer, "trusted peer sent no PROXY v2 header");
+            Err(anyhow::anyhow!(
+                "trusted peer {immediate_peer} did not send PROXY v2 header within {PROXY_PROTOCOL_TIMEOUT:?}"
+            ))
+        }
     }
 }
 
@@ -1055,19 +1061,22 @@ async fn prepare_connection(tcp_stream: &TcpStream, ctx: &ConnCtx) -> anyhow::Re
     let mut peek_buf = [0u8; PEEK_BUF_SIZE];
     let n = peek_client_hello(tcp_stream, &mut peek_buf).await?;
     let peeked = peek_buf.get(..n).unwrap_or(&peek_buf);
-    let hostname = extract_sni(peeked)
-        .ok_or_else(|| anyhow::anyhow!("no SNI found in ClientHello"))?
-        .to_string();
+    let Some(sni) = extract_sni(peeked) else {
+        ctx.metrics.connections_rejected_prepare.no_sni.inc();
+        anyhow::bail!("no SNI found in ClientHello");
+    };
+    let hostname = sni.to_string();
     // SNI must not forge a route-key prefix the agent dispatches on.
     if towonel_common::routing::is_reserved_route_key(&hostname) {
+        ctx.metrics.connections_rejected_prepare.reserved_sni.inc();
         anyhow::bail!("SNI uses a reserved route-key prefix: {hostname}");
     }
     debug!(%hostname, "SNI extracted");
 
-    let (candidates, policy) = ctx
-        .router
-        .route(&hostname)
-        .ok_or_else(|| anyhow::anyhow!("no route for hostname: {hostname}"))?;
+    let Some((candidates, policy)) = ctx.router.route(&hostname) else {
+        ctx.metrics.connections_rejected_prepare.no_route.inc();
+        anyhow::bail!("no route for hostname: {hostname}");
+    };
     debug!(
         %hostname,
         candidates = candidates.len(),
