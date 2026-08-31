@@ -329,6 +329,7 @@ impl Default for ProxyProtocolConfig {
 
 impl ProxyProtocolConfig {
     pub fn is_trusted(&self, ip: IpAddr) -> bool {
+        let ip = ip.to_canonical();
         self.enabled && self.trusted.iter().any(|net| net.contains(&ip))
     }
 }
@@ -1263,6 +1264,17 @@ mod tests {
         assert!(cfg.is_trusted("::1".parse().unwrap()));
         assert!(!cfg.is_trusted("8.8.8.8".parse().unwrap()));
         assert!(!cfg.is_trusted("203.0.113.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn proxy_protocol_trusts_ipv4_mapped_peers() {
+        let cfg = ProxyProtocolConfig {
+            enabled: true,
+            trusted: default_trusted_cidrs(),
+        };
+        assert!(cfg.is_trusted("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(cfg.is_trusted("::ffff:172.21.0.5".parse().unwrap()));
+        assert!(!cfg.is_trusted("::ffff:8.8.8.8".parse().unwrap()));
     }
 
     #[test]
