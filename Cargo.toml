@@ -179,7 +179,7 @@ utoipa-swagger-ui = { version = "9", default-features = false, features = [
   "axum",
 ] }
 aes-gcm = "0.11"
-argon2 = "0.5"
+argon2 = "0.6"
 totp-rs = { version = "5", default-features = false }
 subtle = "2.6"
 zeroize = { version = "1", features = ["derive"] }
@@ -219,7 +219,7 @@ petname = { version = "3", default-features = false, features = [
   "default-words",
 ] }
 envy = "0.4"
-tabled = "0.21"
+tabled = "0.22"
 ipnet = "2"
 httparse = "1"
 http = "1"
