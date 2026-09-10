@@ -208,17 +208,17 @@ pub(super) async fn post_bootstrap(
 
     // Keep only edges in the invite's allowed regions. If that leaves nothing
     // dialable, fall back to every candidate so the agent is never stranded.
-    let allowed = invite.allowed_regions();
-    let in_region = |c: &EdgeCandidate| {
-        allowed.contains(
-            c.region
-                .as_deref()
-                .unwrap_or(towonel_common::DEFAULT_REGION),
-        )
+    let allowed = invite.ordered_regions();
+    let region_rank = |c: &EdgeCandidate| {
+        let region = c
+            .region
+            .as_deref()
+            .unwrap_or(towonel_common::DEFAULT_REGION);
+        allowed.iter().position(|r| r == region)
     };
     let any_dialable_in_region = candidates
         .iter()
-        .any(|c| in_region(c) && !c.addresses.is_empty());
+        .any(|c| region_rank(c).is_some() && !c.addresses.is_empty());
     if !any_dialable_in_region {
         warn!(
             tenant = %invite.tenant_id,
@@ -227,12 +227,17 @@ pub(super) async fn post_bootstrap(
         );
     }
 
+    // Primary region first, then failovers, dialable before address-less:
+    // `trusted_edges.first()` becomes the agent's primary edge.
+    let mut ordered: Vec<&EdgeCandidate> = candidates
+        .iter()
+        .filter(|c| !any_dialable_in_region || region_rank(c).is_some())
+        .collect();
+    ordered.sort_by_key(|c| (region_rank(c).unwrap_or(usize::MAX), c.addresses.is_empty()));
+
     let mut trusted_edges: Vec<iroh::EndpointId> = Vec::new();
     let mut iroh_endpoints: Vec<IrohEndpoint> = Vec::new();
-    for c in &candidates {
-        if any_dialable_in_region && !in_region(c) {
-            continue;
-        }
+    for c in ordered {
         trusted_edges.push(c.node_id);
         if !c.addresses.is_empty() {
             iroh_endpoints.push(IrohEndpoint {

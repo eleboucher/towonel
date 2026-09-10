@@ -79,19 +79,23 @@ pub struct InviteRow {
 }
 
 impl InviteRow {
-    /// The set of regions this invite may use: its primary region (defaulting
-    /// to `DEFAULT_REGION`) plus any failover regions. One source of truth for
-    /// both edge selection (bootstrap) and port-reservation scoping (ports).
+    /// The regions this invite may use, in priority order: primary region
+    /// (defaulting to `DEFAULT_REGION`) first, then failovers. One source of
+    /// truth for edge selection (bootstrap) and port scoping (ports); callers
+    /// use the order to prefer the tenant's primary region.
     #[must_use]
-    pub fn allowed_regions(&self) -> std::collections::HashSet<String> {
-        let mut set = std::collections::HashSet::new();
-        set.insert(
+    pub fn ordered_regions(&self) -> Vec<String> {
+        let mut regions = vec![
             self.region
                 .clone()
                 .unwrap_or_else(|| towonel_common::DEFAULT_REGION.to_string()),
-        );
-        set.extend(self.failover_regions.iter().cloned());
-        set
+        ];
+        for region in &self.failover_regions {
+            if !regions.contains(region) {
+                regions.push(region.clone());
+            }
+        }
+        regions
     }
 }
 
