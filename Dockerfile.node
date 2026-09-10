@@ -1,11 +1,11 @@
-# syntax=docker/dockerfile:1.26
+# syntax=docker/dockerfile:1.27
 
 FROM --platform=$BUILDPLATFORM rust:1.98-bookworm AS chef
 ARG BUILDARCH
 # renovate: datasource=github-releases depName=ziglang/zig
 ARG ZIG_VERSION=0.16.0
 # renovate: datasource=github-releases depName=rust-cross/cargo-zigbuild
-ARG CARGO_ZIGBUILD_VERSION=0.23.0
+ARG CARGO_ZIGBUILD_VERSION=0.23.4
 # renovate: datasource=github-releases depName=mozilla/sccache
 ARG SCCACHE_VERSION=0.17.0
 # renovate: datasource=crate depName=cargo-chef

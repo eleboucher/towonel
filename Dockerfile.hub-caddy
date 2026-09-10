@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.26
+# syntax=docker/dockerfile:1.27
 
 # Bundled hub image: towonel-node + Caddy (with the L4 plugin), supervised
 # by tini and a small bash entrypoint. Caddy binds the privileged ports
@@ -19,7 +19,7 @@ ARG BUILDARCH
 # renovate: datasource=github-releases depName=ziglang/zig
 ARG ZIG_VERSION=0.16.0
 # renovate: datasource=github-releases depName=rust-cross/cargo-zigbuild
-ARG CARGO_ZIGBUILD_VERSION=0.23.0
+ARG CARGO_ZIGBUILD_VERSION=0.23.4
 # renovate: datasource=github-releases depName=mozilla/sccache
 ARG SCCACHE_VERSION=0.17.0
 # renovate: datasource=crate depName=cargo-chef
