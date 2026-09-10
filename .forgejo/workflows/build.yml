@@ -17,6 +17,10 @@ jobs:
         with:
           platforms: arm64
       - uses: https://data.forgejo.org/docker/setup-buildx-action@v4
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 1
       - name: Compute build timestamp
         id: build-meta
         run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
