@@ -8,6 +8,7 @@ pub struct Model {
     pub tenant_id: Vec<u8>,
     pub ip_address: Option<String>,
     pub port: i32,
+    pub port_end: i32,
     pub protocol: String,
     pub label: Option<String>,
     pub claimed_at_ms: i64,

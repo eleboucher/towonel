@@ -165,7 +165,8 @@ fn find_port_conflict(
 async fn require_reservation(
     state: &Arc<AppState>,
     kind: ServiceKind,
-    listen_port: u16,
+    port_start: u16,
+    port_end: u16,
     tenant_id: &TenantId,
 ) -> Result<(), Response> {
     let protocol = match kind {
@@ -174,10 +175,10 @@ async fn require_reservation(
     };
     let owns = state
         .db
-        .tenant_owns_port(tenant_id, listen_port, protocol)
+        .tenant_owns_port_span(tenant_id, port_start, port_end, protocol)
         .await
         .map_err(|e| {
-            warn!(error = %e, "tenant_owns_port query failed");
+            warn!(error = %e, "tenant_owns_port_span query failed");
             internal_error()
         })?;
     if owns {
@@ -186,11 +187,16 @@ async fn require_reservation(
     state
         .metrics
         .record_reject(reject_reason::PORT_NOT_RESERVED);
+    let what = if port_start == port_end {
+        format!("listen_port {port_start}")
+    } else {
+        format!("listen_port_range {port_start}-{port_end}")
+    };
     Err(error_response(
         axum::http::StatusCode::FORBIDDEN,
         "port_not_reserved",
         format!(
-            "tenant has no {} reservation for listen_port {listen_port}; \
+            "tenant has no {} reservation covering {what}; \
              reserve via POST /v1/tenants/{tenant_id}/ports first",
             kind.reasons().label,
         ),
@@ -239,7 +245,7 @@ async fn validate_service_op(
         }
         if state.ports_require_reservation
             && let Err(resp) =
-                require_reservation(state, kind, listen_port, &payload.tenant_id).await
+                require_reservation(state, kind, listen_port, listen_port, &payload.tenant_id).await
         {
             return Err(resp);
         }
@@ -272,16 +278,17 @@ async fn validate_service_op(
         if let Some(resp) = validate_udp_range(state, *port_start, *port_end) {
             return Err(resp);
         }
-        // Reservations are single-port; ranges aren't reservable yet.
-        if state.ports_require_reservation {
-            state
-                .metrics
-                .record_reject(reject_reason::UDP_RANGE_NOT_RESERVABLE);
-            return Err(error_response(
-                axum::http::StatusCode::FORBIDDEN,
-                "udp_range_not_reservable",
-                "UDP port ranges are not supported when port reservations are required".to_string(),
-            ));
+        if state.ports_require_reservation
+            && let Err(resp) = require_reservation(
+                state,
+                ServiceKind::Udp,
+                *port_start,
+                *port_end,
+                &payload.tenant_id,
+            )
+            .await
+        {
+            return Err(resp);
         }
     }
     Ok(())

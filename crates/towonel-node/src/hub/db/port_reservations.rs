@@ -40,6 +40,8 @@ pub struct PortReservationRow {
     pub tenant_id: TenantId,
     pub ip_address: Option<String>,
     pub port: u16,
+    /// Inclusive last port of the claim; equals `port` for a single port.
+    pub port_end: u16,
     pub protocol: PortProtocol,
     pub label: Option<String>,
     pub claimed_at_ms: u64,
@@ -49,6 +51,7 @@ pub struct NewPortReservation<'a> {
     pub tenant_id: TenantId,
     pub ip_address: Option<&'a str>,
     pub port: u16,
+    pub port_end: u16,
     pub protocol: PortProtocol,
     pub label: Option<&'a str>,
     pub claimed_at_ms: u64,
@@ -67,6 +70,7 @@ impl Db {
             tenant_id: ActiveValue::Set(tenant_id_bytes(&row.tenant_id)),
             ip_address: ActiveValue::Set(row.ip_address.map(str::to_string)),
             port: ActiveValue::Set(i32::from(row.port)),
+            port_end: ActiveValue::Set(i32::from(row.port_end)),
             protocol: ActiveValue::Set(row.protocol.as_str().to_string()),
             label: ActiveValue::Set(row.label.map(str::to_string)),
             claimed_at_ms: ActiveValue::Set(row.claimed_at_ms.cast_signed()),
@@ -130,21 +134,46 @@ impl Db {
         Ok(row.try_get::<i64>("", "n")?)
     }
 
-    pub async fn tenant_owns_port(
+    /// True when one reservation covers all of `[start, end]`; two adjacent
+    /// ones that jointly cover it do not count.
+    pub async fn tenant_owns_port_span(
         &self,
         tenant_id: &TenantId,
-        port: u16,
+        start: u16,
+        end: u16,
         protocol: PortProtocol,
     ) -> anyhow::Result<bool> {
         let hit = port_reservations::Entity::find()
             .filter(port_reservations::Column::TenantId.eq(tenant_id_bytes(tenant_id)))
-            .filter(port_reservations::Column::Port.eq(i32::from(port)))
+            .filter(port_reservations::Column::Port.lte(i32::from(start)))
+            .filter(port_reservations::Column::PortEnd.gte(i32::from(end)))
             .filter(port_reservations::Column::Protocol.eq(protocol.as_str()))
             .one(&self.conn)
             .await?;
         Ok(hit.is_some())
     }
 
+    /// Reservations on `(ip, protocol)` overlapping `[start, end]`, any tenant.
+    pub async fn find_overlapping_reservations(
+        &self,
+        ip_address: Option<&str>,
+        protocol: PortProtocol,
+        start: u16,
+        end: u16,
+    ) -> anyhow::Result<Vec<PortReservationRow>> {
+        let mut query = port_reservations::Entity::find()
+            .filter(port_reservations::Column::Protocol.eq(protocol.as_str()))
+            .filter(port_reservations::Column::Port.lte(i32::from(end)))
+            .filter(port_reservations::Column::PortEnd.gte(i32::from(start)));
+        query = match ip_address {
+            Some(ip) => query.filter(port_reservations::Column::IpAddress.eq(ip)),
+            None => query.filter(port_reservations::Column::IpAddress.is_null()),
+        };
+        let rows = query.all(&self.conn).await?;
+        rows.into_iter().map(model_to_row).collect()
+    }
+
+    /// Reservations of `tenant_id` spanning `port`; any port of a range hits it.
     pub async fn find_port_reservations(
         &self,
         tenant_id: &TenantId,
@@ -153,7 +182,8 @@ impl Db {
     ) -> anyhow::Result<Vec<PortReservationRow>> {
         let rows = port_reservations::Entity::find()
             .filter(port_reservations::Column::TenantId.eq(tenant_id_bytes(tenant_id)))
-            .filter(port_reservations::Column::Port.eq(i32::from(port)))
+            .filter(port_reservations::Column::Port.lte(i32::from(port)))
+            .filter(port_reservations::Column::PortEnd.gte(i32::from(port)))
             .filter(port_reservations::Column::Protocol.eq(protocol.as_str()))
             .all(&self.conn)
             .await?;
@@ -172,6 +202,8 @@ fn model_to_row(model: port_reservations::Model) -> anyhow::Result<PortReservati
         .map_err(|_| anyhow::anyhow!("port_reservations.tenant_id in DB is not 32 bytes"))?;
     let port = u16::try_from(model.port)
         .map_err(|_| anyhow::anyhow!("port_reservations.port out of u16 range"))?;
+    let port_end = u16::try_from(model.port_end)
+        .map_err(|_| anyhow::anyhow!("port_reservations.port_end out of u16 range"))?;
     let protocol = PortProtocol::parse(&model.protocol)
         .ok_or_else(|| anyhow::anyhow!("unknown protocol in DB: {}", model.protocol))?;
     Ok(PortReservationRow {
@@ -179,6 +211,7 @@ fn model_to_row(model: port_reservations::Model) -> anyhow::Result<PortReservati
         tenant_id: TenantId::from_bytes(&tenant_arr),
         ip_address: model.ip_address,
         port,
+        port_end,
         protocol,
         label: model.label,
         claimed_at_ms: model.claimed_at_ms.cast_unsigned(),
@@ -203,6 +236,7 @@ mod tests {
             tenant_id: t,
             ip_address: None,
             port: 22000,
+            port_end: 22000,
             protocol: PortProtocol::Tcp,
             label: Some("ssh"),
             claimed_at_ms: 1_700_000_000,
@@ -219,6 +253,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn range_covers_every_port_it_spans() {
+        let db = temp_db().await;
+        let t = tenant();
+        db.insert_port_reservation(&NewPortReservation {
+            tenant_id: t,
+            ip_address: None,
+            port: 49160,
+            port_end: 49200,
+            protocol: PortProtocol::Udp,
+            label: Some("turn-relay"),
+            claimed_at_ms: 1,
+        })
+        .await
+        .unwrap();
+
+        for p in [49160, 49180, 49200] {
+            assert!(
+                db.tenant_owns_port_span(&t, p, p, PortProtocol::Udp)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert!(
+            db.tenant_owns_port_span(&t, 49160, 49200, PortProtocol::Udp)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.tenant_owns_port_span(&t, 49160, 49201, PortProtocol::Udp)
+                .await
+                .unwrap(),
+            "a span wider than the reservation is not covered"
+        );
+        assert!(
+            !db.tenant_owns_port_span(&t, 49159, 49159, PortProtocol::Udp)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !db.tenant_owns_port_span(&t, 49180, 49180, PortProtocol::Tcp)
+                .await
+                .unwrap(),
+            "protocols are separate namespaces"
+        );
+    }
+
+    #[tokio::test]
+    async fn overlap_lookup_catches_partial_and_covering_claims() {
+        let db = temp_db().await;
+        db.insert_port_reservation(&NewPortReservation {
+            tenant_id: tenant(),
+            ip_address: None,
+            port: 49160,
+            port_end: 49200,
+            protocol: PortProtocol::Udp,
+            label: None,
+            claimed_at_ms: 1,
+        })
+        .await
+        .unwrap();
+
+        let overlaps = async |start: u16, end: u16, protocol: PortProtocol| {
+            !db.find_overlapping_reservations(None, protocol, start, end)
+                .await
+                .unwrap()
+                .is_empty()
+        };
+
+        assert!(overlaps(49180, 49180, PortProtocol::Udp).await, "inside");
+        assert!(overlaps(49150, 49165, PortProtocol::Udp).await, "head");
+        assert!(overlaps(49190, 49210, PortProtocol::Udp).await, "tail");
+        assert!(overlaps(49100, 49300, PortProtocol::Udp).await, "covering");
+        assert!(!overlaps(49201, 49300, PortProtocol::Udp).await, "after");
+        assert!(!overlaps(49100, 49159, PortProtocol::Udp).await, "before");
+        assert!(
+            !overlaps(49180, 49180, PortProtocol::Tcp).await,
+            "other protocol"
+        );
+        assert!(
+            db.find_overlapping_reservations(Some("203.0.113.1"), PortProtocol::Udp, 49180, 49180)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a per-IP claim does not collide with the shared pool"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_and_delete_range_by_inner_port() {
+        let db = temp_db().await;
+        let t = tenant();
+        db.insert_port_reservation(&NewPortReservation {
+            tenant_id: t,
+            ip_address: None,
+            port: 49160,
+            port_end: 49200,
+            protocol: PortProtocol::Udp,
+            label: None,
+            claimed_at_ms: 1,
+        })
+        .await
+        .unwrap();
+
+        let rows = db
+            .find_port_reservations(&t, 49180, PortProtocol::Udp)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].port, rows[0].port_end), (49160, 49200));
+
+        assert!(
+            db.delete_port_reservation(&t, None, rows[0].port, PortProtocol::Udp)
+                .await
+                .unwrap()
+        );
+        assert!(db.list_port_reservations(None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn duplicate_shared_slot_rejected() {
         let db = temp_db().await;
         let t1 = tenant();
@@ -227,6 +380,7 @@ mod tests {
             tenant_id: t1,
             ip_address: None,
             port: 22000,
+            port_end: 22000,
             protocol: PortProtocol::Tcp,
             label: None,
             claimed_at_ms: 1,
@@ -239,6 +393,7 @@ mod tests {
                 tenant_id: t2,
                 ip_address: None,
                 port: 22000,
+                port_end: 22000,
                 protocol: PortProtocol::Tcp,
                 label: None,
                 claimed_at_ms: 2,
@@ -256,6 +411,7 @@ mod tests {
             tenant_id: t,
             ip_address: None,
             port: 53,
+            port_end: 53,
             protocol: PortProtocol::Tcp,
             label: None,
             claimed_at_ms: 1,
@@ -266,6 +422,7 @@ mod tests {
             tenant_id: t,
             ip_address: None,
             port: 53,
+            port_end: 53,
             protocol: PortProtocol::Udp,
             label: None,
             claimed_at_ms: 2,
@@ -328,6 +485,7 @@ mod tests {
             tenant_id: t1,
             ip_address: None,
             port: 30_000,
+            port_end: 30_000,
             protocol: PortProtocol::Tcp,
             label: None,
             claimed_at_ms: 1,
@@ -338,6 +496,7 @@ mod tests {
             tenant_id: t2,
             ip_address: None,
             port: 30_001,
+            port_end: 30_001,
             protocol: PortProtocol::Tcp,
             label: None,
             claimed_at_ms: 1,
@@ -348,6 +507,7 @@ mod tests {
             tenant_id: t_other,
             ip_address: None,
             port: 30_002,
+            port_end: 30_002,
             protocol: PortProtocol::Tcp,
             label: None,
             claimed_at_ms: 1,
@@ -374,6 +534,7 @@ mod tests {
             tenant_id: t1,
             ip_address: None,
             port: 22000,
+            port_end: 22000,
             protocol: PortProtocol::Tcp,
             label: None,
             claimed_at_ms: 1,
@@ -447,6 +608,7 @@ mod tests {
             tenant_id: tenant_kp.id(),
             ip_address: None,
             port: 22000,
+            port_end: 22000,
             protocol: PortProtocol::Tcp,
             label: Some("ssh"),
             claimed_at_ms: now_ms_u,

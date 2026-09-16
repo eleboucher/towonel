@@ -1801,7 +1801,7 @@ async fn upsert_udp_range_same_tenant_republish_updates() {
 }
 
 #[tokio::test]
-async fn upsert_udp_range_rejected_when_reservations_required() {
+async fn upsert_udp_range_requires_covering_reservation() {
     let hub = TestHub::start_with_quota(true, 0).await;
     let client = reqwest::Client::new();
     let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
@@ -1821,7 +1821,67 @@ async fn upsert_udp_range_rejected_when_reservations_required() {
     )
     .await;
     assert_eq!(status, 403, "got body: {body}");
-    assert_eq!(body["error"]["code"], "udp_range_not_reservable");
+    assert_eq!(body["error"]["code"], "port_not_reserved");
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "udp", "port_start": 49160, "port_end": 49200}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "reserve failed: {body}");
+    assert_eq!(body["port"], 49160);
+    assert_eq!(body["port_end"], 49200);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        2,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "relay".into(),
+            port_start: 49160,
+            port_end: 49200,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+}
+
+#[tokio::test]
+async fn single_port_reservation_does_not_cover_a_range() {
+    let hub = TestHub::start_with_quota(true, 0).await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "alice", &["app.alice.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "udp", "preferred": 49500}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "reserve failed: {body}");
+    assert_eq!(body["port_end"], 49500);
+
+    let (status, body) = submit_entry(
+        &client,
+        &hub,
+        &tenant,
+        1,
+        ConfigOp::UpsertUdpServiceRange {
+            service: "relay".into(),
+            port_start: 49480,
+            port_end: 49520,
+            idle_timeout_secs: None,
+        },
+    )
+    .await;
+    assert_eq!(status, 403, "got body: {body}");
+    assert_eq!(body["error"]["code"], "port_not_reserved");
 }
 
 #[tokio::test]
@@ -3564,6 +3624,15 @@ async fn delete_port_rejected_while_service_bound() {
         .await
         .expect("insert_tenant_ownership");
 
+    let (status, body) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "tcp", "preferred": 22300}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "reserve failed: {body}");
+
     // Simulate a live TCP service entry bound to the port for this tenant.
     let mut index = super::api::PortIndex::default();
     index.tcp.insert(22300, (tenant.id(), "web".to_string()));
@@ -3685,6 +3754,147 @@ async fn chosen_port_fails_when_no_edge_ip() {
     .await;
     assert_eq!(status, 503, "{body}");
     assert_eq!(body["error"]["code"], "no_assignable_ip");
+}
+
+#[tokio::test]
+async fn reserve_udp_range_blocks_overlapping_claims() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "range-tenant", &["a.range.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let url = hub.url(&format!("/v1/tenants/{}/ports", tenant.id()));
+
+    let (status, body) = post_json(
+        &client,
+        &url,
+        json!({"protocol": "udp", "port_start": 49160, "port_end": 49200, "label": "turn-relay"}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "reserve failed: {body}");
+    assert_eq!(body["port"], 49160);
+    assert_eq!(body["port_end"], 49200);
+
+    let (status, body) = post_json(
+        &client,
+        &url,
+        json!({"protocol": "udp", "preferred": 49180}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 409, "got body: {body}");
+    assert_eq!(body["error"]["code"], "port_in_use");
+
+    let (status, body) = post_json(
+        &client,
+        &url,
+        json!({"protocol": "udp", "port_start": 49190, "port_end": 49210}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 409, "got body: {body}");
+
+    // TCP is a separate namespace, so the same span is free there.
+    let (status, body) = post_json(
+        &client,
+        &url,
+        json!({"protocol": "tcp", "preferred": 49180}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "got body: {body}");
+}
+
+#[tokio::test]
+async fn reserve_range_rejects_tcp_and_oversized_spans() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "range-reject", &["a.reject.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let url = hub.url(&format!("/v1/tenants/{}/ports", tenant.id()));
+
+    for body in [
+        json!({"protocol": "tcp", "port_start": 49160, "port_end": 49200}),
+        json!({"protocol": "udp", "port_start": 49200, "port_end": 49160}),
+        json!({"protocol": "udp", "port_start": 49160}),
+        json!({"protocol": "udp", "port_start": 49160, "port_end": 49200, "preferred": 49160}),
+        // Default TOWONEL_HUB_MAX_UDP_PORT_RANGE is 512.
+        json!({"protocol": "udp", "port_start": 40000, "port_end": 41000}),
+        // Covers 51820, reserved by the edge.
+        json!({"protocol": "udp", "port_start": 51810, "port_end": 51830}),
+    ] {
+        let (status, resp) = post_json(&client, &url, body.clone(), Some(OPERATOR_KEY)).await;
+        assert_eq!(status, 400, "expected 400 for {body}, got {resp}");
+    }
+}
+
+#[tokio::test]
+async fn release_range_by_any_port_inside_it() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "range-release", &["a.rel.test"]).await;
+    let tenant = tenant_from_token(&token);
+    let url = hub.url(&format!("/v1/tenants/{}/ports", tenant.id()));
+
+    let (status, _) = post_json(
+        &client,
+        &url,
+        json!({"protocol": "udp", "port_start": 49160, "port_end": 49200}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    let (status, body) = delete_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports/udp/49180", tenant.id())),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200, "got body: {body}");
+
+    let (status, body) = get_json(&client, &url, Some(OPERATOR_KEY)).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        body["ports"].as_array().unwrap().len(),
+        0,
+        "the whole range should be gone: {body}"
+    );
+}
+
+#[tokio::test]
+async fn available_ports_skips_a_reserved_range() {
+    let hub = TestHub::start().await;
+    let client = reqwest::Client::new();
+    let token = create_invite(&hub, &client, "avail-range", &["a.ar.test"]).await;
+    let tenant = tenant_from_token(&token);
+
+    let (status, body) = post_json(
+        &client,
+        &hub.url(&format!("/v1/tenants/{}/ports", tenant.id())),
+        json!({"protocol": "udp", "port_start": 10_000, "port_end": 10_010}),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 201, "reserve failed: {body}");
+
+    let (status, body) = get_json(
+        &client,
+        &hub.url("/v1/ports/available?protocol=udp&count=5"),
+        Some(OPERATOR_KEY),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let ports: Vec<u16> = body["ports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| u16::try_from(v.as_u64().unwrap()).unwrap())
+        .collect();
+    assert!(
+        ports.iter().all(|p| !(10_000..=10_010).contains(p)),
+        "reserved range leaked into available list: {ports:?}"
+    );
 }
 
 #[tokio::test]

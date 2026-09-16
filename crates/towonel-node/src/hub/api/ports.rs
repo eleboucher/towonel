@@ -34,6 +34,13 @@ pub(super) struct ReservePortRequest {
     ip: Option<String>,
     #[serde(default)]
     preferred: Option<u16>,
+    /// First port of a contiguous claim; set with `port_end` instead of
+    /// `preferred`. UDP only — only a UDP service can serve a range.
+    #[serde(default)]
+    port_start: Option<u16>,
+    /// Inclusive last port of the claim.
+    #[serde(default)]
+    port_end: Option<u16>,
     #[serde(default)]
     label: Option<String>,
 }
@@ -48,6 +55,7 @@ struct EdgeInfo {
 struct ReservePortResponse {
     status: &'static str,
     port: u16,
+    port_end: u16,
     protocol: String,
     ip: Option<String>,
     label: Option<String>,
@@ -59,6 +67,7 @@ struct ReservePortResponse {
 #[derive(Debug, Serialize, ToSchema)]
 struct PortRow {
     port: u16,
+    port_end: u16,
     protocol: String,
     ip: Option<String>,
     label: Option<String>,
@@ -69,6 +78,7 @@ impl From<PortReservationRow> for PortRow {
     fn from(row: PortReservationRow) -> Self {
         Self {
             port: row.port,
+            port_end: row.port_end,
             protocol: row.protocol.as_str().to_string(),
             ip: row.ip_address,
             label: row.label,
@@ -81,6 +91,7 @@ impl From<PortReservationRow> for PortRow {
 struct PortRowWithTenant {
     tenant_id: String,
     port: u16,
+    port_end: u16,
     protocol: String,
     ip: Option<String>,
     label: Option<String>,
@@ -92,6 +103,7 @@ impl From<PortReservationRow> for PortRowWithTenant {
         Self {
             tenant_id: row.tenant_id.to_string(),
             port: row.port,
+            port_end: row.port_end,
             protocol: row.protocol.as_str().to_string(),
             ip: row.ip_address,
             label: row.label,
@@ -107,8 +119,8 @@ impl From<PortReservationRow> for PortRowWithTenant {
     params(("id" = String, Path, description = "Tenant id")),
     request_body = ReservePortRequest,
     responses(
-        (status = 201, description = "Port reserved", body = ReservePortResponse),
-        (status = 400, description = "Invalid tenant id, protocol, or port"),
+        (status = 201, description = "Port (or range) reserved", body = ReservePortResponse),
+        (status = 400, description = "Invalid tenant id, protocol, port, or range"),
         (status = 403, description = "Not authorized for this tenant, or quota exceeded"),
         (status = 409, description = "Port already in use / pool exhausted"),
     ),
@@ -134,6 +146,11 @@ pub(super) async fn post_port(
 
     let Some(protocol) = PortProtocol::parse(&req.protocol) else {
         return invalid_request("protocol must be \"tcp\" or \"udp\"");
+    };
+
+    let span = match requested_span(&state, &req, protocol) {
+        Ok(span) => span,
+        Err(resp) => return resp,
     };
 
     if let Some(p) = req.preferred
@@ -165,10 +182,17 @@ pub(super) async fn post_port(
         Ok(r) => r,
         Err(resp) => return resp,
     };
-    let (selected_ip, port) = match select_ip_and_port(&state, &req, protocol, &allowed).await {
-        Ok(result) => result,
-        Err(resp) => return resp,
-    };
+    let (selected_ip, port, port_end) =
+        match pick_slot(&state, &req, span, protocol, &allowed).await {
+            Ok(slot) => slot,
+            Err(resp) => return resp,
+        };
+
+    if let Some(resp) =
+        reject_overlap(&state, selected_ip.as_deref(), protocol, port, port_end).await
+    {
+        return resp;
+    }
 
     let label = req.label;
     let claimed_at_ms = now_ms();
@@ -176,6 +200,7 @@ pub(super) async fn post_port(
         tenant_id,
         ip_address: selected_ip.as_deref(),
         port,
+        port_end,
         protocol,
         label: label.as_deref(),
         claimed_at_ms,
@@ -187,6 +212,7 @@ pub(super) async fn post_port(
             ReservePortResponse {
                 status: "ok",
                 port,
+                port_end,
                 protocol: protocol.as_str().to_string(),
                 ip: selected_ip,
                 label,
@@ -196,7 +222,11 @@ pub(super) async fn post_port(
         ),
         Err(e) if crate::hub::db::is_unique_violation(&e) => conflict(
             "port_in_use",
-            format!("{} port {port} is already reserved", protocol.as_str()),
+            format!(
+                "{} {} is already reserved",
+                protocol.as_str(),
+                span_label(port, port_end)
+            ),
         ),
         Err(e) => {
             warn!(error = %e, "insert_port_reservation failed");
@@ -283,7 +313,7 @@ pub(super) async fn list_all_ports(
     params(
         ("id" = String, Path, description = "Tenant id"),
         ("proto" = String, Path, description = "`tcp` or `udp`"),
-        ("port" = u16, Path, description = "Reserved port number"),
+        ("port" = u16, Path, description = "Reserved port number; any port inside a range releases the whole range"),
     ),
     responses(
         (status = 200, description = "Reservation released"),
@@ -309,28 +339,6 @@ pub(super) async fn delete_port(
         return invalid_request("protocol must be \"tcp\" or \"udp\"");
     };
 
-    // Refuse to release the reservation while a service entry is still bound to
-    // this port. Dropping the reservation alone leaves the route live but
-    // unreserved, so another tenant could reserve a port we're still serving.
-    let index = state.port_index.load();
-    let bound = match protocol {
-        PortProtocol::Tcp => index.tcp.get(&port),
-        PortProtocol::Udp => index.udp.get(&port),
-    };
-    if let Some((bound_tenant, service)) = bound
-        && *bound_tenant == tenant_id
-    {
-        return conflict(
-            "port_in_use",
-            format!(
-                "{} port {port} is still bound to service `{service}`; delete the \
-                 service entry before releasing the reservation",
-                protocol.as_str(),
-            ),
-        );
-    }
-    drop(index);
-
     let reservations = match state
         .db
         .find_port_reservations(&tenant_id, port, protocol)
@@ -344,10 +352,34 @@ pub(super) async fn delete_port(
         }
     };
 
+    // Dropping the reservation while a service is still bound leaves the route
+    // live but unreserved, so another tenant could take a port we're serving.
+    let index = state.port_index.load();
+    for r in &reservations {
+        let map = match protocol {
+            PortProtocol::Tcp => &index.tcp,
+            PortProtocol::Udp => &index.udp,
+        };
+        if let Some((bound_port, (_, service))) = map
+            .range(r.port..=r.port_end)
+            .find(|(_, (bound_tenant, _))| *bound_tenant == tenant_id)
+        {
+            return conflict(
+                "port_in_use",
+                format!(
+                    "{} port {bound_port} is still bound to service `{service}`; delete the \
+                     service entry before releasing the reservation",
+                    protocol.as_str(),
+                ),
+            );
+        }
+    }
+    drop(index);
+
     for r in &reservations {
         if let Err(e) = state
             .db
-            .delete_port_reservation(&tenant_id, r.ip_address.as_deref(), port, protocol)
+            .delete_port_reservation(&tenant_id, r.ip_address.as_deref(), r.port, protocol)
             .await
         {
             warn!(error = %e, "delete_port_reservation failed");
@@ -466,7 +498,7 @@ pub(super) async fn get_available_ports(
         existing
             .into_iter()
             .filter(|r| r.protocol == protocol && r.ip_address.is_none())
-            .map(|r| r.port)
+            .flat_map(|r| r.port..=r.port_end)
             .collect()
     } else {
         existing
@@ -477,7 +509,7 @@ pub(super) async fn get_available_ports(
                         .as_deref()
                         .is_some_and(|ip| ips.iter().any(|i| i == ip))
             })
-            .map(|r| r.port)
+            .flat_map(|r| r.port..=r.port_end)
             .collect()
     };
 
@@ -492,6 +524,178 @@ pub(super) async fn get_available_ports(
         range_end: AUTO_PICK_END,
         ports,
     })
+}
+
+/// The unique index only collides on an identical start port, so overlap with
+/// an existing range is caught here, under the per-protocol port lock.
+async fn reject_overlap(
+    state: &Arc<AppState>,
+    ip: Option<&str>,
+    protocol: PortProtocol,
+    start: u16,
+    end: u16,
+) -> Option<Response> {
+    match state
+        .db
+        .find_overlapping_reservations(ip, protocol, start, end)
+        .await
+    {
+        Ok(rows) => rows.first().map(|r| {
+            conflict(
+                "port_in_use",
+                format!(
+                    "{} {} overlaps the reservation for {}",
+                    protocol.as_str(),
+                    span_label(start, end),
+                    span_label(r.port, r.port_end),
+                ),
+            )
+        }),
+        Err(e) => {
+            warn!(error = %e, "find_overlapping_reservations failed");
+            Some(internal_error())
+        }
+    }
+}
+
+fn span_label(start: u16, end: u16) -> String {
+    if start == end {
+        start.to_string()
+    } else {
+        format!("{start}-{end}")
+    }
+}
+
+/// `Ok(None)` for a single-port request. Ranges are UDP-only (only
+/// `UpsertUdpServiceRange` serves one) and share its `max_udp_port_range`.
+fn requested_span(
+    state: &AppState,
+    req: &ReservePortRequest,
+    protocol: PortProtocol,
+) -> Result<Option<(u16, u16)>, Response> {
+    let (start, end) = match (req.port_start, req.port_end) {
+        (None, None) => return Ok(None),
+        (Some(start), Some(end)) => (start, end),
+        _ => {
+            return Err(invalid_request(
+                "port_start and port_end must be set together",
+            ));
+        }
+    };
+    if req.preferred.is_some() {
+        return Err(invalid_request(
+            "preferred cannot be combined with port_start/port_end",
+        ));
+    }
+    if protocol != PortProtocol::Udp {
+        return Err(invalid_request(
+            "port ranges are reservable for udp only; tcp services claim a single port",
+        ));
+    }
+    if end < start {
+        return Err(invalid_request(format!(
+            "port_end {end} must be >= port_start {start}"
+        )));
+    }
+    let count = u32::from(end - start) + 1;
+    if count > u32::from(state.max_udp_port_range) {
+        return Err(invalid_request(format!(
+            "range {start}-{end} spans {count} ports, over the limit of {}",
+            state.max_udp_port_range
+        )));
+    }
+    if let Err(msg) = validate_port_allowed(start) {
+        return Err(invalid_request(msg));
+    }
+    if let Some(p) = HUB_RESERVED_PORTS
+        .iter()
+        .find(|p| (start..=end).contains(p))
+    {
+        return Err(invalid_request(format!(
+            "range {start}-{end} covers port {p}, which is reserved by the hub/edge"
+        )));
+    }
+    Ok(Some((start, end)))
+}
+
+async fn pick_slot(
+    state: &Arc<AppState>,
+    req: &ReservePortRequest,
+    span: Option<(u16, u16)>,
+    protocol: PortProtocol,
+    allowed_regions: &[String],
+) -> Result<(Option<String>, u16, u16), Response> {
+    if let Some((start, end)) = span {
+        let ip = pick_ip_for_span(
+            state,
+            protocol,
+            req.ip.as_deref(),
+            start,
+            end,
+            allowed_regions,
+        )
+        .await?;
+        return Ok((ip, start, end));
+    }
+    let (ip, port) = select_ip_and_port(state, req, protocol, allowed_regions).await?;
+    Ok((ip, port, port))
+}
+
+/// The requested IP when given, else the first in-region edge IP with the
+/// whole span free. `None` is the shared pool of setups without public IPs.
+async fn pick_ip_for_span(
+    state: &Arc<AppState>,
+    protocol: PortProtocol,
+    requested_ip: Option<&str>,
+    start: u16,
+    end: u16,
+    allowed_regions: &[String],
+) -> Result<Option<String>, Response> {
+    let region_ips = available_ips_in_regions(state, allowed_regions);
+    let any_ips = !available_ips(state).is_empty();
+
+    if let Some(ip) = requested_ip {
+        if any_ips && !region_ips.iter().any(|i| i == ip) {
+            return Err(invalid_request(format!(
+                "ip {ip} is not served by any edge in the tenant's region; available: {}",
+                region_ips.join(", "),
+            )));
+        }
+        return Ok(Some(ip.to_string()));
+    }
+
+    if region_ips.is_empty() {
+        if any_ips {
+            return Err(error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "no_assignable_ip",
+                format!(
+                    "no edge in the tenant's region currently advertises a public IP \
+                     to assign for {} {}; retry once the region's edge is back",
+                    protocol.as_str(),
+                    span_label(start, end),
+                ),
+            ));
+        }
+        return Ok(None);
+    }
+
+    let existing = load_reservations(state, "span ip pick").await?;
+    for ip in &region_ips {
+        let used = used_ports(&existing, protocol, Some(ip));
+        if (start..=end).all(|p| !used.contains(&p)) {
+            return Ok(Some(ip.clone()));
+        }
+    }
+
+    Err(conflict(
+        "port_in_use",
+        format!(
+            "{} {} is not free on any available IP in the tenant's region",
+            protocol.as_str(),
+            span_label(start, end),
+        ),
+    ))
 }
 
 fn validate_port_allowed(port: u16) -> Result<(), String> {
@@ -652,7 +856,7 @@ fn used_ports(
 ) -> std::collections::HashSet<u16> {
     rows.iter()
         .filter(|r| r.protocol == protocol && r.ip_address.as_deref() == ip)
-        .map(|r| r.port)
+        .flat_map(|r| r.port..=r.port_end)
         .collect()
 }
 
@@ -736,7 +940,10 @@ async fn pick_ip_for_port(
     let existing = load_reservations(state, "ip-for-port pick").await?;
     for ip in &ips {
         let taken = existing.iter().any(|r| {
-            r.protocol == protocol && r.port == port && r.ip_address.as_deref() == Some(ip.as_str())
+            r.protocol == protocol
+                && r.port <= port
+                && port <= r.port_end
+                && r.ip_address.as_deref() == Some(ip.as_str())
         });
         if !taken {
             return Ok(ip.clone());

@@ -251,8 +251,18 @@ TOWONEL_AGENT_UDP_SERVICES='[
 ```
 
 The hub caps a single range at `TOWONEL_HUB_MAX_UDP_PORT_RANGE` ports
-(default 512). Ranges are not available when
-`TOWONEL_HUB_PORTS_REQUIRE_RESERVATION` is on.
+(default 512). With `TOWONEL_HUB_PORTS_REQUIRE_RESERVATION` on, reserve the
+block first. One reservation must cover the whole range; two adjacent
+reservations don't count. Ranges are reservable for UDP only:
+
+```bash
+curl -X POST "$HUB/v1/tenants/$TENANT/ports" \
+  -H "Authorization: Bearer $API_KEY" \
+  -d '{"protocol":"udp","port_start":49160,"port_end":49660,"label":"turn-relay"}'
+```
+
+Any port inside the block releases it: `DELETE
+/v1/tenants/$TENANT/ports/udp/49200` frees the whole reservation.
 
 ### TURN behind towonel (coturn)
 
@@ -466,7 +476,7 @@ identity at startup.
 | `TOWONEL_HUB_DB_DSN`                 | `${DATA_DIR}/hub.db` or `hub.db` (sqlite)    | Connection string. **Required** for `postgres`                               |
 | `TOWONEL_HUB_DB_MAX_OPEN_CONNS`      | `4` / `25`                                   | Pool size                                                                    |
 | `TOWONEL_HUB_ALLOW_PRIVILEGED_PORTS` | `false`                                      | Allow tenants to claim TCP/UDP ports below 1024                              |
-| `TOWONEL_HUB_MAX_UDP_PORT_RANGE`     | `512`                                        | Largest UDP port range a tenant may claim in one `listen_port_range`         |
+| `TOWONEL_HUB_MAX_UDP_PORT_RANGE`     | `512`                                        | Largest UDP port range a tenant may claim in one `listen_port_range` or port reservation |
 | `TOWONEL_HUB_KEK`                    | derived from `HUB_KEK_PATH`                  | 32-byte hex KEK that seals hub signing-key seeds. Must match across all hubs in a cluster |
 | `TOWONEL_HUB_KEK_PATH`               | `${DATA_DIR}/hub_kek.key`                    | Where the hub reads/generates the KEK                                        |
 | `TOWONEL_HUB_LINK_LISTEN_ADDR`       |                                              | Bind address for the optional hub↔edge control link (see [Hub↔edge control link](#hubedge-control-link)) |
